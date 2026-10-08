@@ -38,12 +38,14 @@ pub fn create_provider(config: &ModelConfig) -> Result<Box<dyn ModelProvider>> {
         "openai" => Ok(Box::new(
             OpenAiProvider::new(base_url, require_api_key(config)?)
                 .with_reasoning_effort(config.reasoning_effort.clone())
-                .with_reasoning_model(config.reasoning_model),
+                .with_reasoning_model(config.reasoning_model)
+                .with_output_limit(config.max_tokens),
         )),
-        "deepseek" => Ok(Box::new(OpenAiProvider::new(
-            base_url,
-            require_api_key(config)?,
-        ))),
+        "deepseek" => Ok(Box::new(
+            OpenAiProvider::new(base_url, require_api_key(config)?)
+                .with_deepseek_defaults()
+                .with_output_limit(config.max_tokens),
+        )),
         "qwen" => Ok(Box::new(OpenAiProvider::new(
             base_url,
             require_api_key(config)?,
@@ -120,6 +122,7 @@ mod tests {
             base_url: None,
             reasoning_effort: None,
             reasoning_model: false,
+            max_tokens: None,
         }
     }
 

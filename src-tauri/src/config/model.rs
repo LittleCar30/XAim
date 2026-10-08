@@ -27,6 +27,8 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     pub reasoning_effort: Option<String>,
     pub reasoning_model: bool,
+    /// Explicit output budget from the saved model settings.
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for ModelConfig {
@@ -38,6 +40,7 @@ impl Default for ModelConfig {
             base_url: None,
             reasoning_effort: None,
             reasoning_model: false,
+            max_tokens: None,
         }
     }
 }
@@ -52,6 +55,7 @@ impl From<crate::types::ModelConfig> for ModelConfig {
             base_url: config.base_url,
             reasoning_effort: None,
             reasoning_model: false,
+            max_tokens: config.max_tokens,
         }
     }
 }
@@ -179,6 +183,7 @@ mod tests {
             base_url: Some("http://127.0.0.1:9000/v1".to_string()),
             reasoning_effort: None,
             reasoning_model: false,
+            max_tokens: Some(1024),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: ModelConfig = serde_json::from_str(&json).unwrap();
@@ -209,6 +214,7 @@ mod tests {
             max_tokens: Some(1024),
         };
         let connection = ModelConfig::from(ipc);
+        assert_eq!(connection.max_tokens, Some(1024));
         assert_eq!(connection.provider, "openai");
         assert_eq!(connection.api_key, "sk-test");
         assert_eq!(

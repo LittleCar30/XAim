@@ -419,13 +419,14 @@ impl Orchestrator {
                 &mut status,
                 TaskStatus::Generating,
                 "生成候选",
-                planner::generate_candidates_with_model(
+                planner::generate_candidates_in_workspace(
                     prompt,
                     &plan,
                     &context,
                     &model,
                     provider,
                     candidate_count,
+                    root,
                 ),
             )
             .await?;
@@ -1426,12 +1427,12 @@ mod tests {
     async fn empty_project_creates_html_after_correcting_output_and_can_rollback() {
         let dir = tempfile::tempdir().unwrap();
         let (store, project_id) = setup_project(dir.path());
-        let diff = "--- /dev/null\n+++ b/web/index.html\n@@ -0,0 +1,2 @@\n+<!doctype html>\n+<html><svg></svg></html>\n";
+        let files = r#"{"files":[{"path":"web/index.html","content":"<!doctype html>\n<html><svg></svg></html>\n"}]}"#;
         let provider = Arc::new(ScriptedProvider::new(&[
             r#"{"action":"add_feature","target":"web/index.html"}"#,
             r#"{"steps":[{"action":"modify","file":"web/index.html","reason":"新建动画页面"}],"files_to_modify":["web/index.html"],"risks":[]}"#,
             "<html><svg></svg></html>",
-            diff,
+            files,
             CONFIDENCE_JSON,
         ]));
         let sink = CollectSink::default();
@@ -1462,6 +1463,75 @@ mod tests {
         );
         orchestrator.rollback_task(task_id).await.unwrap();
         assert_eq!(task_status(&store, task_id), TaskStatus::RolledBack);
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    #[ignore = "Explicit live model check; uses the configured API and bills model tokens"]
+    async fn live_new_html_workflow() {
+        let database = std::env::var("XAIM_LIVE_MODEL_DATABASE").expect("explicit database path");
+        let conn = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let config_json: String = conn
+            .query_row(
+                "SELECT value FROM cache WHERE key='app:config'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let config: crate::types::Config = serde_json::from_str(&config_json).unwrap();
+        let prompt: String = conn
+            .query_row(
+                "SELECT prompt FROM tasks ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        let root = tempfile::tempdir().unwrap();
+        let (store, project_id) = setup_project(root.path());
+        let runtime = OrchestratorConfig {
+            model: ModelConfig::from(config.model.clone()),
+            router: RouterConfig {
+                fast_model: config.model.name.clone(),
+                strong_model: config.model.name.clone(),
+                ..Default::default()
+            },
+            candidate_count: 1,
+            ..Default::default()
+        };
+        let provider = crate::model::create_provider(&runtime.model).unwrap();
+        let orchestrator = Orchestrator::with_sink(
+            store.clone(),
+            runtime,
+            Arc::new(CollectSink::default()),
+            Arc::from(provider),
+        );
+        let task_id = orchestrator.run_task(project_id, prompt).await.unwrap();
+        assert_eq!(task_status(&store, task_id), TaskStatus::WaitingConfirm);
+        let patches = {
+            let conn = store.conn();
+            store::patch::list_patches_by_task(&conn, task_id).unwrap()
+        };
+        assert_eq!(patches.len(), 1);
+        assert!(!root.path().join(&patches[0].file_path).exists());
+        orchestrator.confirm_task(task_id).await.unwrap();
+        let target = root.path().join(&patches[0].file_path);
+        let html = fs::read_to_string(&target).unwrap();
+        assert!(html.contains("<html") && html.contains("<svg"));
+        if let Ok(output) = std::env::var("XAIM_LIVE_HTML_OUTPUT") {
+            fs::write(output, &html).unwrap();
+        }
+        println!(
+            "Live workflow passed: model={}, file={}, bytes={}",
+            config.model.name,
+            patches[0].file_path,
+            html.len()
+        );
+        orchestrator.rollback_task(task_id).await.unwrap();
         assert!(!target.exists());
     }
 

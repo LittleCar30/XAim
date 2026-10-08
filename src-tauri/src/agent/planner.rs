@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::Path;
 
 use crate::config::model::AppConfig;
 use crate::errors::{Result, XaimError};
@@ -9,7 +10,7 @@ use crate::model::provider::{CompletionRequest, Message, ModelProvider};
 use crate::model::router::{pick_model, TaskKind};
 use crate::prompts;
 use crate::search::context::Context;
-use crate::tools::patch::{parse_diff, PatchCandidate};
+use crate::tools::patch::{generate_diff, parse_diff, resolve_in_root, PatchCandidate};
 
 /// 意图解析允许的动作枚举，与 [`prompts::intent::SYSTEM`] 的输出格式一致。
 pub const ACTIONS: [&str; 8] = [
@@ -152,27 +153,68 @@ pub async fn generate_candidates_with_model(
     provider: &dyn ModelProvider,
     n: usize,
 ) -> Result<Vec<PatchCandidate>> {
+    generate_candidates_inner(task, plan, context, model, provider, n, None).await
+}
+
+pub async fn generate_candidates_in_workspace(
+    task: &str,
+    plan: &Plan,
+    context: &Context,
+    model: &str,
+    provider: &dyn ModelProvider,
+    n: usize,
+    root: &Path,
+) -> Result<Vec<PatchCandidate>> {
+    generate_candidates_inner(task, plan, context, model, provider, n, Some(root)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_candidates_inner(
+    task: &str,
+    plan: &Plan,
+    context: &Context,
+    model: &str,
+    provider: &dyn ModelProvider,
+    n: usize,
+    root: Option<&Path>,
+) -> Result<Vec<PatchCandidate>> {
     if n == 0 {
         return Ok(Vec::new());
     }
     let plan_text = format_plan(plan);
-    let user_message = prompts::modify::build(task, &plan_text, context);
+    let new_paths = match root {
+        Some(root) => planned_new_paths(plan, root)?,
+        None => Vec::new(),
+    };
+    let new_files_only = !new_paths.is_empty() && new_paths.len() == plan.files_to_modify.len();
+    let system = if new_files_only {
+        prompts::modify::NEW_FILES_SYSTEM
+    } else {
+        prompts::modify::SYSTEM
+    };
+    let user_message = if new_files_only {
+        format!(
+            "任务：{task}\n计划：\n{plan_text}\n上下文：{}\n这些路径已确认不存在：{}\n只输出包含完整文件内容的 JSON。",
+            prompts::plan::format_context(context),
+            new_paths.join(", ")
+        )
+    } else {
+        prompts::modify::build(task, &plan_text, context)
+    };
 
     let attempts = (0..n).map(|index| {
         let user_message = user_message.clone();
+        let new_paths = &new_paths;
         async move {
             let mut request = CompletionRequest::new(
                 model,
-                vec![
-                    Message::system(prompts::modify::SYSTEM),
-                    Message::user(user_message),
-                ],
+                vec![Message::system(system), Message::user(user_message)],
             );
             request.temperature = candidate_temperature(index);
             let response = provider.complete(request).await?;
             Ok::<_, XaimError>((
                 response.content.clone(),
-                parse_candidate_output(&response.content),
+                parse_candidate_response(&response.content, new_paths),
             ))
         }
     });
@@ -208,18 +250,24 @@ pub async fn generate_candidates_with_model(
             let request = CompletionRequest::new(
                 model,
                 vec![
-                    Message::system(prompts::modify::SYSTEM),
+                    Message::system(system),
                     Message::user(user_message),
                     Message::assistant(output),
-                    Message::user(format!(
+                    Message::user(if new_files_only {
+                        format!(
+                        "上次输出无法解析：{reason}。请只输出 {{\"files\":[{{\"path\":\"计划路径\",\"content\":\"完整源码\"}}]}}。不要输出 diff、解释或占位符。"
+                    )
+                    } else {
+                        format!(
                         "上次输出无法作为补丁解析：{reason}。请重新输出完整、合法的 unified diff。\
                      新文件必须使用 --- /dev/null、+++ b/项目相对路径、@@ -0,0 +1,N @@，\
                      所有正文行前加 + 并准确计算 N。不要直接输出 HTML 或代码块。"
-                    )),
+                    )
+                    }),
                 ],
             );
             match provider.complete(request).await {
-                Ok(response) => match parse_candidate_output(&response.content) {
+                Ok(response) => match parse_candidate_response(&response.content, &new_paths) {
                     Ok(parsed) => candidates.extend(parsed),
                     Err(error) => failures.push(error.to_string()),
                 },
@@ -237,6 +285,76 @@ pub async fn generate_candidates_with_model(
         return Err(XaimError::Model(format!(
             "候选生成失败：{n} 个候选均未产出有效补丁{correction}。最后一次原因：{reason}"
         )));
+    }
+    Ok(candidates)
+}
+
+fn planned_new_paths(plan: &Plan, root: &Path) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for path in &plan.files_to_modify {
+        let target = resolve_in_root(root, path)?;
+        match std::fs::symlink_metadata(target) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => paths.push(path.clone()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(paths)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedFiles {
+    files: Vec<GeneratedFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratedFile {
+    path: String,
+    content: String,
+}
+
+fn parse_candidate_response(output: &str, new_paths: &[String]) -> Result<Vec<PatchCandidate>> {
+    if output.trim().is_empty() {
+        return Err(XaimError::Model("模型返回空正文，未生成代码".into()));
+    }
+    let trimmed = output.trim();
+    if new_paths.is_empty()
+        || !(trimmed.starts_with('{')
+            || trimmed.starts_with("```json")
+            || trimmed.starts_with("```\n{"))
+    {
+        return parse_candidate_output(output);
+    }
+    let json = trimmed
+        .strip_prefix("```json\n")
+        .or_else(|| trimmed.strip_prefix("```\n"))
+        .and_then(|text| text.strip_suffix("```"))
+        .unwrap_or(trimmed)
+        .trim();
+    let files: GeneratedFiles = serde_json::from_str(json)
+        .map_err(|error| XaimError::Model(format!("新文件 JSON 格式无效: {error}")))?;
+    if files.files.is_empty() {
+        return Err(XaimError::Model("新文件输出 files 为空".into()));
+    }
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    for file in files.files {
+        if !new_paths.contains(&file.path) || !seen.insert(file.path.clone()) {
+            return Err(XaimError::Security(format!(
+                "模型输出路径未获准新建或重复: {}",
+                file.path
+            )));
+        }
+        if file.content.trim().is_empty() {
+            return Err(XaimError::Model(format!("{}: 新文件内容为空", file.path)));
+        }
+        let diff = generate_diff("", &file.content, &file.path);
+        let (_, body) = diff
+            .split_once('\n')
+            .ok_or_else(|| XaimError::Model("无法生成新文件补丁".into()))?;
+        candidates.extend(parse_candidate_output(&format!("--- /dev/null\n{body}"))?);
     }
     Ok(candidates)
 }
@@ -1476,6 +1594,70 @@ mod tests {
             .unwrap();
         assert!(candidates.is_empty());
         assert_eq!(provider.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn new_html_json_is_converted_to_patch_for_a_confirmed_absent_path() {
+        let root = tempfile::tempdir().unwrap();
+        let html = "<!doctype html>\n<html><style>svg { color: black; }</style><svg><!-- --- marker --></svg></html>";
+        let response =
+            serde_json::json!({"files":[{"path":"web/index.html","content":html}]}).to_string();
+        let provider = SeqProvider::new(&[&response]);
+        let plan = plan(
+            vec![step("modify", "web/index.html", "create")],
+            &["web/index.html"],
+            &[],
+        );
+        let candidates = generate_candidates_in_workspace(
+            "创建 HTML",
+            &plan,
+            &context(&[("package.json", "{\"type\":\"module\"}")]),
+            "selected",
+            &provider,
+            1,
+            root.path(),
+        )
+        .await
+        .unwrap();
+        assert!(provider.requested_messages(0)[0]
+            .content
+            .contains("文件生成器"));
+        assert!(provider.requested_messages(0)[1]
+            .content
+            .contains("{\"type\":\"module\"}"));
+        assert!(candidates[0].diff.starts_with("--- /dev/null\n"));
+        crate::tools::patch::apply_diff(&candidates[0].diff, root.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("web/index.html")).unwrap(),
+            html
+        );
+    }
+
+    #[test]
+    fn generated_file_json_rejects_unplanned_existing_duplicate_and_empty_content() {
+        let allowed = vec!["index.html".to_string()];
+        for output in [
+            r#"{"files":[{"path":"../outside.html","content":"hello"}]}"#,
+            r#"{"files":[{"path":"existing.html","content":"hello"}]}"#,
+            r#"{"files":[{"path":"index.html","content":"one"},{"path":"index.html","content":"two"}]}"#,
+            r#"{"files":[{"path":"index.html","content":""}]}"#,
+            r#"{"files":[]}"#,
+        ] {
+            assert!(parse_candidate_response(output, &allowed).is_err());
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("index.html"), "existing").unwrap();
+        let plan = plan(
+            vec![step("modify", "index.html", "edit")],
+            &["index.html"],
+            &[],
+        );
+        assert!(planned_new_paths(&plan, root.path()).unwrap().is_empty());
+        assert!(parse_candidate_response(
+            r#"{"files":[{"path":"index.html","content":"replace"}]}"#,
+            &[]
+        )
+        .is_err());
     }
 
     #[tokio::test]

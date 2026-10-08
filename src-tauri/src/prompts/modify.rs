@@ -36,6 +36,18 @@ pub const SYSTEM: &str = r#"你是 XAim，一个严谨的编程 Agent。
  context
 "#;
 
+/// New files are generated as content; the application computes exact diff line counts.
+pub const NEW_FILES_SYSTEM: &str = r#"你是 XAim 的文件生成器。根据任务和计划，生成新文件的完整内容。
+只输出一个 JSON 对象，格式：
+{"files":[{"path":"index.html","content":"<!doctype html>\n<html></html>\n"}]}
+规则：
+1. path 必须是计划中列出的项目相对路径，只创建新文件，不修改已有文件。
+2. content 包含完整可运行的源码，不要省略代码，不要输出省略号或占位符。
+3. 使用标准 JSON 转义引号和换行，不输出说明文字或 markdown 代码块。
+4. 程序会根据 content 自动计算 unified diff；你无需输出 diff 或计算行数。
+5. HTML 动画页面包含必要的 HTML、CSS、SVG 和脚本，避免依赖外部资源。
+"#;
+
 /// 渲染用户消息：任务 + 计划（[`crate::agent::planner::format_plan`] 的产物）
 /// + 上下文摘要（[`super::plan::format_context`]）。
 pub fn build(task: &str, plan: &str, context: &Context) -> String {

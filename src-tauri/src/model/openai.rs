@@ -33,6 +33,8 @@ pub struct OpenAiProvider {
     client: reqwest::Client,
     reasoning_effort: Option<String>,
     reasoning_model: bool,
+    deepseek: bool,
+    output_limit: Option<u32>,
 }
 
 impl OpenAiProvider {
@@ -48,6 +50,8 @@ impl OpenAiProvider {
             client,
             reasoning_effort: None,
             reasoning_model: false,
+            deepseek: false,
+            output_limit: None,
         }
     }
 
@@ -59,6 +63,45 @@ impl OpenAiProvider {
     pub fn with_reasoning_model(mut self, reasoning: bool) -> Self {
         self.reasoning_model = reasoning;
         self
+    }
+
+    pub fn with_deepseek_defaults(mut self) -> Self {
+        self.deepseek = true;
+        self
+    }
+
+    pub fn with_output_limit(mut self, limit: Option<u32>) -> Self {
+        self.output_limit = limit;
+        self
+    }
+
+    fn payload<'a>(&'a self, req: &'a CompletionRequest, stream: bool) -> WireRequest<'a> {
+        let mut payload = wire_request(req, stream);
+        let deepseek_thinking = self.deepseek
+            && matches!(
+                req.model.as_str(),
+                "deepseek-flash" | "deepseek-v4-pro" | "deepseek-reasoner"
+            );
+        let budget = self.output_limit.unwrap_or_else(|| {
+            if deepseek_thinking {
+                req.max_tokens.max(32_768)
+            } else {
+                req.max_tokens
+            }
+        });
+        if self.reasoning_model || self.reasoning_effort.is_some() {
+            payload.reasoning_effort = self.reasoning_effort.as_deref();
+            payload.temperature = None;
+            payload.max_tokens = None;
+            payload.max_completion_tokens = Some(budget);
+        } else {
+            payload.max_tokens = Some(budget);
+            if deepseek_thinking {
+                // DeepSeek uses max_tokens for thinking + answer; temperature is ignored.
+                payload.temperature = None;
+            }
+        }
+        payload
     }
 
     /// 构造时使用的 API 地址。
@@ -163,25 +206,42 @@ fn wire_request(req: &CompletionRequest, stream: bool) -> WireRequest<'_> {
 #[async_trait]
 impl ModelProvider for OpenAiProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
-        let mut payload = wire_request(&req, false);
-        if self.reasoning_model || self.reasoning_effort.is_some() {
-            payload.reasoning_effort = self.reasoning_effort.as_deref();
-            payload.temperature = None;
-            payload.max_tokens = None;
-            payload.max_completion_tokens = Some(req.max_tokens);
-        }
+        let payload = self.payload(&req, false);
         let resp = self
             .send_with_retries(&payload, Some(REQUEST_TIMEOUT))
             .await?;
         let body = resp.text().await?;
         let parsed: ChatCompletionResponse = serde_json::from_str(&body)
             .map_err(|e| XaimError::Model(format!("响应 JSON 解析失败: {e}; body: {body}")))?;
-        let content = parsed
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .ok_or_else(|| XaimError::Model(format!("响应缺少 message.content; body: {body}")))?;
+        let choice =
+            parsed.choices.into_iter().next().ok_or_else(|| {
+                XaimError::Model(format!("响应缺少 message.content; body: {body}"))
+            })?;
+        if choice.finish_reason.as_deref() == Some("length") {
+            let reasoning_tokens = parsed
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.completion_tokens_details.as_ref())
+                .and_then(|details| details.reasoning_tokens);
+            let detail = reasoning_tokens
+                .map(|tokens| format!("，其中思考消耗 {tokens} token"))
+                .unwrap_or_default();
+            return Err(XaimError::Model(format!(
+                "模型 {} 的响应达到输出上限（{} token{detail}），正文未完整生成。请提高模型设置中的最大 token 数。",
+                req.model, payload.max_tokens.or(payload.max_completion_tokens).unwrap_or(req.max_tokens)
+            )));
+        }
+        let content = choice
+            .message
+            .content
+            .ok_or_else(|| XaimError::Model("响应缺少 message.content".into()))?;
+        if content.trim().is_empty() {
+            return Err(XaimError::Model(format!(
+                "模型 {} 返回空正文（结束原因：{}），未生成代码。",
+                req.model,
+                choice.finish_reason.as_deref().unwrap_or("未知")
+            )));
+        }
         let usage = parsed
             .usage
             .map(|u| Usage::new(u.prompt_tokens, u.completion_tokens))
@@ -193,13 +253,7 @@ impl ModelProvider for OpenAiProvider {
         &self,
         req: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        let mut payload = wire_request(&req, true);
-        if self.reasoning_model || self.reasoning_effort.is_some() {
-            payload.reasoning_effort = self.reasoning_effort.as_deref();
-            payload.temperature = None;
-            payload.max_tokens = None;
-            payload.max_completion_tokens = Some(req.max_tokens);
-        }
+        let payload = self.payload(&req, true);
         let resp = self.send_with_retries(&payload, None).await?;
 
         let sse = Box::pin(resp.bytes_stream().eventsource());
@@ -272,6 +326,8 @@ struct ChatCompletionResponse {
 #[derive(Deserialize)]
 struct ResponseChoice {
     message: ResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -299,6 +355,13 @@ struct Delta {
 struct ApiUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokenDetails>,
+}
+
+#[derive(Deserialize)]
+struct CompletionTokenDetails {
+    reasoning_tokens: Option<u32>,
 }
 
 #[cfg(test)]
@@ -363,7 +426,7 @@ mod tests {
                 .complete(sample_request())
                 .await
                 .unwrap_err();
-            assert!(matches!(err, XaimError::Model(ref message) if message.contains(body)));
+            assert!(matches!(err, XaimError::Model(_)));
             mock.assert_async().await;
         }
     }
@@ -379,7 +442,7 @@ mod tests {
                 "temperature": 0.25, "max_tokens": 17, "stream": false
             })))
             .with_status(200)
-            .with_body(r#"{"choices":[{"message":{"content":""}}]}"#)
+            .with_body(r#"{"choices":[{"message":{"content":"done"}}]}"#)
             .create_async()
             .await;
         let provider = provider_with(format!("{}/v1///", server.url()));
@@ -387,9 +450,79 @@ mod tests {
         request.temperature = 0.25;
         request.max_tokens = 17;
         let response = provider.complete(request).await.unwrap();
-        assert_eq!(response.content, "");
+        assert_eq!(response.content, "done");
         assert_eq!(response.usage, Usage::default());
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reasoning_budget_exhaustion_reports_truncation_instead_of_empty_diff() {
+        for content in ["", "--- /dev/null\n+++ b/index.html\n"] {
+            let mut server = Server::new_async().await;
+            let mock = server.mock("POST", "/chat/completions")
+                .with_status(200)
+                .with_body(json!({"choices":[{"finish_reason":"length","message":{"content":content,"reasoning_content":"private thought"}}],
+                    "usage":{"prompt_tokens":10,"completion_tokens":4096,"completion_tokens_details":{"reasoning_tokens":4096}}}).to_string())
+                .expect(1).create_async().await;
+            let error = provider_with(server.url())
+                .complete(sample_request())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("达到输出上限"));
+            assert!(error.contains("思考消耗 4096"));
+            assert!(!error.contains("private thought"));
+            mock.assert_async().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_final_content_is_rejected_without_exposing_reasoning() {
+        let mut server = Server::new_async().await;
+        let mock = server.mock("POST", "/chat/completions").with_status(200)
+            .with_body(r#"{"choices":[{"finish_reason":"stop","message":{"content":"","reasoning_content":"private thought"}}]}"#)
+            .expect(1).create_async().await;
+        let error = provider_with(server.url())
+            .complete(sample_request())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("空正文"));
+        assert!(!error.contains("private thought"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn deepseek_thinking_default_budget_and_saved_limit_are_sent() {
+        for (model, limit, expected) in [
+            ("deepseek-flash", None, 32768),
+            ("deepseek-v4-pro", None, 32768),
+            ("deepseek-chat", None, 4096),
+            ("deepseek-flash", Some(8192), 8192),
+        ] {
+            let mut server = Server::new_async().await;
+            let mock = server
+                .mock("POST", "/chat/completions")
+                .match_body(Matcher::PartialJson(
+                    json!({"model":model,"max_tokens":expected}),
+                ))
+                .with_status(200)
+                .with_body(r#"{"choices":[{"finish_reason":"stop","message":{"content":"done"}}]}"#)
+                .expect(1)
+                .create_async()
+                .await;
+            let provider = provider_with(server.url())
+                .with_deepseek_defaults()
+                .with_output_limit(limit);
+            let request = CompletionRequest::new(model, vec![Message::user("hello")]);
+            if model != "deepseek-chat" {
+                let payload = serde_json::to_value(provider.payload(&request, false)).unwrap();
+                assert!(payload.get("temperature").is_none());
+                assert!(payload.get("max_completion_tokens").is_none());
+            }
+            provider.complete(request).await.unwrap();
+            mock.assert_async().await;
+        }
     }
 
     #[tokio::test]

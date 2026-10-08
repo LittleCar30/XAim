@@ -1,0 +1,23 @@
+{
+  "id": "003-fix-python-pagination",
+  "category": "bugfix",
+  "language": "Python",
+  "allowed": [
+    "pagination.py"
+  ],
+  "required": [
+    "pagination.py"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests"
+    ]
+  ],
+  "mutations": []
+}

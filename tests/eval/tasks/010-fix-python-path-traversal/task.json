@@ -1,0 +1,23 @@
+{
+  "id": "010-fix-python-path-traversal",
+  "category": "bugfix",
+  "language": "Python",
+  "allowed": [
+    "paths.py"
+  ],
+  "required": [
+    "paths.py"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests"
+    ]
+  ],
+  "mutations": []
+}

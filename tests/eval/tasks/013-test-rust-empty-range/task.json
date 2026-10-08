@@ -1,0 +1,48 @@
+{
+  "id": "013-test-rust-empty-range",
+  "category": "tests",
+  "language": "Rust",
+  "allowed": [
+    "tests/range.rs"
+  ],
+  "required": [
+    "tests/range.rs"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked"
+    ]
+  ],
+  "mutations": [
+    {
+      "name": "equal endpoints wrong",
+      "file": "src/lib.rs",
+      "before": "if start >= end { return Vec::new(); }",
+      "after": "if start == end { return vec![start]; }\n    if start > end { return Vec::new(); }",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked"
+      ],
+      "failure": "panicked at"
+    },
+    {
+      "name": "reversed endpoints wrong",
+      "file": "src/lib.rs",
+      "before": "if start >= end { return Vec::new(); }",
+      "after": "if start > end { return vec![start]; }\n    if start == end { return Vec::new(); }",
+      "command": [
+        "cargo",
+        "test",
+        "--offline",
+        "--locked"
+      ],
+      "failure": "panicked at"
+    }
+  ]
+}

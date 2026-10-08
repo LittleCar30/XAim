@@ -1,0 +1,31 @@
+{
+  "id": "016-refactor-ts-date",
+  "category": "refactor",
+  "language": "TS",
+  "allowed": [
+    "src/date.ts",
+    "src/app.ts",
+    "src/report.ts"
+  ],
+  "required": [
+    "src/date.ts",
+    "src/app.ts",
+    "src/report.ts"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": []
+}

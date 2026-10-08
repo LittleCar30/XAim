@@ -1,0 +1,50 @@
+{
+  "id": "015-test-retry-exhaustion",
+  "category": "tests",
+  "language": "TS",
+  "allowed": [
+    "tests/retry.test.mjs"
+  ],
+  "required": [
+    "tests/retry.test.mjs"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": [
+    {
+      "name": "extra retry",
+      "file": "src/retry.ts",
+      "before": "i < attempts",
+      "after": "i <= attempts",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "failure": "AssertionError"
+    },
+    {
+      "name": "zero attempts call",
+      "file": "src/retry.ts",
+      "before": "i < attempts",
+      "after": "i < Math.max(attempts, 1)",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "failure": "AssertionError"
+    }
+  ]
+}

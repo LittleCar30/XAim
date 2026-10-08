@@ -1,0 +1,24 @@
+{
+  "id": "019-refactor-go-normalize",
+  "category": "refactor",
+  "language": "Go",
+  "allowed": [
+    "normalize.go",
+    "user.go",
+    "team.go"
+  ],
+  "required": [
+    "normalize.go",
+    "user.go",
+    "team.go"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "go",
+      "test",
+      "./..."
+    ]
+  ],
+  "mutations": []
+}

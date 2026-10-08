@@ -1,0 +1,31 @@
+{
+  "id": "021-cross-file-ts-result",
+  "category": "cross-file",
+  "language": "TS",
+  "allowed": [
+    "src/result.ts",
+    "src/reader.ts",
+    "src/writer.ts"
+  ],
+  "required": [
+    "src/result.ts",
+    "src/reader.ts",
+    "src/writer.ts"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": []
+}

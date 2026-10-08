@@ -1,0 +1,24 @@
+diff --git a/src/date.ts b/src/date.ts
+new file mode 100644
+--- /dev/null
++++ b/src/date.ts
+@@ -0,0 +1,1 @@
++export function formatDate(date: Date): string { return date.toISOString().slice(0, 10); }
+diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1,3 +1,2 @@
+-export function appDate(date: Date): string {
+-  return date.toISOString().slice(0, 10);
+-}
++import { formatDate } from "./date.js";
++export function appDate(date: Date): string { return formatDate(date); }
+diff --git a/src/report.ts b/src/report.ts
+--- a/src/report.ts
++++ b/src/report.ts
+@@ -1,3 +1,2 @@
+-export function reportDate(date: Date): string {
+-  return date.toISOString().slice(0, 10);
+-}
++import { formatDate } from "./date.js";
++export function reportDate(date: Date): string { return formatDate(date); }

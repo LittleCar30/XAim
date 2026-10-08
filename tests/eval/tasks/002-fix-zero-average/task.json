@@ -1,0 +1,27 @@
+{
+  "id": "002-fix-zero-average",
+  "category": "bugfix",
+  "language": "TS",
+  "allowed": [
+    "src/average.ts"
+  ],
+  "required": [
+    "src/average.ts"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": []
+}

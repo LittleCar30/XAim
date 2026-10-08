@@ -1,0 +1,31 @@
+{
+  "id": "026-upgrade-ts-slug-kit",
+  "category": "dependency",
+  "language": "TS",
+  "allowed": [
+    "src/app.ts",
+    "package.json",
+    "package-lock.json"
+  ],
+  "required": [
+    "src/app.ts",
+    "package.json",
+    "package-lock.json"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": []
+}

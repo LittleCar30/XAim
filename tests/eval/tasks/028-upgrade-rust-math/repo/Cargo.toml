@@ -1,0 +1,6 @@
+[package]
+name = "fixture"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+eval-math = { path = "vendor/math-v1", version = "1.0.0" }

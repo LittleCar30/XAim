@@ -1,0 +1,3444 @@
+# XAim 开发提示词手册（完整版）
+
+> 按开发顺序排列，每一步可直接复制给 AI 编程助手使用  
+> 使用方式：把 `[上下文]` 一起复制，保证 AI 有足够背景  
+> 约定：每完成一步，必须跑验收，不通过不进下一步
+
+---
+
+## 使用说明
+
+每一步提示词结构：
+
+```text
+[上下文] 项目背景（必带）
+[目标] 本步要做什么
+[输入] 依赖什么
+[输出] 产出什么
+[约束] 技术限制
+[验收] 怎么算完成
+```
+
+**推荐 AI 助手**：Claude Code / Cursor / Codex / 通义灵码  
+**工作流**：复制提示词 → AI 生成代码 → 跑验收 → 通过进下一步
+
+---
+
+# 阶段 0：环境与项目初始化
+
+## 提示词 0.1：初始化 Tauri 2 项目
+
+```text
+[上下文]
+我要开发一个桌面版编程 Agent，叫 XAim。
+技术栈：Tauri 2 + Rust + React 18 + TypeScript 5 + Tailwind CSS 3 + Vite 5。
+目标平台：Windows 优先，macOS 次之。
+项目根目录：D:\projects\xaim
+包管理器：pnpm 8
+
+[目标]
+初始化 Tauri 2 项目，包含 Rust 后端和 React 前端，能启动一个空窗口。
+
+[输入]
+无。
+
+[输出]
+1. 完整的 Tauri 2 项目结构
+2. React + TypeScript + Vite 前端
+3. Tailwind CSS 配置
+4. 基础窗口，标题 "XAim"，尺寸 1440x900，最小 1024x700
+5. package.json 脚本：dev、build、tauri、lint、typecheck、test
+6. rust-toolchain.toml 固定 stable
+7. .gitignore 覆盖 node_modules、target、dist、.env
+
+[约束]
+- 使用 pnpm，不用 npm/yarn
+- Rust edition 2021
+- 前端用 Vite，不用 webpack
+- 不使用任何 UI 组件库，纯 Tailwind
+- TypeScript strict 模式
+- 路径别名 @/* 指向 src/*
+
+[验收]
+- pnpm install 成功
+- pnpm tauri dev 能启动窗口
+- 窗口显示 "XAim v0.1"
+- 控制台无错误
+- pnpm typecheck 通过
+```
+
+---
+
+## 提示词 0.2：建立完整目录结构
+
+```text
+[上下文]
+XAim 是 Tauri 2 + Rust + React 的桌面应用，已完成初始化。
+
+[目标]
+建立完整目录结构，每个文件先写空实现 + TODO。
+
+[输出]
+src-tauri/src/
+  main.rs
+  lib.rs
+  types.rs
+  events.rs
+  errors.rs
+  commands/
+    mod.rs
+    project.rs
+    task.rs
+    model.rs
+    config.rs
+  agent/
+    mod.rs
+    orchestrator.rs
+    state.rs
+    planner.rs
+  index/
+    mod.rs
+    scanner.rs
+    hash.rs
+    lang.rs
+    symbol.rs
+    watcher.rs
+    store.rs
+  search/
+    mod.rs
+    grep.rs
+    symbol.rs
+    rank.rs
+    context.rs
+  model/
+    mod.rs
+    provider.rs
+    openai.rs
+    anthropic.rs
+    deepseek.rs
+    ollama.rs
+    router.rs
+  tools/
+    mod.rs
+    trait.rs
+    read.rs
+    write.rs
+    search.rs
+    exec.rs
+    patch.rs
+    registry.rs
+  verify/
+    mod.rs
+    runner.rs
+    detect.rs
+    parser.rs
+  repair/
+    mod.rs
+    loop.rs
+  git/
+    mod.rs
+    ops.rs
+  store/
+    mod.rs
+    schema.rs
+    project.rs
+    task.rs
+    patch.rs
+    file.rs
+    cache.rs
+  config/
+    mod.rs
+    model.rs
+  prompts/
+    mod.rs
+    intent.rs
+    plan.rs
+    modify.rs
+    repair.rs
+    summarize.rs
+  utils/
+    mod.rs
+    tokens.rs
+    diff.rs
+
+src/
+  main.tsx
+  App.tsx
+  pages/
+    Workspace.tsx
+    Settings.tsx
+  components/
+    TopBar.tsx
+    FileTree.tsx
+    TaskPanel.tsx
+    StepTimeline.tsx
+    DiffView.tsx
+    VerifyPanel.tsx
+    ContextViewer.tsx
+    ToolLog.tsx
+    InputBar.tsx
+    StatusBar.tsx
+    HistoryList.tsx
+    ActionBar.tsx
+  stores/
+    project.ts
+    task.ts
+    config.ts
+    ui.ts
+  services/
+    ipc.ts
+    events.ts
+  types/
+    index.ts
+  styles/
+    globals.css
+
+[约束]
+- 每个 Rust 模块写空实现 + TODO 注释
+- 每个 TS 文件写类型和空组件
+- 不写业务逻辑
+- 每个 mod.rs 声明子模块
+
+[验收]
+- cargo check 通过
+- pnpm typecheck 通过
+- 目录结构与上面一致
+- 无 warning（除了 unused）
+```
+
+---
+
+## 提示词 0.3：配置 Cargo 依赖
+
+```text
+[上下文]
+XAim 是 Tauri 2 项目，需要配置 Rust 依赖。
+
+[目标]
+在 src-tauri/Cargo.toml 中配置所有依赖。
+
+[输出]
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"] }
+futures = "0.3"
+async-trait = "0.1"
+ignore = "0.4"
+grep-searcher = "0.1"
+grep-regex = "0.1"
+tree-sitter = "0.22"
+tree-sitter-typescript = "0.21"
+tree-sitter-python = "0.21"
+tree-sitter-rust = "0.21"
+tree-sitter-go = "0.21"
+git2 = "0.18"
+notify = "6"
+blake3 = "1"
+diffy = "0.3"
+similar = "2"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+directories = "5"
+tempfile = "3"
+
+[dev-dependencies]
+mockito = "1"
+
+[约束]
+- 版本用最新稳定
+- 开启必要 features
+- 不引入不必要的依赖
+
+[验收]
+- cargo check 通过
+- cargo build 成功（首次会慢）
+```
+
+---
+
+# 阶段 1：核心类型与错误
+
+## 提示词 1.1：定义共享类型
+
+```text
+[上下文]
+XAim 是 Tauri 桌面应用，前后端通过 IPC 通信。已完成目录结构。
+
+[目标]
+在 src-tauri/src/types.rs 定义所有共享数据结构。
+
+[输出]
+Rust 侧定义：
+- TaskStatus 枚举（15 个状态）
+- Project
+- Task
+- TaskStep
+- Patch
+- VerifyResult
+- ModelConfig
+- FileNode
+- ContextFile
+- Symbol
+- ToolResult
+- GrepMatch
+- DiagError
+
+所有 struct 加 `#[derive(Debug, Clone, Serialize, Deserialize)]`
+所有 struct 加 `#[serde(rename_all = "camelCase")]`
+
+TaskStatus 枚举：
+Idle, Parsing, Indexing, Retrieving, Planning, Generating,
+ApplyingPatch, Verifying, Repairing, WaitingConfirm, Applied,
+Done, Failed, RolledBack, Cancelled
+
+字段参考：
+Project { id: i64, path, name, created_at, last_opened_at }
+Task { id, project_id, prompt, status, intent, plan, created_at,
+       finished_at, duration_ms, token_input, token_output, cost }
+TaskStep { id, task_id, step_type, content, created_at }
+Patch { id, task_id, file_path, diff, applied, score, created_at }
+VerifyResult { kind, passed, output, duration_ms }
+ModelConfig { provider, name, api_key, base_url, temperature, max_tokens }
+FileNode { name, path, is_dir, size, children }
+ContextFile { path, content, reason, tokens }
+Symbol { name, kind, file, start_line, end_line }
+GrepMatch { path, line, column, text }
+
+[约束]
+- Option<T> 用 serde 序列化为 null
+- i64 时间戳用毫秒
+- f32 温度
+- 字段全部 pub
+
+[验收]
+- cargo check 通过
+- 有单元测试验证序列化/反序列化
+- JSON 输出字段为 camelCase
+```
+
+---
+
+## 提示词 1.2：定义 TypeScript 类型
+
+```text
+[上下文]
+XAim Rust 侧已定义 types.rs。
+
+[目标]
+在 src/types/index.ts 定义对应的 TypeScript 类型。
+
+[输出]
+- TaskStatus 联合类型（字符串字面量）
+- Project、Task、TaskStep、Patch、VerifyResult
+- ModelConfig、FileNode、ContextFile、Symbol
+- GrepMatch、DiagError、ToolResult
+- XaimEvent 判别联合类型
+
+XaimEvent 定义：
+type XaimEvent =
+  | { type: 'step'; taskId: number; name: string; status: string }
+  | { type: 'tool'; taskId: number; tool: string; args: string }
+  | { type: 'patch'; taskId: number; file: string; diff: string }
+  | { type: 'verify'; taskId: number; kind: string; passed: boolean; output: string }
+  | { type: 'repair'; taskId: number; round: number }
+  | { type: 'token'; taskId: number; input: number; output: number }
+  | { type: 'done'; taskId: number; status: string }
+  | { type: 'error'; taskId: number; message: string };
+
+[约束]
+- strict 模式
+- Option 对应 `| null`
+- 字段 camelCase
+- 用 interface 而不是 type（对象）
+
+[验收]
+- pnpm typecheck 通过
+- 与 Rust 字段一一对应
+```
+
+---
+
+## 提示词 1.3：定义错误类型
+
+```text
+[上下文]
+XAim 是 Rust 项目，需要统一错误处理。
+
+[目标]
+在 src-tauri/src/errors.rs 定义错误类型。
+
+[输出]
+#[derive(thiserror::Error, Debug)]
+pub enum XaimError {
+    Io, Db, Git, Http, Json, Model, Verify,
+    PatchConflict, Cancelled, Timeout, Config, Security, Unknown
+}
+
+pub type Result<T> = std::result::Result<T, XaimError>;
+
+impl From<XaimError> for String（用于 IPC 返回）
+
+[约束]
+- 用 thiserror
+- 每个变体有清晰 message
+- 实现 Display
+- 实现 From 转换
+
+[验收]
+- cargo check 通过
+- 有单元测试
+```
+
+---
+
+## 提示词 1.4：定义事件类型
+
+```text
+[上下文]
+XAim 后端需要向 UI 流式推送任务进度。
+
+[目标]
+在 src-tauri/src/events.rs 定义事件类型和推送函数。
+
+[输出]
+#[derive(Serialize, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum XaimEvent {
+    Step { task_id: i64, name: String, status: String },
+    Tool { task_id: i64, tool: String, args: String },
+    Patch { task_id: i64, file: String, diff: String },
+    Verify { task_id: i64, kind: String, passed: bool, output: String },
+    Repair { task_id: i64, round: u32 },
+    Token { task_id: i64, input: i64, output: i64 },
+    Done { task_id: i64, status: String },
+    Error { task_id: i64, message: String },
+}
+
+pub fn emit(app: &AppHandle, event: XaimEvent) -> Result<()>
+
+[约束]
+- serde tag = "type"
+- emit 用 app.emit("xaim://event", event)
+- 错误不 panic
+
+[验收]
+- cargo check 通过
+- 前端能 listen
+```
+
+---
+
+# 阶段 2：SQLite 存储层
+
+## 提示词 2.1：数据库 schema
+
+```text
+[上下文]
+XAim 用 SQLite 存项目、任务、文件、符号、补丁、缓存。
+
+[目标]
+实现数据库初始化、建表、迁移。
+
+[输出]
+src-tauri/src/store/schema.rs：
+
+1. 建表 SQL：projects、files、symbols、tasks、task_steps、patches、cache、schema_version
+2. 每个表加索引
+3. 外键 ON DELETE CASCADE
+4. migrate(conn) 函数
+
+src-tauri/src/store/mod.rs：
+pub struct Store { conn: Arc<Mutex<Connection>> }
+impl Store {
+    pub fn new(path: &Path) -> Result<Self>;
+    pub fn migrate(&self) -> Result<()>;
+    pub fn conn(&self) -> MutexGuard<Connection>;
+}
+
+[约束]
+- 用 rusqlite，features = bundled
+- 开启 WAL 模式
+- 开启 foreign_keys
+- 时间戳用 i64 毫秒
+- schema_version 记录版本
+
+[验收]
+- 首次运行自动建表
+- 第二次运行不报错
+- 单元测试验证表存在
+- cargo test 通过
+```
+
+---
+
+## 提示词 2.2：Project CRUD
+
+```text
+[上下文]
+XAim 需要持久化项目。
+
+[目标]
+实现 Project 的 CRUD。
+
+[输出]
+src-tauri/src/store/project.rs：
+
+pub fn insert_project(conn, path: &str, name: &str) -> Result<i64>
+pub fn get_project(conn, id: i64) -> Result<Option<Project>>
+pub fn get_project_by_path(conn, path: &str) -> Result<Option<Project>>
+pub fn list_projects(conn) -> Result<Vec<Project>>
+pub fn update_last_opened(conn, id: i64) -> Result<()>
+pub fn delete_project(conn, id: i64) -> Result<()>
+
+[约束]
+- 所有函数返回 Result<T, XaimError>
+- insert 用 INSERT OR IGNORE
+- 时间戳用 chrono::Utc::now().timestamp_millis()
+
+[验收]
+- 每个函数有单元测试
+- cargo test 通过
+```
+
+---
+
+## 提示词 2.3：Task CRUD
+
+```text
+[上下文]
+XAim 需要持久化任务。
+
+[目标]
+实现 Task 和 TaskStep 的 CRUD。
+
+[输出]
+src-tauri/src/store/task.rs：
+
+pub fn insert_task(conn, project_id: i64, prompt: &str) -> Result<i64>
+pub fn get_task(conn, id: i64) -> Result<Option<Task>>
+pub fn list_tasks(conn, project_id: i64, limit: usize) -> Result<Vec<Task>>
+pub fn update_task_status(conn, id: i64, status: TaskStatus) -> Result<()>
+pub fn update_task_intent(conn, id: i64, intent: &str) -> Result<()>
+pub fn update_task_plan(conn, id: i64, plan: &str) -> Result<()>
+pub fn update_task_stats(conn, id: i64, duration_ms, token_input, token_output, cost) -> Result<()>
+pub fn finish_task(conn, id: i64, status: TaskStatus) -> Result<()>
+
+pub fn insert_step(conn, task_id: i64, step_type: &str, content: &str) -> Result<i64>
+pub fn list_steps(conn, task_id: i64) -> Result<Vec<TaskStep>>
+
+[约束]
+- status 用字符串存
+- 每个函数有单元测试
+
+[验收]
+- cargo test 通过
+- 覆盖所有状态转换
+```
+
+---
+
+## 提示词 2.4：Patch CRUD
+
+```text
+[上下文]
+XAim 需要持久化补丁。
+
+[目标]
+实现 Patch 的 CRUD。
+
+[输出]
+src-tauri/src/store/patch.rs：
+
+pub fn insert_patch(conn, task_id, file_path, diff, score) -> Result<i64>
+pub fn get_patch(conn, id) -> Result<Option<Patch>>
+pub fn list_patches_by_task(conn, task_id) -> Result<Vec<Patch>>
+pub fn mark_applied(conn, id) -> Result<()>
+pub fn update_score(conn, id, score) -> Result<()>
+
+[约束]
+- diff 用 TEXT 存
+- score 用 REAL
+- 每个函数有单元测试
+
+[验收]
+- cargo test 通过
+```
+
+---
+
+## 提示词 2.5：File 和 Cache CRUD
+
+```text
+[上下文]
+XAim 需要持久化文件索引和缓存。
+
+[目标]
+实现 File 和 Cache 的 CRUD。
+
+[输出]
+src-tauri/src/store/file.rs：
+pub fn upsert_file(conn, project_id, path, language, size, mtime, hash) -> Result<i64>
+pub fn get_file(conn, project_id, path) -> Result<Option<FileRecord>>
+pub fn list_files(conn, project_id) -> Result<Vec<FileRecord>>
+pub fn delete_file(conn, project_id, path) -> Result<()>
+pub fn update_summary(conn, file_id, summary) -> Result<()>
+
+src-tauri/src/store/cache.rs：
+pub fn get_cache(conn, key) -> Result<Option<String>>
+pub fn set_cache(conn, key, value, ttl_sec: Option<i64>) -> Result<()>
+pub fn clear_expired(conn) -> Result<()>
+pub fn delete_cache(conn, key) -> Result<()>
+
+[约束]
+- cache 有过期时间
+- 每个函数有单元测试
+
+[验收]
+- cargo test 通过
+```
+
+---
+
+# 阶段 3：项目扫描与文件树
+
+## 提示词 3.1：文件扫描
+
+```text
+[上下文]
+XAim 打开项目后需要扫描文件，生成文件树。
+
+[目标]
+实现项目扫描。
+
+[输出]
+src-tauri/src/index/scanner.rs：
+
+pub fn scan_project(root: &Path, ignore: &[String]) -> Result<FileNode>
+
+要求：
+- 用 ignore crate 读取 .gitignore
+- 默认忽略：node_modules、.git、dist、build、target、.next、.cache
+- 最大文件 1MB（可配置）
+- 跳过二进制文件
+- 跳过 .env、*.key、*.pem（敏感文件）
+- 返回树形结构
+
+[约束]
+- 异步扫描，不阻塞 UI
+- 用 tokio::task::spawn_blocking
+- 结果按名称排序，目录优先
+
+[验收]
+- 扫描中型项目 < 3 秒
+- 正确忽略 .gitignore
+- 文件树结构正确
+- 单元测试
+```
+
+---
+
+## 提示词 3.2：文件哈希
+
+```text
+[上下文]
+XAim 需要增量索引，靠文件哈希判断是否变化。
+
+[目标]
+为每个文件计算 hash。
+
+[输出]
+src-tauri/src/index/hash.rs：
+
+pub fn file_hash(path: &Path) -> Result<String>
+pub fn content_hash(content: &str) -> String
+
+用 blake3，返回 hex 字符串（64 字符）。
+
+[约束]
+- 流式读取大文件
+- 失败返回错误不 panic
+
+[验收]
+- 同一文件 hash 稳定
+- 不同内容 hash 不同
+- 单元测试
+```
+
+---
+
+## 提示词 3.3：语言检测
+
+```text
+[上下文]
+XAim 需要识别文件语言。
+
+[目标]
+实现语言检测。
+
+[输出]
+src-tauri/src/index/lang.rs：
+
+pub fn detect_language(path: &Path) -> String
+
+支持：
+- typescript: .ts .tsx
+- javascript: .js .jsx .mjs .cjs
+- python: .py
+- rust: .rs
+- go: .go
+- java: .java
+- kotlin: .kt
+- swift: .swift
+- c: .c .h
+- cpp: .cpp .cc .hpp
+- csharp: .cs
+- ruby: .rb
+- php: .php
+- vue: .vue
+- svelte: .svelte
+- json: .json
+- yaml: .yaml .yml
+- toml: .toml
+- markdown: .md
+- html: .html
+- css: .css
+- scss: .scss
+- sql: .sql
+- shell: .sh .bash
+- 其他: text
+
+[约束]
+- 大小写不敏感
+- 无扩展名返回 text
+
+[验收]
+- 覆盖 20+ 语言
+- 单元测试
+```
+
+---
+
+## 提示词 3.4：符号提取
+
+```text
+[上下文]
+XAim 需要按符号名检索，比关键词更准。
+
+[目标]
+用 tree-sitter 提取符号。
+
+[输出]
+src-tauri/src/index/symbol.rs：
+
+pub struct Symbol {
+    pub name: String,
+    pub kind: String,  // function, class, method, variable, interface, type
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+pub fn extract_symbols(path: &Path, lang: &str, content: &str) -> Result<Vec<Symbol>>
+
+支持语言：
+- TypeScript（function_declaration, class_declaration, method_definition）
+- Python（function_definition, class_definition）
+- Rust（function_item, struct_item, impl_item）
+- Go（function_declaration, type_declaration）
+- Java（method_declaration, class_declaration）
+
+[约束]
+- 用 tree-sitter 对应 grammar
+- 行号从 1 开始
+- 解析失败返回空 vec，不 panic
+
+[验收]
+- 能提取函数、类、方法
+- 行号准确
+- 每种语言有测试
+```
+
+---
+
+## 提示词 3.5：文件监听
+
+```text
+[上下文]
+XAim 需要监听文件变化，增量索引。
+
+[目标]
+实现文件监听。
+
+[输出]
+src-tauri/src/index/watcher.rs：
+
+pub enum WatchEvent {
+    Created(PathBuf),
+    Modified(PathBuf),
+    Deleted(PathBuf),
+    Renamed(PathBuf, PathBuf),
+}
+
+pub fn start_watcher(
+    root: PathBuf,
+    tx: mpsc::Sender<WatchEvent>,
+) -> Result<RecommendedWatcher>
+
+要求：
+- 用 notify crate
+- 防抖 500ms
+- 忽略 .git 内部变化
+- 忽略 node_modules 等
+- 后台线程
+
+[约束]
+- watcher 生命周期由调用方管理
+- 错误不 panic
+- CPU 占用 < 5%
+
+[验收]
+- 改文件后 1 秒内收到事件
+- 删除文件后收到事件
+- 单元测试（用 tempfile）
+```
+
+---
+
+## 提示词 3.6：索引存储
+
+```text
+[上下文]
+XAim 需要把索引结果写入 SQLite。
+
+[目标]
+实现索引存储。
+
+[输出]
+src-tauri/src/index/store.rs：
+
+pub fn index_project(store: &Store, project_id: i64, root: &Path) -> Result<()>
+pub fn update_file_index(store: &Store, project_id, path) -> Result<()>
+pub fn remove_file_index(store: &Store, project_id, path) -> Result<()>
+pub fn get_stale_files(store: &Store, project_id) -> Result<Vec<PathBuf>>
+
+流程：
+1. 扫描项目
+2. 对每个文件：计算 hash、检测语言、提取符号
+3. 写入 files 和 symbols 表
+4. 删除已删除文件
+
+[约束]
+- 批量插入用事务
+- 大项目不阻塞 UI
+- 进度通过事件发送
+
+[验收]
+- 中型项目索引 < 10 秒
+- 增量索引 < 1 秒
+- 单元测试
+```
+
+---
+
+# 阶段 4：检索与上下文
+
+## 提示词 4.1：ripgrep 检索
+
+```text
+[上下文]
+XAim 需要根据任务关键词检索相关文件。
+
+[目标]
+封装 ripgrep 做快速检索。
+
+[输出]
+src-tauri/src/search/grep.rs：
+
+pub struct GrepMatch {
+    pub path: String,
+    pub line: u32,
+    pub column: u32,
+    pub text: String,
+}
+
+pub struct GrepOptions {
+    pub max_results: usize,      // 默认 200
+    pub max_per_file: usize,     // 默认 5
+    pub case_sensitive: bool,    // 默认 false
+    pub regex: bool,             // 默认 false
+    pub file_types: Vec<String>, // 可选
+}
+
+pub fn search(root: &Path, query: &str, opts: GrepOptions) -> Result<Vec<GrepMatch>>
+
+[约束]
+- 用 grep-searcher 和 grep-regex
+- 支持中文
+- 忽略 .gitignore
+- 结果按文件聚合
+
+[验收]
+- 中型项目检索 < 300ms
+- 支持中文
+- 单元测试
+```
+
+---
+
+## 提示词 4.2：符号检索
+
+```text
+[上下文]
+XAim 索引了符号，可以按名字检索。
+
+[目标]
+实现符号检索。
+
+[输出]
+src-tauri/src/search/symbol.rs：
+
+pub fn search_symbols(store: &Store, project_id: i64, query: &str) -> Result<Vec<Symbol>>
+pub fn search_symbols_fuzzy(store: &Store, project_id: i64, query: &str) -> Result<Vec<Symbol>>
+
+要求：
+- 精确匹配优先
+- 模糊匹配（包含、前缀）
+- 结果按相关度排序
+- 限制 50 条
+
+[约束]
+- SQL LIKE 查询
+- 索引加速
+- 查询 < 100ms
+
+[验收]
+- 能查到函数、类、方法
+- 单元测试
+```
+
+---
+
+## 提示词 4.3：结果融合与重排
+
+```text
+[上下文]
+XAim 有多种检索结果，需要融合。
+
+[目标]
+实现结果融合和重排。
+
+[输出]
+src-tauri/src/search/rank.rs：
+
+pub struct RankedFile {
+    pub path: String,
+    pub score: f64,
+    pub reasons: Vec<String>,
+}
+
+pub fn rank_results(
+    task: &str,
+    grep: Vec<GrepMatch>,
+    symbols: Vec<Symbol>,
+    files: Vec<FileRecord>,
+) -> Vec<RankedFile>
+
+评分维度：
+- grep 匹配数（每命中 +1）
+- 符号名匹配（+3）
+- 文件在根目录（+0.5）
+- 最近修改（+0.5）
+- 文件被引用次数（+0.2 * count）
+
+[约束]
+- 分数归一化到 0-1
+- 排序稳定
+- Top N 限制
+
+[验收]
+- 相关文件排前面
+- 单元测试
+```
+
+---
+
+## 提示词 4.4：上下文构建
+
+```text
+[上下文]
+XAim 需要把相关代码片段发给模型。
+
+[目标]
+根据任务构建最优上下文。
+
+[输出]
+src-tauri/src/search/context.rs：
+
+pub struct Context {
+    pub files: Vec<ContextFile>,
+    pub total_tokens: usize,
+}
+
+pub struct ContextFile {
+    pub path: String,
+    pub content: String,
+    pub reason: String,
+    pub tokens: usize,
+}
+
+pub fn build_context(
+    task: &str,
+    ranked: Vec<RankedFile>,
+    root: &Path,
+    budget_tokens: usize,
+) -> Result<Context>
+
+要求：
+1. 按 ranked 顺序读取文件
+2. 总 token 不超过 budget
+3. 超出时截断到函数级
+4. 包含 import 和类型定义
+5. 优先函数级片段，不要整文件
+6. 去重
+
+[约束]
+- token 估算：英文 4 字符 1 token，中文 1.5 字符 1 token
+- 单文件最大 3000 token
+- 上下文可见（返回 reason）
+
+[验收]
+- token 估算误差 < 20%
+- 相关文件命中率 > 70%
+- 单元测试
+```
+
+---
+
+## 提示词 4.5：Token 估算工具
+
+```text
+[上下文]
+XAim 需要估算 token 数。
+
+[目标]
+实现 token 估算。
+
+[输出]
+src-tauri/src/utils/tokens.rs：
+
+pub fn estimate_tokens(text: &str) -> usize
+pub fn estimate_tokens_cjk(text: &str) -> usize
+
+规则：
+- 英文：4 字符 ≈ 1 token
+- 中文：1.5 字符 ≈ 1 token
+- 混合：按字符类型分别计算
+
+[约束]
+- 不用 tiktoken（Rust 生态不成熟）
+- 保守估算（宁可高估）
+
+[验收]
+- 误差 < 20%
+- 单元测试
+```
+
+---
+
+# 阶段 5：模型接入
+
+## 提示词 5.1：ModelProvider trait
+
+```text
+[上下文]
+XAim 支持多个模型 provider。
+
+[目标]
+定义统一接口。
+
+[输出]
+src-tauri/src/model/provider.rs：
+
+#[async_trait]
+pub trait ModelProvider: Send + Sync {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse>;
+    async fn stream(&self, req: CompletionRequest)
+        -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>>;
+    fn name(&self) -> &str;
+    fn max_context(&self) -> usize;
+}
+
+pub struct CompletionRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    pub temperature: f32,
+    pub max_tokens: u32,
+}
+
+pub struct Message {
+    pub role: String,
+    pub content: String,
+}
+
+pub struct CompletionResponse {
+    pub content: String,
+    pub usage: Usage,
+}
+
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+[约束]
+- 用 async-trait
+- 用 futures::Stream
+- 错误用 XaimError
+
+[验收]
+- cargo check 通过
+- 有 MockProvider 用于测试
+```
+
+---
+
+## 提示词 5.2：OpenAI 兼容 Provider
+
+```text
+[上下文]
+大多数模型兼容 OpenAI API。
+
+[目标]
+实现 OpenAiProvider。
+
+[输出]
+src-tauri/src/model/openai.rs：
+
+pub struct OpenAiProvider {
+    base_url: String,
+    api_key: String,
+    client: reqwest::Client,
+}
+
+impl OpenAiProvider {
+    pub fn new(base_url: String, api_key: String) -> Self;
+}
+
+#[async_trait]
+impl ModelProvider for OpenAiProvider {
+    // 实现 complete 和 stream
+}
+
+要求：
+- POST {base_url}/chat/completions
+- Header: Authorization: Bearer {api_key}
+- Body: { model, messages, temperature, max_tokens, stream }
+- 流式用 SSE
+- 超时 120 秒
+- 重试 2 次（指数退避）
+
+[约束]
+- 用 reqwest
+- 用 eventsource-stream 解析 SSE
+- 错误信息包含 response body
+
+[验收]
+- 能调 OpenAI
+- 能调 DeepSeek（base_url = https://api.deepseek.com/v1）
+- 能调 Ollama（base_url = http://localhost:11434/v1）
+- 流式输出正确
+- 单元测试用 mockito
+```
+
+---
+
+## 提示词 5.3：模型路由
+
+```text
+[上下文]
+XAim 需要根据任务选模型。
+
+[目标]
+实现模型路由。
+
+[输出]
+src-tauri/src/model/router.rs：
+
+pub enum TaskKind {
+    Intent,     // 意图解析
+    Retrieve,   // 检索重排
+    Generate,   // 代码生成
+    Repair,     // 修复
+    Summarize,  // 总结
+}
+
+pub enum ModelChoice {
+    Fast(String),
+    Strong(String),
+}
+
+pub fn pick_model(kind: TaskKind, config: &Config) -> ModelChoice
+
+默认策略：
+- Intent / Retrieve / Summarize → Fast
+- Generate / Repair → Strong
+
+[约束]
+- 可配置映射
+- 有默认策略
+- 单元测试
+
+[验收]
+- 路由正确
+- 可配置
+```
+
+---
+
+## 提示词 5.4：模型工厂
+
+```text
+[上下文]
+XAim 需要根据配置创建 Provider。
+
+[目标]
+实现 Provider 工厂。
+
+[输出]
+src-tauri/src/model/mod.rs：
+
+pub fn create_provider(config: &ModelConfig) -> Result<Box<dyn ModelProvider>>
+
+match config.provider.as_str() {
+    "openai" => OpenAiProvider::new(...),
+    "deepseek" => OpenAiProvider::new("https://api.deepseek.com/v1", ...),
+    "qwen" => OpenAiProvider::new("https://dashscope.aliyuncs.com/compatible-mode/v1", ...),
+    "ollama" => OpenAiProvider::new("http://localhost:11434/v1", "ollama"),
+    "anthropic" => AnthropicProvider::new(...),
+    _ => Err(...),
+}
+
+[约束]
+- 返回 Box<dyn ModelProvider>
+- 错误信息清晰
+
+[验收]
+- 每种 provider 可创建
+- 单元测试
+```
+
+---
+
+# 阶段 6：工具系统
+
+## 提示词 6.1：Tool trait 和注册表
+
+```text
+[上下文]
+XAim Agent 需要调用工具。
+
+[目标]
+定义工具接口和注册表。
+
+[输出]
+src-tauri/src/tools/trait.rs：
+
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn schema(&self) -> serde_json::Value;
+    async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolResult>;
+}
+
+pub struct ToolContext {
+    pub project_root: PathBuf,
+    pub store: Arc<Store>,
+    pub require_confirm: bool,
+    pub allowed_commands: Vec<String>,
+}
+
+pub struct ToolResult {
+    pub success: bool,
+    pub output: String,
+    pub error: Option<String>,
+}
+
+src-tauri/src/tools/registry.rs：
+
+pub struct ToolRegistry {
+    tools: HashMap<String, Box<dyn Tool>>,
+}
+
+impl ToolRegistry {
+    pub fn new() -> Self;
+    pub fn register(&mut self, tool: Box<dyn Tool>);
+    pub fn get(&self, name: &str) -> Option<&dyn Tool>;
+    pub fn list(&self) -> Vec<&str>;
+    pub async fn call(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResult>;
+}
+
+[约束]
+- 用 async-trait
+- schema 用 JSON Schema 格式
+- 注册表线程安全
+
+[验收]
+- cargo check 通过
+- 单元测试
+```
+
+---
+
+## 提示词 6.2：read_file 工具
+
+```text
+[上下文]
+XAim 需要读文件工具。
+
+[目标]
+实现 read_file。
+
+[输出]
+src-tauri/src/tools/read.rs：
+
+pub struct ReadFileTool;
+
+#[async_trait]
+impl Tool for ReadFileTool {
+    fn name(&self) -> &str { "read_file" }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "start": { "type": "integer" },
+                "end": { "type": "integer" }
+            },
+            "required": ["path"]
+        })
+    }
+    async fn call(&self, args, ctx) -> Result<ToolResult> {
+        // 1. 路径校验：必须在 project_root 内
+        // 2. 敏感文件检查：.env、*.key、*.pem 拒绝
+        // 3. 读文件
+        // 4. 按 range 截取
+        // 5. 返回内容
+    }
+}
+
+[约束]
+- 路径不能越界
+- 敏感文件拒绝
+- 文件不存在返回明确错误
+
+[验收]
+- 能读文件
+- 能读部分
+- 拒绝敏感文件
+- 单元测试
+```
+
+---
+
+## 提示词 6.3：search 工具
+
+```text
+[上下文]
+XAim 需要检索工具。
+
+[目标]
+实现 search。
+
+[输出]
+src-tauri/src/tools/search.rs：
+
+pub struct SearchTool;
+
+#[async_trait]
+impl Tool for SearchTool {
+    fn name(&self) -> &str { "search" }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "max_results": { "type": "integer" }
+            },
+            "required": ["query"]
+        })
+    }
+    async fn call(&self, args, ctx) -> Result<ToolResult> {
+        // 调用 search::grep::search
+    }
+}
+
+[验收]
+- 能检索
+- 单元测试
+```
+
+---
+
+## 提示词 6.4：write_file 工具
+
+```text
+[上下文]
+XAim 需要写文件工具（高风险）。
+
+[目标]
+实现 write_file。
+
+[输出]
+src-tauri/src/tools/write.rs：
+
+pub struct WriteFileTool;
+
+#[async_trait]
+impl Tool for WriteFileTool {
+    fn name(&self) -> &str { "write_file" }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string" },
+                "content": { "type": "string" }
+            },
+            "required": ["path", "content"]
+        })
+    }
+    async fn call(&self, args, ctx) -> Result<ToolResult> {
+        // 1. 路径校验
+        // 2. 敏感文件拒绝
+        // 3. 需确认：如果 ctx.require_confirm，返回 "需确认"
+        // 4. 写文件
+    }
+}
+
+[约束]
+- 默认需确认
+- 敏感文件禁止
+- 路径不能越界
+
+[验收]
+- 能写
+- 需确认生效
+- 单元测试
+```
+
+---
+
+## 提示词 6.5：run_command 工具
+
+```text
+[上下文]
+XAim 需要执行命令工具（高风险）。
+
+[目标]
+实现 run_command。
+
+[输出]
+src-tauri/src/tools/exec.rs：
+
+pub struct RunCommandTool;
+
+#[async_trait]
+impl Tool for RunCommandTool {
+    fn name(&self) -> &str { "run_command" }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string" },
+                "cwd": { "type": "string" },
+                "timeout_sec": { "type": "integer" }
+            },
+            "required": ["command"]
+        })
+    }
+    async fn call(&self, args, ctx) -> Result<ToolResult> {
+        // 1. 命令白名单检查
+        // 2. 需确认
+        // 3. 执行
+        // 4. 捕获 stdout/stderr
+        // 5. 超时 kill
+    }
+}
+
+[约束]
+- 白名单：npm, pnpm, yarn, cargo, go, python, git, make, tsc, eslint
+- 默认超时 60 秒
+- 不允许 shell 元字符（|、>、&）
+- 需确认
+
+[验收]
+- 白名单生效
+- 超时生效
+- 单元测试
+```
+
+---
+
+## 提示词 6.6：Patch 工具
+
+```text
+[上下文]
+XAim 需要生成和应用 unified diff。
+
+[目标]
+实现 Patch 工具。
+
+[输出]
+src-tauri/src/tools/patch.rs：
+
+pub struct PatchCandidate {
+    pub file_path: String,
+    pub diff: String,
+    pub score: Option<f64>,
+}
+
+pub fn parse_diff(text: &str) -> Result<Vec<PatchCandidate>>
+pub fn validate_diff(diff: &str, root: &Path) -> Result<()>
+pub fn apply_diff(diff: &str, root: &Path) -> Result<()>
+pub fn reverse_diff(diff: &str, root: &Path) -> Result<()>
+pub fn generate_diff(old: &str, new: &str, path: &str) -> String
+
+要求：
+- 支持标准 unified diff
+- 应用前 dry-run
+- 失败自动 reverse
+- 用 diffy 和 similar crate
+
+[验收]
+- 能解析标准 diff
+- 能应用到工作区
+- 失败能回滚
+- 单元测试
+```
+
+---
+
+## 提示词 6.7：Git 工具
+
+```text
+[上下文]
+XAim 需要 Git 集成。
+
+[目标]
+实现 Git 工具。
+
+[输出]
+src-tauri/src/git/ops.rs：
+
+pub fn is_git_repo(root: &Path) -> bool
+pub fn current_branch(root: &Path) -> Result<String>
+pub fn create_rollback_point(root: &Path, task_id: i64) -> Result<String>
+pub fn rollback(root: &Path, commit_id: &str) -> Result<()>
+pub fn diff(root: &Path) -> Result<String>
+pub fn commit(root: &Path, msg: &str) -> Result<String>
+pub fn status(root: &Path) -> Result<Vec<String>>
+
+要求：
+- 用 git2
+- 任务前自动 commit（或 stash）
+- 任务后 commit
+- 回滚用 reset --hard
+- 不破坏用户未提交修改（用 stash）
+
+[验收]
+- 每个任务有回滚点
+- 回滚后工作区干净
+- 单元测试（用 tempfile + git init）
+```
+
+---
+
+# 阶段 7：验证与修复
+
+## 提示词 7.1：验证配置检测
+
+```text
+[上下文]
+XAim 需要自动检测项目的验证命令。
+
+[目标]
+实现验证配置检测。
+
+[输出]
+src-tauri/src/verify/detect.rs：
+
+pub struct VerifyConfig {
+    pub type_check: Option<String>,
+    pub lint: Option<String>,
+    pub test: Option<String>,
+    pub build: Option<String>,
+}
+
+pub fn detect_verify_config(root: &Path) -> VerifyConfig
+
+检测规则：
+- package.json → 检测 pnpm/yarn/npm → tsc/eslint/test
+- Cargo.toml → cargo check/clippy/test
+- go.mod → go vet/test/build
+- pom.xml → mvn
+- requirements.txt → pytest
+- pyproject.toml → pytest
+
+[约束]
+- 优先 pnpm > yarn > npm
+- 无配置返回全 None
+
+[验收]
+- 覆盖 5+ 项目类型
+- 单元测试
+```
+
+---
+
+## 提示词 7.2：验证运行器
+
+```text
+[上下文]
+XAim 修改代码后必须验证。
+
+[目标]
+实现验证运行器。
+
+[输出]
+src-tauri/src/verify/runner.rs：
+
+pub enum VerifyKind {
+    TypeCheck,
+    Lint,
+    Test,
+    Build,
+}
+
+pub struct VerifyResult {
+    pub kind: String,
+    pub passed: bool,
+    pub output: String,
+    pub duration_ms: i64,
+}
+
+pub async fn run_verify(
+    kind: VerifyKind,
+    cmd: &str,
+    root: &Path,
+    timeout_sec: u64,
+) -> Result<VerifyResult>
+
+要求：
+- 用 tokio::process::Command
+- 超时 kill
+- 捕获 stdout 和 stderr
+- 返回结构化结果
+
+[约束]
+- 超时默认 300 秒
+- 不 panic
+- 记录日志
+
+[验收]
+- 能跑测试命令
+- 超时生效
+- 单元测试
+```
+
+---
+
+## 提示词 7.3：错误解析
+
+```text
+[上下文]
+XAim 需要把验证错误喂给模型修复。
+
+[目标]
+实现错误解析。
+
+[输出]
+src-tauri/src/verify/parser.rs：
+
+pub struct DiagError {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub message: String,
+    pub severity: String,
+}
+
+pub fn parse_tsc(output: &str) -> Vec<DiagError>
+pub fn parse_eslint(output: &str) -> Vec<DiagError>
+pub fn parse_pytest(output: &str) -> Vec<DiagError>
+pub fn parse_cargo(output: &str) -> Vec<DiagError>
+pub fn parse_go(output: &str) -> Vec<DiagError>
+pub fn parse_generic(output: &str) -> Vec<DiagError>
+
+[约束]
+- 每种工具一个解析器
+- 解析失败不 panic
+- 结果去重
+- 保留原始错误
+
+[验收]
+- 每种解析器有测试样例
+- 错误定位准确
+```
+
+---
+
+## 提示词 7.4：修复循环
+
+```text
+[上下文]
+XAim 验证失败后自动修复。
+
+[目标]
+实现修复循环。
+
+[输出]
+src-tauri/src/repair/loop.rs：
+
+pub enum RepairResult {
+    Success,
+    Exceeded,
+    Timeout,
+    Cancelled,
+}
+
+pub async fn repair_loop(
+    task_id: i64,
+    ctx: &ToolContext,
+    provider: &dyn ModelProvider,
+    config: &RepairConfig,
+    app: &AppHandle,
+) -> Result<RepairResult>
+
+流程：
+1. 跑所有验证
+2. 全部通过 → Success
+3. 收集失败错误
+4. 构建修复 prompt
+5. 调用模型生成新 patch
+6. 应用
+7. 重新验证
+8. 成功退出，失败下一轮
+9. 超过 max_rounds → 回滚 + Exceeded
+10. 超时 → Timeout
+
+[约束]
+- 每轮发事件
+- 每轮记录日志
+- 失败回滚到任务前
+- 最多 3 轮（可配置）
+
+[验收]
+- 最多 3 轮
+- 每轮可见
+- 失败能回滚
+- 单元测试
+```
+
+---
+
+# 阶段 8：Agent 编排
+
+## 提示词 8.1：任务状态机
+
+```text
+[上下文]
+XAim 任务有明确状态。
+
+[目标]
+实现状态机。
+
+[输出]
+src-tauri/src/agent/state.rs：
+
+impl TaskStatus {
+    pub fn can_transition_to(&self, next: &TaskStatus) -> bool;
+    pub fn is_terminal(&self) -> bool;
+}
+
+允许转换：
+Idle → Parsing
+Parsing → Indexing
+Indexing → Retrieving
+Retrieving → Planning
+Planning → Generating
+Generating → ApplyingPatch
+ApplyingPatch → Verifying
+Verifying → Repairing | WaitingConfirm
+Repairing → Verifying | WaitingConfirm
+WaitingConfirm → Applied | Failed
+Applied → Done
+* → Failed | Cancelled | RolledBack
+
+终态：Done、Failed、RolledBack、Cancelled
+
+[验收]
+- 状态转换有测试
+- 非法转换被拒绝
+```
+
+---
+
+## 提示词 8.2：意图解析
+
+```text
+[上下文]
+XAim 需要把用户任务转成结构化意图。
+
+[目标]
+实现意图解析。
+
+[输出]
+src-tauri/src/agent/planner.rs：
+
+pub struct Intent {
+    pub action: String,
+    pub target: String,
+    pub description: String,
+    pub constraints: Vec<String>,
+    pub verify: Vec<String>,
+}
+
+pub async fn parse_intent(
+    task: &str,
+    provider: &dyn ModelProvider,
+) -> Result<Intent>
+
+流程：
+1. 构建 prompt（见 prompts/intent.rs）
+2. 调用模型
+3. 解析 JSON
+4. 校验字段
+5. 返回
+
+[约束]
+- 只输出 JSON
+- 解析失败重试 2 次
+- 不编造文件
+
+[验收]
+- 20 个样例测试通过
+- JSON 可解析
+- 单元测试
+```
+
+---
+
+## 提示词 8.3：计划生成
+
+```text
+[上下文]
+XAim 需要根据任务和上下文生成计划。
+
+[目标]
+实现计划生成。
+
+[输出]
+src-tauri/src/agent/planner.rs（追加）：
+
+pub struct Plan {
+    pub steps: Vec<PlanStep>,
+    pub files_to_modify: Vec<String>,
+    pub risks: Vec<String>,
+}
+
+pub struct PlanStep {
+    pub action: String,
+    pub file: String,
+    pub reason: String,
+}
+
+pub async fn generate_plan(
+    task: &str,
+    context: &Context,
+    provider: &dyn ModelProvider,
+) -> Result<Plan>
+
+[约束]
+- 只输出 JSON
+- 步骤具体
+- 列出所有要修改的文件
+
+[验收]
+- 计划可读
+- 单元测试
+```
+
+---
+
+## 提示词 8.4：候选生成
+
+```text
+[上下文]
+XAim 需要生成 2-3 个候选 Patch。
+
+[目标]
+实现候选生成。
+
+[输出]
+src-tauri/src/agent/planner.rs（追加）：
+
+pub async fn generate_candidates(
+    task: &str,
+    plan: &Plan,
+    context: &Context,
+    provider: &dyn ModelProvider,
+    n: usize,
+) -> Result<Vec<PatchCandidate>>
+
+流程：
+1. 并行调用 n 次模型
+2. temperature 递增（0.1, 0.2, 0.3）
+3. 解析 diff
+4. 去重
+5. 返回
+
+[约束]
+- 并行调用
+- 每个候选独立
+- 失败不影响其他
+
+[验收]
+- 生成 2-3 个候选
+- 单元测试
+```
+
+---
+
+## 提示词 8.5：候选评估
+
+```text
+[上下文]
+XAim 需要评估候选 Patch。
+
+[目标]
+实现候选评估。
+
+[输出]
+src-tauri/src/agent/orchestrator.rs：
+
+pub async fn evaluate_candidates(
+    candidates: Vec<PatchCandidate>,
+    ctx: &ToolContext,
+    provider: &dyn ModelProvider,
+) -> Result<PatchCandidate>
+
+流程：
+1. 对每个候选：
+   a. 备份当前工作区
+   b. 应用候选
+   c. 跑验证
+   d. 评分
+   e. 回滚
+2. 选最高分
+3. 返回
+
+评分：
+score = 0.4 * 验证通过
+      + 0.2 * (1 - diff_size / max_diff_size)
+      + 0.2 * 测试覆盖
+      + 0.1 * 静态检查
+      + 0.1 * 模型置信度
+
+[约束]
+- 每个候选独立工作区
+- 失败回滚
+- 记录日志
+
+[验收]
+- 选最高分
+- 单元测试
+```
+
+---
+
+## 提示词 8.6：编排器主流程
+
+```text
+[上下文]
+XAim 核心是任务编排器。
+
+[目标]
+实现完整任务流程。
+
+[输出]
+src-tauri/src/agent/orchestrator.rs：
+
+pub struct Orchestrator {
+    app: AppHandle,
+    store: Arc<Store>,
+    config: Config,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl Orchestrator {
+    pub async fn run_task(&self, project_id: i64, prompt: String) -> Result<i64> {
+        // 1. 创建任务记录，状态 Parsing
+        // 2. 解析意图
+        // 3. 检查索引，必要时增量更新
+        // 4. 检索相关文件，构建上下文
+        // 5. 生成计划
+        // 6. 生成 2-3 个候选 Patch
+        // 7. 评估候选
+        // 8. 展示 Diff，状态 WaitingConfirm
+        // 9. 等待用户确认
+        // 10. 应用 + Git commit
+        // 11. 记录统计
+    }
+
+    pub async fn cancel(&self);
+}
+
+要求：
+- 每步发事件
+- 可取消
+- 错误不崩溃
+- 每步超时
+- 状态机严格
+
+[验收]
+- 完整流程可跑
+- 事件流正确
+- 可取消
+- 集成测试
+```
+
+---
+
+# 阶段 9：Prompt 模板
+
+## 提示词 9.1：意图解析 Prompt
+
+```text
+[上下文]
+XAim 需要把用户任务转成结构化意图。
+
+[目标]
+实现意图解析 prompt。
+
+[输出]
+src-tauri/src/prompts/intent.rs：
+
+pub const SYSTEM: &str = r#"你是 XAim 的意图解析器。
+把用户任务转成 JSON。
+
+输出格式：
+{
+  "action": "fix_bug | add_test | refactor | review | explain | upgrade | cross_file",
+  "target": "文件或模块名",
+  "description": "一句话描述",
+  "constraints": ["约束1"],
+  "verify": ["type", "lint", "test"]
+}
+
+规则：
+1. 只输出 JSON，不输出其他内容
+2. 不编造不存在的文件
+3. 不确定的字段留空
+4. action 必须是给定枚举之一
+"#;
+
+pub fn build(task: &str, lang: &str) -> String {
+    format!("项目语言：{}\n任务：{}", lang, task)
+}
+
+pub const FEW_SHOT: &[(&str, &str)] = &[
+    ("修复登录空指针", r#"{"action":"fix_bug","target":"login","description":"修复登录接口空指针","constraints":[],"verify":["type","test"]}"#),
+    ("给 auth 模块补单元测试", r#"{"action":"add_test","target":"auth","description":"为 auth 模块补单元测试","constraints":["覆盖主要分支"],"verify":["test"]}"#),
+    ("把所有 fetch 改成 axios", r#"{"action":"cross_file","target":"*","description":"全局替换 fetch 为 axios","constraints":["保持 API 兼容"],"verify":["type","test"]}"#),
+];
+
+[验收]
+- 20 个样例测试通过
+- JSON 可解析
+```
+
+---
+
+## 提示词 9.2：计划生成 Prompt
+
+```text
+[上下文]
+XAim 需要生成执行计划。
+
+[目标]
+实现计划 prompt。
+
+[输出]
+src-tauri/src/prompts/plan.rs：
+
+pub const SYSTEM: &str = r#"你是 XAim 的任务规划器。
+根据任务和代码上下文生成执行计划。
+
+输出格式：
+{
+  "steps": [
+    {"action": "read", "file": "src/auth.ts", "reason": "查看登录逻辑"},
+    {"action": "modify", "file": "src/auth.ts", "reason": "添加空值检查"}
+  ],
+  "files_to_modify": ["src/auth.ts"],
+  "risks": ["可能影响其他调用方"]
+}
+
+规则：
+1. 只输出 JSON
+2. 步骤要具体
+3. 列出所有要修改的文件
+4. 标注风险
+"#;
+
+pub fn build(task: &str, context: &Context) -> String
+
+[验收]
+- 计划可读
+- 单元测试
+```
+
+---
+
+## 提示词 9.3：代码修改 Prompt
+
+```text
+[上下文]
+XAim 需要生成代码修改。
+
+[目标]
+实现修改 prompt。
+
+[输出]
+src-tauri/src/prompts/modify.rs：
+
+pub const SYSTEM: &str = r#"你是 XAim，一个严谨的编程 Agent。
+根据任务和上下文生成 unified diff。
+
+规则：
+1. 只修改必要文件
+2. 输出标准 unified diff 格式
+3. 不修改无关代码
+4. 不编造不存在的文件
+5. 保留原有代码风格
+6. 每个修改引用文件路径和行号
+7. 不输出解释，不输出 markdown 代码块标记
+
+输出格式：
+--- a/path/to/file
++++ b/path/to/file
+@@ -10,3 +10,4 @@
+ context
+-old line
++new line
+ context
+"#;
+
+pub fn build(task: &str, plan: &str, context: &Context) -> String
+
+[验收]
+- 生成的 diff 可解析
+- 可应用到工作区
+- 单元测试
+```
+
+---
+
+## 提示词 9.4：修复 Prompt
+
+```text
+[上下文]
+XAim 验证失败后修复。
+
+[目标]
+实现修复 prompt。
+
+[输出]
+src-tauri/src/prompts/repair.rs：
+
+pub const SYSTEM: &str = r#"你是 XAim，修复代码错误。
+根据错误信息和当前代码生成修复 diff。
+
+规则：
+1. 只修错误，不重构
+2. 输出 unified diff
+3. 不引入新错误
+4. 不输出解释
+
+输出格式：
+--- a/path
++++ b/path
+@@ ...
+"#;
+
+pub fn build(errors: &str, code: &str, task: &str) -> String
+
+[验收]
+- 修复后验证通过率 > 50%
+- 单元测试
+```
+
+---
+
+## 提示词 9.5：总结 Prompt
+
+```text
+[上下文]
+XAim 需要总结任务结果。
+
+[目标]
+实现总结 prompt。
+
+[输出]
+src-tauri/src/prompts/summarize.rs：
+
+pub const SYSTEM: &str = r#"你是 XAim，总结任务执行结果。
+用简洁中文总结：
+1. 做了什么
+2. 改了哪些文件
+3. 验证结果
+4. 注意事项
+"#;
+
+pub fn build(task: &str, patches: &[Patch], verifies: &[VerifyResult]) -> String
+
+[验收]
+- 总结可读
+- 单元测试
+```
+
+---
+
+# 阶段 10：IPC 命令
+
+## 提示词 10.1：Project 命令
+
+```text
+[上下文]
+XAim 前后端通过 Tauri IPC 通信。
+
+[目标]
+实现 Project 相关命令。
+
+[输出]
+src-tauri/src/commands/project.rs：
+
+#[tauri::command]
+pub async fn open_project(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<Project, String>
+
+#[tauri::command]
+pub async fn close_project(state: State<'_, AppState>) -> Result<(), String>
+
+#[tauri::command]
+pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<Project>, String>
+
+#[tauri::command]
+pub async fn get_file_tree(
+    project_id: i64,
+    state: State<'_, AppState>,
+) -> Result<FileNode, String>
+
+#[tauri::command]
+pub async fn read_file(
+    project_id: i64,
+    path: String,
+    start: Option<u32>,
+    end: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<String, String>
+
+要求：
+- 错误转 String
+- 状态存在 AppState
+- 打开项目时自动索引
+
+[验收]
+- 前端能调用
+- 单元测试
+```
+
+---
+
+## 提示词 10.2：Task 命令
+
+```text
+[上下文]
+XAim 需要任务相关命令。
+
+[目标]
+实现 Task 命令。
+
+[输出]
+src-tauri/src/commands/task.rs：
+
+#[tauri::command]
+pub async fn run_task(
+    project_id: i64,
+    prompt: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<i64, String>
+
+#[tauri::command]
+pub async fn cancel_task(task_id: i64, state: State<'_, AppState>) -> Result<(), String>
+
+#[tauri::command]
+pub async fn get_task(task_id: i64, state: State<'_, AppState>) -> Result<Task, String>
+
+#[tauri::command]
+pub async fn list_tasks(
+    project_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<Task>, String>
+
+#[tauri::command]
+pub async fn apply_patch(patch_id: i64, state: State<'_, AppState>) -> Result<(), String>
+
+#[tauri::command]
+pub async fn reject_patch(patch_id: i64, state: State<'_, AppState>) -> Result<(), String>
+
+#[tauri::command]
+pub async fn rollback_task(task_id: i64, state: State<'_, AppState>) -> Result<(), String>
+
+#[tauri::command]
+pub async fn list_patches(task_id: i64, state: State<'_, AppState>) -> Result<Vec<Patch>, String>
+
+[验收]
+- 前端能调用
+- 单元测试
+```
+
+---
+
+## 提示词 10.3：Model 和 Config 命令
+
+```text
+[上下文]
+XAim 需要模型和配置命令。
+
+[目标]
+实现 Model 和 Config 命令。
+
+[输出]
+src-tauri/src/commands/model.rs：
+
+#[tauri::command]
+pub async fn get_model_config(state: State<'_, AppState>) -> Result<ModelConfig, String>
+
+#[tauri::command]
+pub async fn set_model_config(config: ModelConfig, state: State<'_, AppState>) -> Result<(), String>
+
+#[tauri::command]
+pub async fn test_model_connection(config: ModelConfig) -> Result<bool, String>
+
+#[tauri::command]
+pub async fn list_models(provider: String) -> Result<Vec<String>, String>
+
+src-tauri/src/commands/config.rs：
+
+#[tauri::command]
+pub async fn get_config(state: State<'_, AppState>) -> Result<Config, String>
+
+#[tauri::command]
+pub async fn set_config(config: Config, state: State<'_, AppState>) -> Result<(), String>
+
+[验收]
+- 前端能调用
+- 测试连接可用
+```
+
+---
+
+## 提示词 10.4：注册所有命令
+
+```text
+[上下文]
+XAim 所有命令已实现。
+
+[目标]
+在 main.rs 注册所有命令。
+
+[输出]
+src-tauri/src/main.rs：
+
+fn main() {
+    init_logging();
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_shell::init())
+        .manage(AppState::new())
+        .invoke_handler(tauri::generate_handler![
+            commands::project::open_project,
+            commands::project::close_project,
+            commands::project::list_projects,
+            commands::project::get_file_tree,
+            commands::project::read_file,
+            commands::task::run_task,
+            commands::task::cancel_task,
+            commands::task::get_task,
+            commands::task::list_tasks,
+            commands::task::apply_patch,
+            commands::task::reject_patch,
+            commands::task::rollback_task,
+            commands::task::list_patches,
+            commands::model::get_model_config,
+            commands::model::set_model_config,
+            commands::model::test_model_connection,
+            commands::model::list_models,
+            commands::config::get_config,
+            commands::config::set_config,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+[验收]
+- pnpm tauri dev 能启动
+- 前端能调用所有命令
+```
+
+---
+
+# 阶段 11：前端 IPC 封装
+
+## 提示词 11.1：IPC 封装
+
+```text
+[上下文]
+XAim 前端需要调用后端命令。
+
+[目标]
+封装 IPC 调用。
+
+[输出]
+src/services/ipc.ts：
+
+import { invoke } from '@tauri-apps/api/core';
+import type { Project, Task, Patch, FileNode, ModelConfig, Config } from '../types';
+
+export const ipc = {
+  openProject: (path: string) => invoke<Project>('open_project', { path }),
+  closeProject: () => invoke<void>('close_project'),
+  listProjects: () => invoke<Project[]>('list_projects'),
+  getFileTree: (projectId: number) => invoke<FileNode>('get_file_tree', { projectId }),
+  readFile: (projectId: number, path: string, start?: number, end?: number) =>
+    invoke<string>('read_file', { projectId, path, start, end }),
+
+  runTask: (projectId: number, prompt: string) =>
+    invoke<number>('run_task', { projectId, prompt }),
+  cancelTask: (taskId: number) => invoke<void>('cancel_task', { taskId }),
+  getTask: (taskId: number) => invoke<Task>('get_task', { taskId }),
+  listTasks: (projectId: number) => invoke<Task[]>('list_tasks', { projectId }),
+  applyPatch: (patchId: number) => invoke<void>('apply_patch', { patchId }),
+  rejectPatch: (patchId: number) => invoke<void>('reject_patch', { patchId }),
+  rollbackTask: (taskId: number) => invoke<void>('rollback_task', { taskId }),
+  listPatches: (taskId: number) => invoke<Patch[]>('list_patches', { taskId }),
+
+  getModelConfig: () => invoke<ModelConfig>('get_model_config'),
+  setModelConfig: (config: ModelConfig) => invoke<void>('set_model_config', { config }),
+  testModelConnection: (config: ModelConfig) =>
+    invoke<boolean>('test_model_connection', { config }),
+  listModels: (provider: string) => invoke<string[]>('list_models', { provider }),
+
+  getConfig: () => invoke<Config>('get_config'),
+  setConfig: (config: Config) => invoke<void>('set_config', { config }),
+};
+
+[验收]
+- pnpm typecheck 通过
+```
+
+---
+
+## 提示词 11.2：事件订阅
+
+```text
+[上下文]
+XAim 前端需要订阅后端事件。
+
+[目标]
+封装事件订阅。
+
+[输出]
+src/services/events.ts：
+
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import type { XaimEvent } from '../types';
+
+export async function subscribeEvents(
+  handler: (event: XaimEvent) => void
+): Promise<UnlistenFn> {
+  return listen<XaimEvent>('xaim://event', (e) => handler(e.payload));
+}
+
+[验收]
+- 能订阅
+- 类型正确
+```
+
+---
+
+# 阶段 12：前端状态管理
+
+## 提示词 12.1：Project Store
+
+```text
+[上下文]
+XAim 前端用 Zustand 管理状态。
+
+[目标]
+实现 Project store。
+
+[输出]
+src/stores/project.ts：
+
+interface ProjectState {
+  currentProject: Project | null;
+  fileTree: FileNode | null;
+  recentProjects: Project[];
+  loading: boolean;
+
+  openProject: (path: string) => Promise<void>;
+  closeProject: () => Promise<void>;
+  loadFileTree: (projectId: number) => Promise<void>;
+  loadRecentProjects: () => Promise<void>;
+}
+
+用 create<ProjectState>()(set, get) => ({ ... })
+
+[验收]
+- 状态正确
+- 单元测试
+```
+
+---
+
+## 提示词 12.2：Task Store
+
+```text
+[上下文]
+XAim 需要任务状态。
+
+[目标]
+实现 Task store。
+
+[输出]
+src/stores/task.ts：
+
+interface TaskState {
+  currentTask: Task | null;
+  steps: TaskStep[];
+  patches: Patch[];
+  verifies: VerifyResult[];
+  context: ContextFile[];
+  toolLogs: ToolLog[];
+  events: XaimEvent[];
+
+  setCurrentTask: (t: Task) => void;
+  addStep: (s: TaskStep) => void;
+  addPatch: (p: Patch) => void;
+  addVerify: (v: VerifyResult) => void;
+  addToolLog: (l: ToolLog) => void;
+  handleEvent: (e: XaimEvent) => void;
+  reset: () => void;
+}
+
+handleEvent 根据事件类型更新对应字段。
+
+[验收]
+- 事件驱动更新
+- 单元测试
+```
+
+---
+
+## 提示词 12.3：Config Store
+
+```text
+[上下文]
+XAim 需要配置状态。
+
+[目标]
+实现 Config store。
+
+[输出]
+src/stores/config.ts：
+
+interface ConfigState {
+  config: Config | null;
+  modelConfig: ModelConfig | null;
+  loading: boolean;
+
+  loadConfig: () => Promise<void>;
+  saveConfig: (c: Config) => Promise<void>;
+  loadModelConfig: () => Promise<void>;
+  saveModelConfig: (c: ModelConfig) => Promise<void>;
+  testConnection: (c: ModelConfig) => Promise<boolean>;
+}
+
+[验收]
+- 配置持久化
+- 测试连接可用
+```
+
+---
+
+# 阶段 13：UI 实现
+
+## 提示词 13.1：主布局
+
+```text
+[上下文]
+XAim 是桌面应用，已实现 IPC 和状态管理。
+
+[目标]
+实现主布局。
+
+[输出]
+src/App.tsx：
+- 路由：Workspace / Settings
+- 全局主题（深色）
+- 订阅事件
+
+src/pages/Workspace.tsx：
+布局：
+- 顶部：TopBar
+- 中间：左 FileTree | 中 TaskPanel | 右 ContextViewer
+- 底部：InputBar
+- 状态栏：StatusBar
+
+[约束]
+- Tailwind
+- 深色主题
+- 响应式
+- 可折叠右侧
+
+[验收]
+- 布局正确
+- 无控制台错误
+```
+
+---
+
+## 提示词 13.2：TopBar 组件
+
+```text
+[上下文]
+XAim 主界面需要顶部栏。
+
+[目标]
+实现 TopBar。
+
+[输出]
+src/components/TopBar.tsx：
+
+功能：
+- 显示项目名
+- 模型选择下拉
+- 打开项目按钮
+- 设置按钮
+- 索引状态指示
+
+[约束]
+- Tailwind
+- 高度 48px
+- 可点击
+
+[验收]
+- 显示正确
+- 交互可用
+```
+
+---
+
+## 提示词 13.3：FileTree 组件
+
+```text
+[上下文]
+XAim 需要文件树。
+
+[目标]
+实现 FileTree。
+
+[输出]
+src/components/FileTree.tsx：
+
+功能：
+- 递归渲染 FileNode
+- 目录可折叠
+- 点击文件预览
+- 图标区分文件类型
+- 搜索框
+
+[约束]
+- 虚拟滚动（大项目）
+- 键盘导航
+- Tailwind
+
+[验收]
+- 树正确渲染
+- 折叠可用
+- 大项目不卡
+```
+
+---
+
+## 提示词 13.4：StepTimeline 组件
+
+```text
+[上下文]
+XAim 需要显示任务步骤。
+
+[目标]
+实现 StepTimeline。
+
+[输出]
+src/components/StepTimeline.tsx：
+
+功能：
+- 显示每个步骤
+- 状态图标：✓ ⏳ ✗
+- 当前步骤高亮
+- 时间戳
+
+[约束]
+- Tailwind
+- 自动滚动到当前
+
+[验收]
+- 步骤正确显示
+- 状态正确
+```
+
+---
+
+## 提示词 13.5：TaskPanel 组件
+
+```text
+[上下文]
+XAim 需要任务面板。
+
+[目标]
+实现 TaskPanel。
+
+[输出]
+src/components/TaskPanel.tsx：
+
+结构：
+- StepTimeline
+- 候选 Diff 列表（DiffView）
+- VerifyPanel
+- ActionBar（应用/拒绝/回滚）
+
+[约束]
+- 监听 task store
+- 流式更新
+- 无任务时显示空状态
+
+[验收]
+- 事件驱动更新
+- 按钮状态正确
+```
+
+---
+
+## 提示词 13.6：DiffView 组件
+
+```text
+[上下文]
+XAim 需要显示 Diff。
+
+[目标]
+实现 DiffView。
+
+[输出]
+src/components/DiffView.tsx：
+
+功能：
+- 用 Monaco Editor
+- 显示 unified diff
+- 折叠/展开
+- 显示评分
+- 语法高亮
+
+[约束]
+- 用 @monaco-editor/react
+- readOnly
+- renderSideBySide
+- 高度自适应
+
+[验收]
+- Diff 正确渲染
+- 大 diff 不卡
+```
+
+---
+
+## 提示词 13.7：VerifyPanel 组件
+
+```text
+[上下文]
+XAim 需要显示验证结果。
+
+[目标]
+实现 VerifyPanel。
+
+[输出]
+src/components/VerifyPanel.tsx：
+
+功能：
+- 显示类型/Lint/测试/构建结果
+- 通过绿色，失败红色
+- 展开查看详情
+- 显示耗时
+
+[验收]
+- 结果正确显示
+- 颜色正确
+```
+
+---
+
+## 提示词 13.8：ContextViewer 组件
+
+```text
+[上下文]
+XAim 需要显示上下文。
+
+[目标]
+实现 ContextViewer。
+
+[输出]
+src/components/ContextViewer.tsx：
+
+功能：
+- 显示发送给模型的文件
+- 折叠/展开
+- 显示 token 数
+- 显示选中原因
+- 高亮相关行
+
+[验收]
+- 上下文可见
+- token 正确
+```
+
+---
+
+## 提示词 13.9：ToolLog 组件
+
+```text
+[上下文]
+XAim 需要显示工具调用日志。
+
+[目标]
+实现 ToolLog。
+
+[输出]
+src/components/ToolLog.tsx：
+
+功能：
+- 显示每次工具调用
+- 时间戳
+- 工具名、参数、结果
+- 可折叠
+
+[验收]
+- 日志实时更新
+- 可读
+```
+
+---
+
+## 提示词 13.10：InputBar 组件
+
+```text
+[上下文]
+XAim 需要输入栏。
+
+[目标]
+实现 InputBar。
+
+[输出]
+src/components/InputBar.tsx：
+
+功能：
+- 多行输入
+- 发送按钮
+- Enter 发送，Shift+Enter 换行
+- 历史记录（上下键）
+- 任务运行中禁用
+
+[验收]
+- 输入正常
+- 快捷键正确
+```
+
+---
+
+## 提示词 13.11：StatusBar 组件
+
+```text
+[上下文]
+XAim 需要状态栏。
+
+[目标]
+实现 StatusBar。
+
+[输出]
+src/components/StatusBar.tsx：
+
+功能：
+- 索引状态
+- 当前任务耗时
+- Token 使用
+- 成本
+- 模型名
+
+[验收]
+- 实时更新
+```
+
+---
+
+## 提示词 13.12：HistoryList 组件
+
+```text
+[上下文]
+XAim 需要历史任务列表。
+
+[目标]
+实现 HistoryList。
+
+[输出]
+src/components/HistoryList.tsx：
+
+功能：
+- 显示历史任务
+- 状态、耗时、成本
+- 点击查看详情
+- 回滚按钮
+
+[验收]
+- 历史正确显示
+- 回滚可用
+```
+
+---
+
+## 提示词 13.13：Settings 页面
+
+```text
+[上下文]
+XAim 需要设置页。
+
+[目标]
+实现 Settings。
+
+[输出]
+src/pages/Settings.tsx：
+
+分组：
+1. 模型：provider、key、baseUrl、temperature、maxTokens、测试连接
+2. 索引：忽略目录、最大文件
+3. 验证：开关、命令
+4. 修复：轮数、超时
+5. 安全：白名单、确认策略
+6. 界面：主题、语言
+
+[约束]
+- 表单校验
+- 保存到后端
+- 测试连接按钮
+
+[验收]
+- 配置持久化
+- 测试连接可用
+```
+
+---
+
+# 阶段 14：测试
+
+## 提示词 14.1：Rust 单元测试
+
+```text
+[上下文]
+XAim 需要单元测试。
+
+[目标]
+为核心模块写测试。
+
+[输出]
+- store：CRUD 测试
+- index：扫描、hash、语言、符号测试
+- search：检索、上下文测试
+- model：mock provider 测试
+- tools：每个工具测试
+- verify：解析器测试
+- agent：状态机测试
+
+[约束]
+- Rust 用 #[cfg(test)]
+- 用 tempfile 做临时目录
+- 用 mockito 做 HTTP mock
+- 覆盖率 > 60%
+
+[验收]
+- cargo test 通过
+- cargo tarpaulin 覆盖率报告
+```
+
+---
+
+## 提示词 14.2：前端测试
+
+```text
+[上下文]
+XAim 需要前端测试。
+
+[目标]
+为组件写测试。
+
+[输出]
+- stores：事件处理测试
+- components：渲染测试
+- services：IPC mock 测试
+
+[约束]
+- 用 vitest
+- 用 @testing-library/react
+- 覆盖率 > 50%
+
+[验收]
+- pnpm test 通过
+```
+
+---
+
+## 提示词 14.3：集成测试
+
+```text
+[上下文]
+XAim 需要集成测试。
+
+[目标]
+写端到端测试。
+
+[输出]
+- 打开项目 → 索引 → 输入任务 → 生成 diff → 应用 → 验证
+
+[约束]
+- 用 mock 模型
+- 用临时项目
+- 不依赖真实 API
+
+[验收]
+- 完整流程通过
+```
+
+---
+
+# 阶段 15：评测体系
+
+## 提示词 15.1：评测任务模板
+
+```text
+[上下文]
+XAim 需要评测准确率。
+
+[目标]
+建立评测任务模板。
+
+[输出]
+tests/eval/tasks/001-fix-null-pointer/
+  repo/              # 初始代码
+  task.md            # 任务描述
+  verify.sh          # 验证命令
+  expected.diff      # 期望 diff（可选）
+
+task.md 格式：
+# 任务
+修复 src/auth.ts 中的登录空指针
+
+# 验证
+npm test
+
+# 期望
+- 测试通过
+- 不修改其他文件
+
+[验收]
+- 模板可复制
+```
+
+---
+
+## 提示词 15.2：30 个评测任务
+
+```text
+[上下文]
+XAim 需要 30 个评测任务。
+
+[目标]
+生成 30 个任务。
+
+[输出]
+- Bug 修复 10 个（TS、Python、Rust、Go）
+- 补测试 5 个
+- 重构 5 个
+- 跨文件 5 个
+- 依赖升级 3 个
+- 代码审查 2 个
+
+每个任务：
+- repo/ 初始代码
+- task.md 描述
+- verify.sh 验证
+
+[约束]
+- 每个任务独立
+- 每个任务有明确通过标准
+
+[验收]
+- 30 个任务可跑
+- 输出成功率
+```
+
+---
+
+## 提示词 15.3：评测运行器
+
+```text
+[上下文]
+XAim 需要自动跑评测。
+
+[目标]
+实现评测运行器。
+
+[输出]
+tests/eval/runner.rs：
+
+pub struct EvalReport {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub avg_duration_ms: u64,
+    pub avg_tokens: u64,
+    pub details: Vec<TaskResult>,
+}
+
+pub async fn run_eval(tasks_dir: &Path) -> EvalReport
+
+流程：
+1. 遍历任务目录
+2. 复制 repo 到临时目录
+3. 跑任务
+4. 跑 verify.sh
+5. 记录结果
+6. 输出 JSON 和 markdown
+
+[验收]
+- 一条命令跑全部
+- 报告可读
+```
+
+---
+
+# 阶段 16：打包与发布
+
+## 提示词 16.1：Tauri 打包配置
+
+```text
+[上下文]
+XAim 需要打包。
+
+[目标]
+配置打包。
+
+[输出]
+src-tauri/tauri.conf.json：
+
+{
+  "productName": "XAim",
+  "version": "0.1.0",
+  "identifier": "com.xaim.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [{
+      "title": "XAim",
+      "width": 1440,
+      "height": 900,
+      "minWidth": 1024,
+      "minHeight": 700
+    }],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "dmg"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.icns", "icons/icon.ico"]
+  }
+}
+
+[验收]
+- 生成图标
+- 打包成功
+```
+
+---
+
+## 提示词 16.2：Windows 打包
+
+```text
+[上下文]
+XAim 需要 Windows 安装包。
+
+[目标]
+打包 Windows。
+
+[输出]
+- .msi 安装包
+- .exe NSIS 安装包
+
+命令：
+pnpm tauri build --target x86_64-pc-windows-msvc
+
+[约束]
+- 包 < 20MB
+- 启动 < 2 秒
+- 代码签名（可选）
+
+[验收]
+- 安装后可运行
+- 启动正常
+```
+
+---
+
+## 提示词 16.3：macOS 打包
+
+```text
+[上下文]
+XAim 需要 macOS 安装包。
+
+[目标]
+打包 macOS。
+
+[输出]
+- .dmg 安装包
+- .app 应用
+
+命令：
+pnpm tauri build --target aarch64-apple-darwin
+
+[约束]
+- 支持 Intel 和 Apple Silicon
+- 代码签名（可选）
+
+[验收]
+- 安装后可运行
+```
+
+---
+
+## 提示词 16.4：CI/CD
+
+```text
+[上下文]
+XAim 需要 CI。
+
+[目标]
+配置 GitHub Actions。
+
+[输出]
+.github/workflows/ci.yml：
+- push 时跑 test + lint + typecheck
+
+.github/workflows/release.yml：
+- tag 时打包 Windows + macOS
+- 上传 artifact
+
+[约束]
+- 缓存 Rust 和 pnpm
+- 多平台
+
+[验收]
+- push 自动跑测试
+- tag 自动出包
+```
+
+---
+
+# 阶段 17：文档与发布
+
+## 提示词 17.1：README
+
+```text
+[上下文]
+XAim 准备发布。
+
+[目标]
+写 README。
+
+[输出]
+README.md：
+
+# XAim
+> Aim at intent, eXecute code.
+
+桌面版编程 Agent。
+
+## 特性
+- 本地优先
+- 验证驱动
+- 过程透明
+- 多候选 + 自动修复
+
+## 安装
+- Windows: 下载 .msi
+- macOS: 下载 .dmg
+
+## 快速开始
+1. 打开 XAim
+2. 选择项目
+3. 输入任务
+4. 确认 Diff
+
+## 开发
+...
+
+## 许可证
+MIT
+
+[验收]
+- 清晰
+- 有截图
+```
+
+---
+
+## 提示词 17.2：用户文档
+
+```text
+[上下文]
+XAim 需要用户文档。
+
+[目标]
+写用户文档。
+
+[输出]
+docs/USER_GUIDE.md：
+- 安装
+- 快速开始
+- 模型配置
+- 任务示例
+- 常见问题
+- 故障排查
+
+docs/FAQ.md：
+- 支持哪些语言
+- 支持哪些模型
+- 如何回滚
+- 如何配置命令
+
+[验收]
+- 覆盖主要场景
+```
+
+---
+
+## 提示词 17.3：发布 checklist
+
+```text
+[上下文]
+XAim 准备发布。
+
+[目标]
+发布 checklist。
+
+[输出]
+- [ ] 版本号更新
+- [ ] CHANGELOG
+- [ ] README 更新
+- [ ] 用户文档
+- [ ] Windows 打包
+- [ ] macOS 打包
+- [ ] GitHub Release
+- [ ] 官网/落地页
+- [ ] 社交媒体
+- [ ] 收集反馈
+
+[验收]
+- 发布成功
+```
+
+---
+
+# 开发顺序总结
+
+```text
+阶段 0  环境与项目初始化        （提示词 0.1 - 0.3）
+阶段 1  核心类型与错误          （提示词 1.1 - 1.4）
+阶段 2  SQLite 存储层          （提示词 2.1 - 2.5）
+阶段 3  项目扫描与文件树        （提示词 3.1 - 3.6）
+阶段 4  检索与上下文            （提示词 4.1 - 4.5）
+阶段 5  模型接入                （提示词 5.1 - 5.4）
+阶段 6  工具系统                （提示词 6.1 - 6.7）
+阶段 7  验证与修复              （提示词 7.1 - 7.4）
+阶段 8  Agent 编排             （提示词 8.1 - 8.6）
+阶段 9  Prompt 模板            （提示词 9.1 - 9.5）
+阶段 10 IPC 命令               （提示词 10.1 - 10.4）
+阶段 11 前端 IPC 封装          （提示词 11.1 - 11.2）
+阶段 12 前端状态管理            （提示词 12.1 - 12.3）
+阶段 13 UI 实现                （提示词 13.1 - 13.13）
+阶段 14 测试                   （提示词 14.1 - 14.3）
+阶段 15 评测体系               （提示词 15.1 - 15.3）
+阶段 16 打包与发布             （提示词 16.1 - 16.4）
+阶段 17 文档与发布             （提示词 17.1 - 17.3）
+```
+
+---
+
+# 使用建议
+
+1. **严格按顺序**：每步依赖前一步
+2. **每步跑验收**：不通过不进下一步
+3. **保留 AI 输出**：出问题可回退
+4. **每周跑评测**：数据驱动
+5. **文档同步更新**：代码变了文档也要变
+
+---
+
+**现在可以从提示词 0.1 开始，复制给 AI 编程助手，开始开发 XAim。**
+
+需要我继续帮你：
+
+1. **生成 30 个评测任务的具体代码**
+2. **生成完整的 Prompt 模板（带更多 few-shot）**
+3. **生成 Tauri 项目初始化的完整命令序列**
+4. **生成第一批 GitHub Issue 列表**
+5. **生成具体的 UI 组件代码**
+
+告诉我从哪个开始。

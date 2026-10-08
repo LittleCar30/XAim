@@ -1,0 +1,7 @@
+diff --git a/REVIEW.md b/REVIEW.md
+new file mode 100644
+--- /dev/null
++++ b/REVIEW.md
+@@ -0,0 +1,2 @@
++# Review
++- P1 `checkout.py:3`: 用户路径 ../secret 直接拼接导致路径穿越，可读取仓库外文件；建议 resolve 后检查 relative_to(root.resolve())，拒绝逃逸根目录。

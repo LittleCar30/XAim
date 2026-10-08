@@ -1,0 +1,14 @@
+diff --git a/requirements.txt b/requirements.txt
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,1 +1,1 @@
+-./vendor/rules-v1
++./vendor/rules-v2
+diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1,2 +1,2 @@
+-from eval_rules import validate
+-def accept(value): return validate(value)
++from eval_rules import is_valid
++def accept(value): return is_valid(value)

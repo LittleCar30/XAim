@@ -1,0 +1,27 @@
+{
+  "id": "022-cross-file-python-model",
+  "category": "cross-file",
+  "language": "Python",
+  "allowed": [
+    "models.py",
+    "service.py",
+    "serializer.py"
+  ],
+  "required": [
+    "models.py",
+    "service.py",
+    "serializer.py"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests"
+    ]
+  ],
+  "mutations": []
+}

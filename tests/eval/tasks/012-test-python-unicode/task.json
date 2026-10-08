@@ -1,0 +1,54 @@
+{
+  "id": "012-test-python-unicode",
+  "category": "tests",
+  "language": "Python",
+  "allowed": [
+    "tests/test_slug.py"
+  ],
+  "required": [
+    "tests/test_slug.py"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests"
+    ]
+  ],
+  "mutations": [
+    {
+      "name": "unicode removed",
+      "file": "slug.py",
+      "before": "text.lower().split()",
+      "after": "text.encode(\"ascii\", \"ignore\").decode().lower().split()",
+      "command": [
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests"
+      ],
+      "failure": "AssertionError"
+    },
+    {
+      "name": "whitespace not collapsed",
+      "file": "slug.py",
+      "before": "text.lower().split()",
+      "after": "text.lower().split(\" \")",
+      "command": [
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests"
+      ],
+      "failure": "AssertionError"
+    }
+  ]
+}

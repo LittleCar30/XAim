@@ -1,0 +1,25 @@
+{
+  "id": "028-upgrade-rust-math",
+  "category": "dependency",
+  "language": "Rust",
+  "allowed": [
+    "Cargo.toml",
+    "src/lib.rs",
+    "Cargo.lock"
+  ],
+  "required": [
+    "Cargo.toml",
+    "src/lib.rs",
+    "Cargo.lock"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked"
+    ]
+  ],
+  "mutations": []
+}

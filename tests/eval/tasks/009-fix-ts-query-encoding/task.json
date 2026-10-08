@@ -1,0 +1,27 @@
+{
+  "id": "009-fix-ts-query-encoding",
+  "category": "bugfix",
+  "language": "TS",
+  "allowed": [
+    "src/query.ts"
+  ],
+  "required": [
+    "src/query.ts"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": []
+}

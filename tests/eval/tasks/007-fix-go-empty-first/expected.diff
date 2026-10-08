@@ -1,0 +1,15 @@
+diff --git a/first.go b/first.go
+--- a/first.go
++++ b/first.go
+@@ -1,5 +1,6 @@
+-package fixture
+-
+-func First(values []int) (int, bool) {
+-    return values[0], true
+-}
++package fixture
++
++func First(values []int) (int, bool) {
++    if len(values) == 0 { return 0, false }
++    return values[0], true
++}

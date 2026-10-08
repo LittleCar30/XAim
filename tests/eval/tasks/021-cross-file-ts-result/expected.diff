@@ -1,0 +1,20 @@
+diff --git a/src/result.ts b/src/result.ts
+new file mode 100644
+--- /dev/null
++++ b/src/result.ts
+@@ -0,0 +1,1 @@
++export type Result<T> = { ok: boolean; value: T };
+diff --git a/src/reader.ts b/src/reader.ts
+--- a/src/reader.ts
++++ b/src/reader.ts
+@@ -1,1 +1,2 @@
+-export function read(value: string): { ok: boolean; value: string } { return { ok: true, value }; }
++import type { Result } from "./result.js";
++export function read(value: string): Result<string> { return { ok: true, value }; }
+diff --git a/src/writer.ts b/src/writer.ts
+--- a/src/writer.ts
++++ b/src/writer.ts
+@@ -1,1 +1,2 @@
+-export function write(value: string): { ok: boolean; value: string } { return { ok: true, value }; }
++import type { Result } from "./result.js";
++export function write(value: string): Result<string> { return { ok: true, value }; }

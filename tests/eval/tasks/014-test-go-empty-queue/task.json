@@ -1,0 +1,45 @@
+{
+  "id": "014-test-go-empty-queue",
+  "category": "tests",
+  "language": "Go",
+  "allowed": [
+    "queue_test.go"
+  ],
+  "required": [
+    "queue_test.go"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "go",
+      "test",
+      "./..."
+    ]
+  ],
+  "mutations": [
+    {
+      "name": "empty queue wrong",
+      "file": "queue.go",
+      "before": "return 0, false",
+      "after": "return 0, true",
+      "command": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "failure": "--- FAIL:"
+    },
+    {
+      "name": "FIFO wrong",
+      "file": "queue.go",
+      "before": "result := q.items[0]",
+      "after": "result := q.items[len(q.items)-1]",
+      "command": [
+        "go",
+        "test",
+        "./..."
+      ],
+      "failure": "--- FAIL:"
+    }
+  ]
+}

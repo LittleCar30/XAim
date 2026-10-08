@@ -1,0 +1,22 @@
+{
+  "id": "024-cross-file-go-config",
+  "category": "cross-file",
+  "language": "Go",
+  "allowed": [
+    "config.go",
+    "server.go"
+  ],
+  "required": [
+    "config.go",
+    "server.go"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "go",
+      "test",
+      "./..."
+    ]
+  ],
+  "mutations": []
+}

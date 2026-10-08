@@ -1,0 +1,2577 @@
+XAim 完整开发文档
+桌面版编程 Agent
+版本：v0.2（工程完整版）
+定位：准确第一，快速第二，简洁后置
+目标平台：Windows 优先，macOS 次之
+技术栈：Tauri 2 + Rust + React + TypeScript
+文档状态：可直接用于开发
+
+目录
+第一部分：产品与战略
+
+项目概述
+
+目标与原则
+
+用户画像与场景
+
+竞品分析
+
+功能范围
+
+第二部分：架构与技术
+
+总体架构
+
+技术选型
+
+目录结构
+
+数据模型
+
+API 契约
+
+第三部分：核心模块
+
+任务编排器
+
+索引模块
+
+检索模块
+
+上下文构建
+
+模型接入
+
+工具系统
+
+验证模块
+
+修复模块
+
+Git 集成
+
+第四部分：Prompt 工程
+
+Prompt 设计原则
+
+意图解析 Prompt
+
+计划生成 Prompt
+
+代码修改 Prompt
+
+修复 Prompt
+
+总结 Prompt
+
+第五部分：界面设计
+
+界面总览
+
+主布局
+
+任务面板
+
+Diff 视图
+
+设置页
+
+状态管理
+
+第六部分：工程实践
+
+错误处理
+
+日志系统
+
+配置系统
+
+安全设计
+
+性能设计
+
+测试策略
+
+评测体系
+
+CI/CD
+
+打包发布
+
+第七部分：开发计划
+
+开发路线
+
+里程碑
+
+风险与对策
+
+附录
+
+第一部分：产品与战略
+1. 项目概述
+1.1 一句话定义
+XAim 是一个运行在桌面上的编程 Agent，用户用自然语言描述任务，XAim 自动完成代码定位、修改、验证、回滚，并把过程透明展示给用户。
+
+1.2 名字含义
+X = eXplore / eXecute / 未知
+
+Aim = 目标、瞄准
+
+口号：
+
+Aim at intent, eXecute code.
+瞄准意图，执行代码。
+
+1.3 产品定位
+不是 IDE，不是终端工具，不是聊天机器人。
+
+而是：
+
+桌面上的"编程任务执行器"，带验证、带回滚、带过程透明。
+
+1.4 核心价值
+准确：验证驱动，没有验证不算完成
+
+快速：本地索引 + 缓存 + 并行 + 模型路由
+
+透明：上下文、工具调用、Diff 全可见
+
+可控：Git 回滚点，一键恢复
+
+本地优先：代码可不出本机，支持本地模型
+
+2. 目标与原则
+2.1 三大目标
+优先级	目标	说明
+P0	准确	结果必须通过验证
+P1	快速	任务完成时间尽可能短
+P2	简洁	后置目标，前期允许复杂
+2.2 设计原则
+没有验证的修改不算完成
+
+每个修改必须可追溯到文件和行号
+
+高风险修改必须人工确认
+
+失败自动回滚，不污染工作区
+
+多候选并行验证，优于单次强模型
+
+本地能力优先，模型能力补充
+
+过程透明，用户可审计
+
+能缓存就缓存，能并行就并行
+
+每次任务一个 Git 回滚点
+
+不确定时询问用户，不猜测
+
+2.3 非目标
+第一版明确不做：
+
+完整 IDE
+
+终端模拟器
+
+多 Agent 协作
+
+自动部署
+
+插件市场
+
+移动端
+
+云端协作
+
+代码补全（这是 IDE 的事）
+
+3. 用户画像与场景
+3.1 目标用户
+主要用户：
+
+独立开发者（25-40 岁）
+
+小团队工程师
+
+需要维护老项目的开发者
+
+次要用户：
+
+对隐私敏感、希望本地运行的开发者
+
+中文技术栈开发者
+
+技术团队负责人（评估用）
+
+3.2 典型场景
+场景	输入	期望输出	验证方式
+修 Bug	"修复登录空指针"	定位 + 修改 + 测试通过	单元测试
+补测试	"给 auth 模块补单元测试"	新增测试文件 + 全部通过	测试运行
+重构	"把 userService 拆成三个模块"	重构 + 编译通过	编译
+代码审查	"审查这次 diff"	问题列表 + 建议	人工
+解释代码	"解释这个函数"	自然语言解释 + 调用链	人工
+升级依赖	"升级 React 到 18"	修改 + 编译 + 测试	编译 + 测试
+跨文件修改	"把所有 API 调用改成 axios"	多文件修改 + 验证	编译 + 测试
+3.3 用户故事
+text
+作为开发者，
+我希望输入一句中文任务，
+XAim 自动定位代码、修改、跑测试，
+并在失败时自动修复，
+最后让我确认 Diff，
+这样我不用手动搜索和反复调试。
+3.4 用户旅程
+text
+1. 打开 XAim
+2. 选择项目文件夹
+3. 等待索引（首次 10 秒内）
+4. 输入任务："修复登录空指针"
+5. 看到步骤时间线
+6. 看到候选 Diff
+7. 看到验证结果
+8. 点击应用
+9. 任务完成
+10. 不满意可一键回滚
+4. 竞品分析
+产品	形态	优势	劣势	XAim 差异化
+Cursor	IDE	集成度高	绑定编辑器	独立桌面
+Claude Code	CLI	强大	无 GUI	图形界面
+Aider	CLI	Git 集成好	无 GUI	GUI + 验证面板
+Cline	VS Code 插件	免费	绑定 VS Code	独立桌面
+Devin	Web	全自动	贵、闭源	本地优先
+OpenHands	Web	开源	部署复杂	桌面一键
+Continue	插件	开源	功能有限	完整 Agent
+XAim 核心差异：
+
+本地优先，支持本地模型
+
+验证驱动，没有验证不算完成
+
+过程透明，上下文、工具调用、Diff 全可见
+
+多候选 + 自动修复循环
+
+中文开发者体验优先
+
+独立桌面，不绑定编辑器
+
+5. 功能范围
+5.1 功能分层
+层级	功能	优先级	版本
+核心	项目打开、索引	P0	v0.1
+核心	任务输入、步骤时间线	P0	v0.1
+核心	检索、上下文查看	P0	v0.1
+核心	Diff 预览、应用、回滚	P0	v0.1
+核心	模型接入	P0	v0.1
+核心	工具日志	P0	v0.1
+核心	验证：类型、Lint、测试	P0	v0.2
+核心	自动修复循环	P0	v0.2
+增强	多候选 Diff	P1	v0.3
+增强	模型路由	P1	v0.3
+增强	缓存、并行	P1	v0.3
+增强	任务历史、成本统计	P1	v0.3
+增强	评测面板	P1	v0.4
+后续	沙箱	P2	v0.5
+后续	多 Agent	P3	v1.0
+后续	插件系统	P3	v1.0
+5.2 MVP 功能清单
+第一版必须做：
+
+选择项目文件夹
+
+自动索引并显示状态
+
+自然语言任务输入
+
+任务步骤时间线
+
+工具调用日志
+
+上下文查看器
+
+模型和参数设置
+
+Diff 预览
+
+应用 / 拒绝修改
+
+运行类型检查、Lint、测试、构建
+
+自动修复循环
+
+Git 回滚点
+
+任务历史
+
+耗时和 token 统计
+
+第二部分：架构与技术
+6. 总体架构
+6.1 分层架构
+text
+┌─────────────────────────────────────────────┐
+│                  UI 层                       │
+│  React + Monaco + Zustand                    │
+│  - 文件树、任务面板、Diff、验证、设置          │
+├─────────────────────────────────────────────┤
+│                Tauri 桥接层                  │
+│  IPC 命令、事件流、流式输出                   │
+├─────────────────────────────────────────────┤
+│                Rust 核心层                   │
+│  - 任务编排器（Orchestrator）                │
+│  - 工具系统（Tools）                         │
+│  - 验证模块（Verify）                        │
+│  - 修复模块（Repair）                        │
+│  - Git 集成                                  │
+├─────────────────────────────────────────────┤
+│                能力层                        │
+│  - 索引（Index）                             │
+│  - 检索（Search）                            │
+│  - AST / LSP                                 │
+│  - 命令执行（Exec）                          │
+│  - 缓存（Cache）                             │
+├─────────────────────────────────────────────┤
+│                模型层                        │
+│  OpenAI / Anthropic / DeepSeek / Qwen / Ollama│
+├─────────────────────────────────────────────┤
+│                存储层                        │
+│  SQLite + 文件系统 + Git                     │
+└─────────────────────────────────────────────┘
+6.2 进程模型
+text
+主进程：Tauri App
+  ├── UI 渲染进程（WebView）
+  ├── Rust 核心（主进程内，async runtime）
+  ├── 索引子进程（可选，独立线程）
+  ├── 命令执行子进程（每次任务独立）
+  └── 模型请求（异步 HTTP / 本地）
+6.3 数据流
+text
+用户输入
+  -> UI
+  -> Tauri IPC (invoke)
+  -> Rust 任务编排器
+  -> 检索 + 上下文构建
+  -> 模型调用（流式）
+  -> 工具调用（读/写/执行）
+  -> 验证
+  -> 失败修复循环
+  -> Diff 事件流回 UI (emit)
+  -> 用户确认
+  -> 应用 + Git commit
+6.4 线程模型
+text
+Tokio Runtime（多线程）
+  ├── 主任务线程
+  ├── 索引线程（独立）
+  ├── 文件监听线程（独立）
+  ├── 命令执行线程池
+  └── 模型请求线程池
+6.5 事件总线
+text
+后端 emit "xaim://event"
+  -> 前端 listen
+  -> 更新 Zustand store
+  -> 组件重渲染
+7. 技术选型
+7.1 推荐选型
+层	技术	版本	理由
+桌面框架	Tauri	2.x	包小、启动快、内存低
+核心语言	Rust	1.75+	性能、安全、并发
+异步运行时	Tokio	1.x	生态成熟
+前端	React	18.x	生态成熟
+前端语言	TypeScript	5.x	类型安全
+构建	Vite	5.x	快
+状态管理	Zustand	4.x	轻量
+编辑器	Monaco Editor	最新	VS Code 同源
+样式	Tailwind CSS	3.x	快速开发
+索引	ripgrep / grep-searcher	最新	快
+AST	tree-sitter	最新	多语言
+Git	git2-rs	0.18	原生
+命令执行	tokio::process	1.x	异步
+存储	rusqlite	0.31	本地、可靠
+HTTP	reqwest	0.12	异步
+序列化	serde / serde_json	1.x	标准
+错误	thiserror / anyhow	1.x	标准
+日志	tracing	0.1	结构化
+文件监听	notify	6.x	跨平台
+哈希	blake3	1.x	快
+7.2 备选方案
+如果团队只会 TypeScript：
+
+Electron + TypeScript
+
+Rust sidecar 做索引和执行
+
+代价：包大（100MB+）、内存高（300MB+）、启动慢（3-5秒）
+
+建议：
+
+如果目标是"快速"，优先 Tauri + Rust。
+如果目标是"快速开发"，选 Electron，但性能目标要下调。
+
+7.3 版本管理
+Rust：stable，固定版本在 rust-toolchain.toml
+
+Node：20 LTS
+
+pnpm：8.x
+
+所有依赖锁定版本
+
+8. 目录结构
+text
+xaim/
+├── src-tauri/
+│   ├── src/
+│   │   ├── main.rs              # 入口
+│   │   ├── lib.rs               # 库入口
+│   │   ├── types.rs             # 共享类型
+│   │   ├── events.rs            # 事件定义
+│   │   ├── errors.rs            # 错误类型
+│   │   ├── commands/            # IPC 命令
+│   │   │   ├── mod.rs
+│   │   │   ├── project.rs
+│   │   │   ├── task.rs
+│   │   │   ├── model.rs
+│   │   │   └── config.rs
+│   │   ├── agent/               # 任务编排
+│   │   │   ├── mod.rs
+│   │   │   ├── orchestrator.rs
+│   │   │   ├── state.rs
+│   │   │   └── planner.rs
+│   │   ├── index/               # 索引
+│   │   │   ├── mod.rs
+│   │   │   ├── scanner.rs
+│   │   │   ├── hash.rs
+│   │   │   ├── lang.rs
+│   │   │   ├── symbol.rs
+│   │   │   ├── watcher.rs
+│   │   │   └── store.rs
+│   │   ├── search/              # 检索
+│   │   │   ├── mod.rs
+│   │   │   ├── grep.rs
+│   │   │   ├── symbol.rs
+│   │   │   ├── rank.rs
+│   │   │   └── context.rs
+│   │   ├── model/               # 模型
+│   │   │   ├── mod.rs
+│   │   │   ├── provider.rs
+│   │   │   ├── openai.rs
+│   │   │   ├── anthropic.rs
+│   │   │   ├── deepseek.rs
+│   │   │   ├── ollama.rs
+│   │   │   └── router.rs
+│   │   ├── tools/               # 工具
+│   │   │   ├── mod.rs
+│   │   │   ├── trait.rs
+│   │   │   ├── read.rs
+│   │   │   ├── write.rs
+│   │   │   ├── search.rs
+│   │   │   ├── exec.rs
+│   │   │   ├── patch.rs
+│   │   │   └── registry.rs
+│   │   ├── verify/              # 验证
+│   │   │   ├── mod.rs
+│   │   │   ├── runner.rs
+│   │   │   ├── detect.rs
+│   │   │   └── parser.rs
+│   │   ├── repair/              # 修复
+│   │   │   ├── mod.rs
+│   │   │   └── loop.rs
+│   │   ├── git/                 # Git
+│   │   │   ├── mod.rs
+│   │   │   └── ops.rs
+│   │   ├── store/               # SQLite
+│   │   │   ├── mod.rs
+│   │   │   ├── schema.rs
+│   │   │   ├── project.rs
+│   │   │   ├── task.rs
+│   │   │   ├── patch.rs
+│   │   │   ├── file.rs
+│   │   │   └── cache.rs
+│   │   ├── config/              # 配置
+│   │   │   ├── mod.rs
+│   │   │   └── model.rs
+│   │   ├── prompts/             # Prompt 模板
+│   │   │   ├── mod.rs
+│   │   │   ├── intent.rs
+│   │   │   ├── plan.rs
+│   │   │   ├── modify.rs
+│   │   │   ├── repair.rs
+│   │   │   └── summarize.rs
+│   │   └── utils/               # 工具函数
+│   │       ├── mod.rs
+│   │       ├── tokens.rs
+│   │       └── diff.rs
+│   ├── Cargo.toml
+│   ├── tauri.conf.json
+│   └── build.rs
+├── src/
+│   ├── main.tsx
+│   ├── App.tsx
+│   ├── pages/
+│   │   ├── Workspace.tsx
+│   │   └── Settings.tsx
+│   ├── components/
+│   │   ├── TopBar.tsx
+│   │   ├── FileTree.tsx
+│   │   ├── TaskPanel.tsx
+│   │   ├── StepTimeline.tsx
+│   │   ├── DiffView.tsx
+│   │   ├── VerifyPanel.tsx
+│   │   ├── ContextViewer.tsx
+│   │   ├── ToolLog.tsx
+│   │   ├── InputBar.tsx
+│   │   ├── StatusBar.tsx
+│   │   └── HistoryList.tsx
+│   ├── stores/
+│   │   ├── project.ts
+│   │   ├── task.ts
+│   │   ├── config.ts
+│   │   └── ui.ts
+│   ├── services/
+│   │   ├── ipc.ts
+│   │   └── events.ts
+│   ├── types/
+│   │   └── index.ts
+│   └── styles/
+│       └── globals.css
+├── tests/
+│   └── eval/
+│       ├── tasks/
+│       └── runner.rs
+├── docs/
+│   ├── DEVELOPMENT.md
+│   ├── ARCHITECTURE.md
+│   ├── API.md
+│   └── PROMPTS.md
+├── package.json
+├── pnpm-lock.yaml
+├── Cargo.toml
+├── rust-toolchain.toml
+├── README.md
+└── LICENSE
+9. 数据模型
+9.1 SQLite 表
+sql
+-- 项目
+CREATE TABLE projects (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_opened_at INTEGER NOT NULL
+);
+
+-- 文件
+CREATE TABLE files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  language TEXT,
+  size INTEGER,
+  mtime INTEGER,
+  hash TEXT,
+  summary TEXT,
+  indexed_at INTEGER,
+  UNIQUE(project_id, path),
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_files_project ON files(project_id);
+CREATE INDEX idx_files_hash ON files(hash);
+
+-- 符号
+CREATE TABLE symbols (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_symbols_name ON symbols(name);
+CREATE INDEX idx_symbols_file ON symbols(file_id);
+
+-- 任务
+CREATE TABLE tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL,
+  intent TEXT,
+  plan TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  duration_ms INTEGER,
+  token_input INTEGER,
+  token_output INTEGER,
+  cost REAL,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_tasks_project ON tasks(project_id);
+CREATE INDEX idx_tasks_status ON tasks(status);
+
+-- 任务步骤
+CREATE TABLE task_steps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  step_type TEXT NOT NULL,
+  content TEXT,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_steps_task ON task_steps(task_id);
+
+-- 补丁
+CREATE TABLE patches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  file_path TEXT NOT NULL,
+  diff TEXT NOT NULL,
+  applied INTEGER DEFAULT 0,
+  score REAL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_patches_task ON patches(task_id);
+
+-- 缓存
+CREATE TABLE cache (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  expire_at INTEGER
+);
+CREATE INDEX idx_cache_expire ON cache(expire_at);
+
+-- 版本
+CREATE TABLE schema_version (
+  version INTEGER PRIMARY KEY,
+  applied_at INTEGER NOT NULL
+);
+9.2 Rust 类型定义
+rust
+// src-tauri/src/types.rs
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Idle,
+    Parsing,
+    Indexing,
+    Retrieving,
+    Planning,
+    Generating,
+    ApplyingPatch,
+    Verifying,
+    Repairing,
+    WaitingConfirm,
+    Applied,
+    Done,
+    Failed,
+    RolledBack,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Project {
+    pub id: i64,
+    pub path: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_opened_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Task {
+    pub id: i64,
+    pub project_id: i64,
+    pub prompt: String,
+    pub status: TaskStatus,
+    pub intent: Option<String>,
+    pub plan: Option<String>,
+    pub created_at: i64,
+    pub finished_at: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub token_input: Option<i64>,
+    pub token_output: Option<i64>,
+    pub cost: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStep {
+    pub id: i64,
+    pub task_id: i64,
+    pub step_type: String,
+    pub content: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Patch {
+    pub id: i64,
+    pub task_id: i64,
+    pub file_path: String,
+    pub diff: String,
+    pub applied: bool,
+    pub score: Option<f64>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyResult {
+    pub kind: String,
+    pub passed: bool,
+    pub output: String,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfig {
+    pub provider: String,
+    pub name: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub temperature: f32,
+    pub max_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileNode {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub children: Vec<FileNode>,
+}
+9.3 TypeScript 类型定义
+typescript
+// src/types/index.ts
+export type TaskStatus =
+  | 'idle' | 'parsing' | 'indexing' | 'retrieving' | 'planning'
+  | 'generating' | 'applying_patch' | 'verifying' | 'repairing'
+  | 'waiting_confirm' | 'applied' | 'done' | 'failed'
+  | 'rolled_back' | 'cancelled';
+
+export interface Project {
+  id: number;
+  path: string;
+  name: string;
+  createdAt: number;
+  lastOpenedAt: number;
+}
+
+export interface Task {
+  id: number;
+  projectId: number;
+  prompt: string;
+  status: TaskStatus;
+  intent: string | null;
+  plan: string | null;
+  createdAt: number;
+  finishedAt: number | null;
+  durationMs: number | null;
+  tokenInput: number | null;
+  tokenOutput: number | null;
+  cost: number | null;
+}
+
+export interface TaskStep {
+  id: number;
+  taskId: number;
+  stepType: string;
+  content: string;
+  createdAt: number;
+}
+
+export interface Patch {
+  id: number;
+  taskId: number;
+  filePath: string;
+  diff: string;
+  applied: boolean;
+  score: number | null;
+  createdAt: number;
+}
+
+export interface VerifyResult {
+  kind: string;
+  passed: boolean;
+  output: string;
+  durationMs: number;
+}
+
+export interface ModelConfig {
+  provider: string;
+  name: string;
+  apiKey: string;
+  baseUrl: string;
+  temperature: number;
+  maxTokens: number;
+}
+
+export interface FileNode {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+  children: FileNode[];
+}
+
+// 事件
+export type XaimEvent =
+  | { type: 'step'; taskId: number; name: string; status: string }
+  | { type: 'tool'; taskId: number; tool: string; args: string }
+  | { type: 'patch'; taskId: number; file: string; diff: string }
+  | { type: 'verify'; taskId: number; kind: string; passed: boolean; output: string }
+  | { type: 'repair'; taskId: number; round: number }
+  | { type: 'token'; taskId: number; input: number; output: number }
+  | { type: 'done'; taskId: number; status: string }
+  | { type: 'error'; taskId: number; message: string };
+10. API 契约
+10.1 IPC 命令
+rust
+// src-tauri/src/commands/project.rs
+#[tauri::command]
+pub async fn open_project(path: String) -> Result<Project, String>;
+
+#[tauri::command]
+pub async fn close_project() -> Result<(), String>;
+
+#[tauri::command]
+pub async fn list_projects() -> Result<Vec<Project>, String>;
+
+#[tauri::command]
+pub async fn get_file_tree(project_id: i64) -> Result<FileNode, String>;
+
+#[tauri::command]
+pub async fn read_file(project_id: i64, path: String, start: Option<u32>, end: Option<u32>) -> Result<String, String>;
+
+// src-tauri/src/commands/task.rs
+#[tauri::command]
+pub async fn run_task(project_id: i64, prompt: String) -> Result<i64, String>;
+
+#[tauri::command]
+pub async fn cancel_task(task_id: i64) -> Result<(), String>;
+
+#[tauri::command]
+pub async fn get_task(task_id: i64) -> Result<Task, String>;
+
+#[tauri::command]
+pub async fn list_tasks(project_id: i64) -> Result<Vec<Task>, String>;
+
+#[tauri::command]
+pub async fn apply_patch(patch_id: i64) -> Result<(), String>;
+
+#[tauri::command]
+pub async fn reject_patch(patch_id: i64) -> Result<(), String>;
+
+#[tauri::command]
+pub async fn rollback_task(task_id: i64) -> Result<(), String>;
+
+#[tauri::command]
+pub async fn list_patches(task_id: i64) -> Result<Vec<Patch>, String>;
+
+// src-tauri/src/commands/model.rs
+#[tauri::command]
+pub async fn get_model_config() -> Result<ModelConfig, String>;
+
+#[tauri::command]
+pub async fn set_model_config(config: ModelConfig) -> Result<(), String>;
+
+#[tauri::command]
+pub async fn test_model_connection(config: ModelConfig) -> Result<bool, String>;
+
+#[tauri::command]
+pub async fn list_models(provider: String) -> Result<Vec<String>, String>;
+
+// src-tauri/src/commands/config.rs
+#[tauri::command]
+pub async fn get_config() -> Result<Config, String>;
+
+#[tauri::command]
+pub async fn set_config(config: Config) -> Result<(), String>;
+10.2 TypeScript IPC 封装
+typescript
+// src/services/ipc.ts
+import { invoke } from '@tauri-apps/api/core';
+import type { Project, Task, Patch, FileNode, ModelConfig, VerifyResult } from '../types';
+
+export const ipc = {
+  // 项目
+  openProject: (path: string) => invoke<Project>('open_project', { path }),
+  closeProject: () => invoke<void>('close_project'),
+  listProjects: () => invoke<Project[]>('list_projects'),
+  getFileTree: (projectId: number) => invoke<FileNode>('get_file_tree', { projectId }),
+  readFile: (projectId: number, path: string, start?: number, end?: number) =>
+    invoke<string>('read_file', { projectId, path, start, end }),
+
+  // 任务
+  runTask: (projectId: number, prompt: string) =>
+    invoke<number>('run_task', { projectId, prompt }),
+  cancelTask: (taskId: number) => invoke<void>('cancel_task', { taskId }),
+  getTask: (taskId: number) => invoke<Task>('get_task', { taskId }),
+  listTasks: (projectId: number) => invoke<Task[]>('list_tasks', { projectId }),
+  applyPatch: (patchId: number) => invoke<void>('apply_patch', { patchId }),
+  rejectPatch: (patchId: number) => invoke<void>('reject_patch', { patchId }),
+  rollbackTask: (taskId: number) => invoke<void>('rollback_task', { taskId }),
+  listPatches: (taskId: number) => invoke<Patch[]>('list_patches', { taskId }),
+
+  // 模型
+  getModelConfig: () => invoke<ModelConfig>('get_model_config'),
+  setModelConfig: (config: ModelConfig) => invoke<void>('set_model_config', { config }),
+  testModelConnection: (config: ModelConfig) =>
+    invoke<boolean>('test_model_connection', { config }),
+  listModels: (provider: string) => invoke<string[]>('list_models', { provider }),
+
+  // 配置
+  getConfig: () => invoke<Config>('get_config'),
+  setConfig: (config: Config) => invoke<void>('set_config', { config }),
+};
+10.3 事件流
+typescript
+// src/services/events.ts
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import type { XaimEvent } from '../types';
+
+export async function subscribeEvents(
+  handler: (event: XaimEvent) => void
+): Promise<UnlistenFn> {
+  return listen<XaimEvent>('xaim://event', (e) => handler(e.payload));
+}
+第三部分：核心模块
+11. 任务编排器
+11.1 职责
+接收用户任务
+
+生成执行计划
+
+调用工具
+
+管理状态机
+
+触发验证和修复
+
+输出事件流
+
+11.2 状态机
+rust
+// src-tauri/src/agent/state.rs
+impl TaskStatus {
+    pub fn can_transition_to(&self, next: &TaskStatus) -> bool {
+        use TaskStatus::*;
+        match (self, next) {
+            (Idle, Parsing) => true,
+            (Parsing, Indexing) => true,
+            (Indexing, Retrieving) => true,
+            (Retrieving, Planning) => true,
+            (Planning, Generating) => true,
+            (Generating, ApplyingPatch) => true,
+            (ApplyingPatch, Verifying) => true,
+            (Verifying, Repairing) => true,
+            (Verifying, WaitingConfirm) => true,
+            (Repairing, Verifying) => true,
+            (Repairing, WaitingConfirm) => true,
+            (WaitingConfirm, Applied) => true,
+            (WaitingConfirm, Failed) => true,
+            (Applied, Done) => true,
+            (_, Failed) => true,
+            (_, Cancelled) => true,
+            (_, RolledBack) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(self,
+            TaskStatus::Done
+            | TaskStatus::Failed
+            | TaskStatus::RolledBack
+            | TaskStatus::Cancelled
+        )
+    }
+}
+11.3 编排器实现
+rust
+// src-tauri/src/agent/orchestrator.rs
+pub struct Orchestrator {
+    app: AppHandle,
+    store: Arc<Store>,
+    config: Config,
+    cancel_flag: Arc<AtomicBool>,
+}
+
+impl Orchestrator {
+    pub async fn run_task(&self, project_id: i64, prompt: String) -> Result<i64> {
+        // 1. 创建任务记录
+        let task_id = self.store.insert_task(project_id, &prompt)?;
+        self.emit_step(task_id, "解析意图", "running")?;
+
+        // 2. 解析意图
+        let intent = self.parse_intent(&prompt).await?;
+        self.store.update_task_intent(task_id, &intent)?;
+        self.emit_step(task_id, "解析意图", "done")?;
+
+        // 3. 检查索引
+        self.emit_step(task_id, "检查索引", "running")?;
+        self.ensure_indexed(project_id).await?;
+        self.emit_step(task_id, "检查索引", "done")?;
+
+        // 4. 检索相关文件
+        self.emit_step(task_id, "检索相关文件", "running")?;
+        let context = self.build_context(&prompt, project_id).await?;
+        self.emit_step(task_id, "检索相关文件", "done")?;
+
+        // 5. 生成计划
+        self.emit_step(task_id, "生成计划", "running")?;
+        let plan = self.generate_plan(&prompt, &context).await?;
+        self.store.update_task_plan(task_id, &plan)?;
+        self.emit_step(task_id, "生成计划", "done")?;
+
+        // 6. 生成候选 Patch
+        self.emit_step(task_id, "生成候选", "running")?;
+        let candidates = self.generate_candidates(&prompt, &plan, &context).await?;
+        self.emit_step(task_id, "生成候选", "done")?;
+
+        // 7. 应用 + 验证 + 评分
+        let best = self.evaluate_candidates(task_id, &candidates).await?;
+
+        // 8. 展示 Diff，等待确认
+        self.emit_step(task_id, "等待确认", "waiting")?;
+
+        Ok(task_id)
+    }
+}
+12. 索引模块
+12.1 扫描器
+rust
+// src-tauri/src/index/scanner.rs
+pub fn scan_project(root: &Path, ignore: &[String]) -> Result<FileNode> {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .filter_entry(move |e| {
+            let name = e.file_name().to_string_lossy();
+            !ignore.iter().any(|i| name == i.as_str())
+        });
+
+    let mut root_node = FileNode {
+        name: root.file_name().unwrap().to_string_lossy().into(),
+        path: root.to_string_lossy().into(),
+        is_dir: true,
+        size: 0,
+        children: vec![],
+    };
+
+    for entry in builder.build() {
+        let entry = entry?;
+        // 构建树
+    }
+
+    Ok(root_node)
+}
+12.2 文件哈希
+rust
+// src-tauri/src/index/hash.rs
+pub fn file_hash(path: &Path) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut file = std::fs::File::open(path)?;
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+12.3 语言检测
+rust
+// src-tauri/src/index/lang.rs
+pub fn detect_language(path: &Path) -> String {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("ts") | Some("tsx") => "typescript",
+        Some("js") | Some("jsx") => "javascript",
+        Some("py") => "python",
+        Some("rs") => "rust",
+        Some("go") => "go",
+        Some("java") => "java",
+        Some("kt") => "kotlin",
+        Some("swift") => "swift",
+        Some("c") | Some("h") => "c",
+        Some("cpp") | Some("cc") | Some("hpp") => "cpp",
+        Some("cs") => "csharp",
+        Some("rb") => "ruby",
+        Some("php") => "php",
+        Some("vue") => "vue",
+        Some("svelte") => "svelte",
+        Some("json") => "json",
+        Some("yaml") | Some("yml") => "yaml",
+        Some("toml") => "toml",
+        Some("md") => "markdown",
+        _ => "text",
+    }.to_string()
+}
+12.4 符号提取
+rust
+// src-tauri/src/index/symbol.rs
+pub fn extract_symbols(path: &Path, lang: &str, content: &str) -> Result<Vec<Symbol>> {
+    let mut parser = tree_sitter::Parser::new();
+    let language = match lang {
+        "typescript" => tree_sitter_typescript::language_typescript(),
+        "javascript" => tree_sitter_typescript::language_tsx(),
+        "python" => tree_sitter_python::language(),
+        "rust" => tree_sitter_rust::language(),
+        "go" => tree_sitter_go::language(),
+        _ => return Ok(vec![]),
+    };
+    parser.set_language(&language)?;
+    let tree = parser.parse(content, None).ok_or(...)?;
+
+    let mut symbols = vec![];
+    walk_tree(tree.root_node(), content, &mut symbols);
+    Ok(symbols)
+}
+12.5 文件监听
+rust
+// src-tauri/src/index/watcher.rs
+pub fn start_watcher(
+    root: PathBuf,
+    tx: mpsc::Sender<WatchEvent>,
+) -> Result<RecommendedWatcher> {
+    let (raw_tx, raw_rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(raw_tx)?;
+    watcher.watch(&root, RecursiveMode::Recursive)?;
+
+    std::thread::spawn(move || {
+        let mut debouncer = Debouncer::new(Duration::from_millis(500));
+        for event in raw_rx {
+            if let Ok(event) = event {
+                debouncer.push(event, &tx);
+            }
+        }
+    });
+
+    Ok(watcher)
+}
+13. 检索模块
+13.1 ripgrep 检索
+rust
+// src-tauri/src/search/grep.rs
+pub fn search(root: &Path, query: &str, opts: GrepOptions) -> Result<Vec<GrepMatch>> {
+    let mut matches = vec![];
+    let re = RegexMatcher::new_line_matcher(query)?;
+
+    let walker = WalkBuilder::new(root)
+        .git_ignore(true)
+        .build();
+
+    for entry in walker {
+        let entry = entry?;
+        if !entry.file_type().map_or(false, |t| t.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let content = std::fs::read_to_string(path)?;
+        for (line_no, line) in content.lines().enumerate() {
+            if re.find(line.as_bytes()).is_some() {
+                matches.push(GrepMatch {
+                    path: path.to_string_lossy().into(),
+                    line: (line_no + 1) as u32,
+                    text: line.to_string(),
+                });
+                if matches.len() >= opts.max_results {
+                    return Ok(matches);
+                }
+            }
+        }
+    }
+
+    Ok(matches)
+}
+13.2 结果融合与重排
+rust
+// src-tauri/src/search/rank.rs
+pub fn rank_results(
+    task: &str,
+    grep: Vec<GrepMatch>,
+    symbols: Vec<Symbol>,
+) -> Vec<RankedFile> {
+    let mut scores: HashMap<String, f64> = HashMap::new();
+
+    // grep 匹配得分
+    for m in grep {
+        *scores.entry(m.path.clone()).or_default() += 1.0;
+    }
+
+    // 符号匹配得分
+    let task_lower = task.to_lowercase();
+    for s in symbols {
+        if task_lower.contains(&s.name.to_lowercase()) {
+            *scores.entry(s.file.clone()).or_default() += 3.0;
+        }
+    }
+
+    // 排序
+    let mut ranked: Vec<_> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    ranked.into_iter().map(|(path, score)| RankedFile { path, score }).collect()
+}
+14. 上下文构建
+rust
+// src-tauri/src/search/context.rs
+pub fn build_context(
+    task: &str,
+    ranked: Vec<RankedFile>,
+    budget_tokens: usize,
+) -> Result<Context> {
+    let mut ctx = Context { files: vec![], total_tokens: 0 };
+
+    for r in ranked {
+        let content = std::fs::read_to_string(&r.path)?;
+        let tokens = estimate_tokens(&content);
+        if ctx.total_tokens + tokens > budget_tokens {
+            // 截断到函数级
+            let truncated = truncate_to_functions(&content, budget_tokens - ctx.total_tokens);
+            ctx.files.push(ContextFile {
+                path: r.path.clone(),
+                content: truncated,
+                reason: format!("score: {:.2}", r.score),
+            });
+            break;
+        }
+        ctx.total_tokens += tokens;
+        ctx.files.push(ContextFile {
+            path: r.path,
+            content,
+            reason: format!("score: {:.2}", r.score),
+        });
+    }
+
+    Ok(ctx)
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    // 粗略估算：英文 4 字符 1 token，中文 1.5 字符 1 token
+    text.chars().count() / 3
+}
+15. 模型接入
+15.1 Provider trait
+rust
+// src-tauri/src/model/provider.rs
+#[async_trait]
+pub trait ModelProvider: Send + Sync {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse>;
+    async fn stream(&self, req: CompletionRequest)
+        -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>>;
+    fn name(&self) -> &str;
+    fn max_context(&self) -> usize;
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletionRequest {
+    pub model: String,
+    pub messages: Vec<Message>,
+    pub temperature: f32,
+    pub max_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletionResponse {
+    pub content: String,
+    pub usage: Usage,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+15.2 OpenAI 兼容实现
+rust
+// src-tauri/src/model/openai.rs
+pub struct OpenAiProvider {
+    base_url: String,
+    api_key: String,
+    client: reqwest::Client,
+}
+
+#[async_trait]
+impl ModelProvider for OpenAiProvider {
+    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = serde_json::json!({
+            "model": req.model,
+            "messages": req.messages,
+            "temperature": req.temperature,
+            "max_tokens": req.max_tokens,
+        });
+
+        let resp = self.client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await?;
+
+        let data: serde_json::Value = resp.json().await?;
+        let content = data["choices"][0]["message"]["content"]
+            .as_str().unwrap_or("").to_string();
+        let usage = Usage {
+            input_tokens: data["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+            output_tokens: data["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
+        };
+
+        Ok(CompletionResponse { content, usage })
+    }
+
+    async fn stream(&self, req: CompletionRequest)
+        -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        // SSE 流式实现
+        todo!()
+    }
+
+    fn name(&self) -> &str { "openai" }
+    fn max_context(&self) -> usize { 128_000 }
+}
+15.3 模型路由
+rust
+// src-tauri/src/model/router.rs
+pub enum TaskKind {
+    Intent,
+    Retrieve,
+    Generate,
+    Repair,
+    Summarize,
+}
+
+pub fn pick_model(kind: TaskKind, config: &Config) -> ModelChoice {
+    match kind {
+        TaskKind::Intent | TaskKind::Retrieve | TaskKind::Summarize => {
+            ModelChoice::Fast(config.fast_model.clone())
+        }
+        TaskKind::Generate | TaskKind::Repair => {
+            ModelChoice::Strong(config.strong_model.clone())
+        }
+    }
+}
+16. 工具系统
+16.1 Tool trait
+rust
+// src-tauri/src/tools/trait.rs
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &str;
+    fn schema(&self) -> serde_json::Value;
+    async fn call(&self, args: serde_json::Value, ctx: &ToolContext) -> Result<ToolResult>;
+}
+
+pub struct ToolContext {
+    pub project_root: PathBuf,
+    pub store: Arc<Store>,
+    pub require_confirm: bool,
+    pub allowed_commands: Vec<String>,
+}
+
+pub struct ToolResult {
+    pub success: bool,
+    pub output: String,
+    pub error: Option<String>,
+}
+16.2 工具清单
+工具	说明	需确认
+read_file	读文件	否
+write_file	写文件	是
+search	检索	否
+list_dir	列目录	否
+run_command	执行命令	是
+run_test	跑测试	否
+git_diff	查看 diff	否
+git_commit	提交	是
+git_rollback	回滚	是
+apply_patch	应用补丁	是
+16.3 Patch 工具
+rust
+// src-tauri/src/tools/patch.rs
+pub fn parse_diff(text: &str) -> Result<Vec<PatchCandidate>> {
+    let mut candidates = vec![];
+    let mut current: Option<PatchCandidate> = None;
+
+    for line in text.lines() {
+        if line.starts_with("--- ") {
+            if let Some(c) = current.take() {
+                candidates.push(c);
+            }
+            current = Some(PatchCandidate {
+                file_path: line[4..].trim_start_matches("a/").to_string(),
+                diff: String::new(),
+                score: None,
+            });
+        }
+        if let Some(c) = current.as_mut() {
+            c.diff.push_str(line);
+            c.diff.push('\n');
+        }
+    }
+
+    if let Some(c) = current {
+        candidates.push(c);
+    }
+
+    Ok(candidates)
+}
+
+pub fn apply_diff(diff: &str, root: &Path) -> Result<()> {
+    let patch = diffy::Patch::from_str(diff)?;
+    let path = extract_path_from_diff(diff)?;
+    let full_path = root.join(path);
+    let original = std::fs::read_to_string(&full_path)?;
+    let patched = diffy::apply(&original, &patch)?;
+    std::fs::write(&full_path, patched)?;
+    Ok(())
+}
+17. 验证模块
+17.1 自动检测
+rust
+// src-tauri/src/verify/detect.rs
+pub fn detect_verify_config(root: &Path) -> VerifyConfig {
+    let mut config = VerifyConfig::default();
+
+    if root.join("package.json").exists() {
+        let pkg: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("package.json")).unwrap_or_default()
+        ).unwrap_or_default();
+
+        let pm = detect_package_manager(root);
+        config.type_check = Some(format!("{} exec tsc --noEmit", pm));
+        config.lint = Some(format!("{} run lint", pm));
+        config.test = Some(format!("{} test", pm));
+        config.build = Some(format!("{} run build", pm));
+    }
+
+    if root.join("Cargo.toml").exists() {
+        config.type_check = Some("cargo check".into());
+        config.lint = Some("cargo clippy".into());
+        config.test = Some("cargo test".into());
+        config.build = Some("cargo build".into());
+    }
+
+    if root.join("go.mod").exists() {
+        config.type_check = Some("go vet ./...".into());
+        config.test = Some("go test ./...".into());
+        config.build = Some("go build ./...".into());
+    }
+
+    config
+}
+
+fn detect_package_manager(root: &Path) -> &'static str {
+    if root.join("pnpm-lock.yaml").exists() { "pnpm" }
+    else if root.join("yarn.lock").exists() { "yarn" }
+    else { "npm" }
+}
+17.2 验证运行器
+rust
+// src-tauri/src/verify/runner.rs
+pub async fn run_verify(
+    kind: VerifyKind,
+    cmd: &str,
+    root: &Path,
+) -> Result<VerifyResult> {
+    let start = std::time::Instant::now();
+    let output = tokio::time::timeout(
+        Duration::from_secs(300),
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(root)
+            .output()
+    ).await??;
+
+    let passed = output.status.success();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    Ok(VerifyResult {
+        kind: kind.to_string(),
+        passed,
+        output: format!("{}\n{}", stdout, stderr),
+        duration_ms: start.elapsed().as_millis() as i64,
+    })
+}
+17.3 错误解析
+rust
+// src-tauri/src/verify/parser.rs
+pub fn parse_tsc(output: &str) -> Vec<DiagError> {
+    let re = Regex::new(r"^(.+)\((\d+),(\d+)\): (error|warning) TS\d+: (.+)$").unwrap();
+    output.lines().filter_map(|line| {
+        re.captures(line).map(|c| DiagError {
+            file: c[1].to_string(),
+            line: c[2].parse().unwrap_or(0),
+            column: c[3].parse().unwrap_or(0),
+            severity: c[4].to_string(),
+            message: c[5].to_string(),
+        })
+    }).collect()
+}
+
+pub fn parse_cargo(output: &str) -> Vec<DiagError> {
+    let re = Regex::new(r"^error(\[E\d+\])?: (.+)$").unwrap();
+    output.lines().filter_map(|line| {
+        re.captures(line).map(|c| DiagError {
+            file: String::new(),
+            line: 0,
+            column: 0,
+            severity: "error".into(),
+            message: c[2].to_string(),
+        })
+    }).collect()
+}
+18. 修复模块
+rust
+// src-tauri/src/repair/loop.rs
+pub async fn repair_loop(
+    task_id: i64,
+    ctx: &ToolContext,
+    model: &dyn ModelProvider,
+    max_rounds: u32,
+    timeout_sec: u64,
+) -> Result<RepairResult> {
+    let mut round = 0;
+
+    loop {
+        round += 1;
+        if round > max_rounds {
+            return Ok(RepairResult::Exceeded);
+        }
+
+        // 1. 收集错误
+        let verify = run_all_verify(ctx).await?;
+        if verify.iter().all(|v| v.passed) {
+            return Ok(RepairResult::Success);
+        }
+
+        // 2. 构建修复 prompt
+        let errors = verify.iter()
+            .filter(|v| !v.passed)
+            .map(|v| v.output.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let prompt = prompts::repair::build(&errors, &ctx.current_code()?);
+
+        // 3. 调用模型
+        let response = model.complete(CompletionRequest {
+            model: "default".into(),
+            messages: vec![
+                Message { role: "system".into(), content: prompts::repair::SYSTEM.into() },
+                Message { role: "user".into(), content: prompt },
+            ],
+            temperature: 0.1,
+            max_tokens: 4096,
+        }).await?;
+
+        // 4. 应用新 patch
+        let patches = parse_diff(&response.content)?;
+        for p in &patches {
+            apply_diff(&p.diff, &ctx.project_root)?;
+        }
+
+        // 5. 发事件
+        // 6. 继续循环
+    }
+}
+19. Git 集成
+rust
+// src-tauri/src/git/ops.rs
+pub fn is_git_repo(root: &Path) -> bool {
+    git2::Repository::open(root).is_ok()
+}
+
+pub fn create_rollback_point(root: &Path, task_id: i64) -> Result<String> {
+    let repo = git2::Repository::open(root)?;
+    let sig = git2::Signature::now("XAim", "xaim@local")?;
+    let mut index = repo.index()?;
+    let tree_id = index.write_tree()?;
+    let tree = repo.find_tree(tree_id)?;
+
+    let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    let parents: Vec<&git2::Commit> = parent.iter().collect();
+
+    let commit_id = repo.commit(
+        Some("HEAD"),
+        &sig,
+        &sig,
+        &format!("[XAim] rollback point for task {}", task_id),
+        &tree,
+        &parents,
+    )?;
+
+    Ok(commit_id.to_string())
+}
+
+pub fn rollback(root: &Path, commit_id: &str) -> Result<()> {
+    let repo = git2::Repository::open(root)?;
+    let obj = repo.revparse_single(commit_id)?;
+    let commit = obj.peel_to_commit()?;
+    repo.reset(&commit.into_object(), git2::ResetType::Hard, None)?;
+    Ok(())
+}
+
+pub fn diff(root: &Path) -> Result<String> {
+    let repo = git2::Repository::open(root)?;
+    let diff = repo.diff_index_to_workdir(None, None)?;
+    let mut out = String::new();
+    diff.print(git2::DiffFormat::Patch, |_, _, line| {
+        out.push_str(std::str::from_utf8(line.content()).unwrap_or(""));
+        true
+    })?;
+    Ok(out)
+}
+第四部分：Prompt 工程
+20. Prompt 设计原则
+角色明确：明确告诉模型它是谁
+
+输出格式固定：JSON 或 unified diff
+
+约束清晰：不允许编造文件
+
+上下文精简：只给相关代码
+
+Few-shot 示例：提高稳定性
+
+温度低：代码任务 temperature 0.1-0.3
+
+不解释：只要结果
+
+21. 意图解析 Prompt
+rust
+// src-tauri/src/prompts/intent.rs
+pub const SYSTEM: &str = r#"你是 XAim 的意图解析器。
+把用户任务转成 JSON。
+
+输出格式：
+{
+  "action": "fix_bug | add_test | refactor | review | explain | upgrade | cross_file",
+  "target": "文件或模块名",
+  "description": "一句话描述",
+  "constraints": ["约束1", "约束2"],
+  "verify": ["type", "lint", "test"]
+}
+
+规则：
+1. 只输出 JSON，不输出其他内容
+2. 不编造不存在的文件
+3. 不确定的字段留空
+4. action 必须是给定枚举之一
+"#;
+
+pub fn build(task: &str, lang: &str) -> String {
+    format!("项目语言：{}\n任务：{}", lang, task)
+}
+Few-shot 示例：
+
+text
+输入：修复登录空指针
+输出：{"action":"fix_bug","target":"login","description":"修复登录接口的空指针异常","constraints":[],"verify":["type","test"]}
+
+输入：给 auth 模块补单元测试
+输出：{"action":"add_test","target":"auth","description":"为 auth 模块补充单元测试","constraints":["覆盖主要分支"],"verify":["test"]}
+
+输入：把所有 fetch 改成 axios
+输出：{"action":"cross_file","target":"*","description":"全局替换 fetch 为 axios","constraints":["保持 API 兼容"],"verify":["type","test"]}
+22. 计划生成 Prompt
+rust
+// src-tauri/src/prompts/plan.rs
+pub const SYSTEM: &str = r#"你是 XAim 的任务规划器。
+根据任务和代码上下文，生成执行计划。
+
+输出格式：
+{
+  "steps": [
+    {"action": "read", "file": "src/auth.ts", "reason": "查看登录逻辑"},
+    {"action": "modify", "file": "src/auth.ts", "reason": "添加空值检查"},
+    {"action": "test", "command": "npm test", "reason": "验证修改"}
+  ],
+  "files_to_modify": ["src/auth.ts"],
+  "risks": ["可能影响其他调用方"]
+}
+
+规则：
+1. 只输出 JSON
+2. 步骤要具体
+3. 列出所有要修改的文件
+4. 标注风险
+"#;
+23. 代码修改 Prompt
+rust
+// src-tauri/src/prompts/modify.rs
+pub const SYSTEM: &str = r#"你是 XAim，一个严谨的编程 Agent。
+根据任务和上下文生成 unified diff。
+
+规则：
+1. 只修改必要文件
+2. 输出标准 unified diff 格式
+3. 不修改无关代码
+4. 不编造不存在的文件
+5. 保留原有代码风格
+6. 每个修改引用文件路径和行号
+7. 不输出解释，不输出 markdown 代码块标记
+
+输出格式：
+--- a/path/to/file
++++ b/path/to/file
+@@ -10,3 +10,4 @@
+ context
+-old line
++new line
+ context
+"#;
+
+pub fn build(task: &str, plan: &str, context: &Context) -> String {
+    let mut ctx = String::new();
+    for f in &context.files {
+        ctx.push_str(&format!("\n=== {} ===\n{}\n", f.path, f.content));
+    }
+
+    format!(
+        "任务：{}\n\n计划：{}\n\n上下文：{}\n\n请生成 unified diff：",
+        task, plan, ctx
+    )
+}
+24. 修复 Prompt
+rust
+// src-tauri/src/prompts/repair.rs
+pub const SYSTEM: &str = r#"你是 XAim，修复代码错误。
+根据错误信息和当前代码生成修复 diff。
+
+规则：
+1. 只修错误，不重构
+2. 输出 unified diff
+3. 不引入新错误
+4. 不输出解释
+
+输出格式：
+--- a/path
++++ b/path
+@@ ...
+"#;
+
+pub fn build(errors: &str, code: &str) -> String {
+    format!(
+        "验证错误：\n{}\n\n当前代码：\n{}\n\n请生成修复 diff：",
+        errors, code
+    )
+}
+25. 总结 Prompt
+rust
+// src-tauri/src/prompts/summarize.rs
+pub const SYSTEM: &str = r#"你是 XAim，总结任务执行结果。
+用简洁中文总结：
+1. 做了什么
+2. 改了哪些文件
+3. 验证结果
+4. 注意事项
+"#;
+第五部分：界面设计
+26. 界面总览
+26.1 设计原则
+深色主题优先
+
+信息密度高
+
+过程可见
+
+一键操作
+
+键盘友好
+
+26.2 窗口
+默认 1440x900
+
+最小 1024x700
+
+可最大化
+
+27. 主布局
+text
+┌──────────────────────────────────────────────────────┐
+│ XAim  [项目: my-app]  [模型: DeepSeek]  [设置]        │  ← TopBar
+├──────────────┬───────────────────────────────────────┤
+│              │                                       │
+│ 文件树        │ 任务面板                              │
+│ src/         │  ┌─────────────────────────────────┐ │
+│  auth.ts     │  │ 任务：修复登录空指针             │ │
+│  user.ts     │  │ ✓ 解析意图                       │ │
+│              │  │ ✓ 扫描项目                       │ │
+│ 历史          │  │ ✓ 检索：auth.ts, user.ts         │ │
+│  修复登录...  │  │ ⏳ 生成候选...                   │ │
+│  补测试...    │  │                                 │ │
+│              │  │ ┌─ 候选 1 ─────────────────┐   │ │
+│              │  │ │ Diff 预览                 │   │ │
+│              │  │ └──────────────────────────┘   │ │
+│              │  │                                 │ │
+│              │  │ ┌─ 验证 ───────────────────┐   │ │
+│              │  │ │ 类型 ✓ Lint ✓ 测试 ✓     │   │ │
+│              │  │ └──────────────────────────┘   │ │
+│              │  │                                 │ │
+│              │  │ [应用] [拒绝] [运行测试] [回滚] │ │
+│              │  └─────────────────────────────────┘ │
+│              │                                       │
+├──────────────┴───────────────────────────────────────┤
+│ 输入任务...                                    [发送] │  ← InputBar
+├──────────────────────────────────────────────────────┤
+│ 索引: ✓  耗时: 12.3s  Token: 1234/567  ¥0.02        │  ← StatusBar
+└──────────────────────────────────────────────────────┘
+28. 任务面板
+tsx
+// src/components/TaskPanel.tsx
+export function TaskPanel() {
+  const { currentTask, steps, patches, verifies } = useTaskStore();
+
+  return (
+    <div className="flex flex-col h-full">
+      <StepTimeline steps={steps} />
+      <div className="flex-1 overflow-auto">
+        {patches.map(p => (
+          <DiffView key={p.id} patch={p} />
+        ))}
+      </div>
+      <VerifyPanel results={verifies} />
+      <ActionBar
+        onApply={handleApply}
+        onReject={handleReject}
+        onRollback={handleRollback}
+        disabled={currentTask?.status !== 'waiting_confirm'}
+      />
+    </div>
+  );
+}
+29. Diff 视图
+tsx
+// src/components/DiffView.tsx
+import Editor from '@monaco-editor/react';
+
+export function DiffView({ patch }: { patch: Patch }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="border rounded">
+      <div
+        className="flex justify-between p-2 cursor-pointer"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span>{patch.filePath}</span>
+        <span>{patch.score?.toFixed(2)}</span>
+      </div>
+      {expanded && (
+        <Editor
+          height="300px"
+          language={detectLang(patch.filePath)}
+          value={patch.diff}
+          options={{
+            readOnly: true,
+            renderSideBySide: true,
+            minimap: { enabled: false },
+          }}
+        />
+      )}
+    </div>
+  );
+}
+30. 设置页
+tsx
+// src/pages/Settings.tsx
+export function Settings() {
+  const { config, setConfig } = useConfigStore();
+
+  return (
+    <div className="p-6 space-y-6">
+      <Section title="模型">
+        <Select label="Provider" value={config.provider} onChange={...} />
+        <Input label="API Key" value={config.apiKey} onChange={...} type="password" />
+        <Input label="Base URL" value={config.baseUrl} onChange={...} />
+        <Slider label="Temperature" value={config.temperature} onChange={...} />
+        <Button onClick={testConnection}>测试连接</Button>
+      </Section>
+
+      <Section title="索引">
+        <TagInput label="忽略目录" value={config.ignore} onChange={...} />
+        <Input label="最大文件大小 (KB)" value={config.maxFileSize} onChange={...} />
+      </Section>
+
+      <Section title="验证">
+        <Toggle label="类型检查" value={config.verifyType} onChange={...} />
+        <Toggle label="Lint" value={config.verifyLint} onChange={...} />
+        <Toggle label="测试" value={config.verifyTest} onChange={...} />
+      </Section>
+
+      <Section title="修复">
+        <Input label="最大轮数" value={config.maxRounds} onChange={...} />
+        <Input label="超时 (秒)" value={config.timeoutSec} onChange={...} />
+      </Section>
+
+      <Section title="安全">
+        <TagInput label="命令白名单" value={config.commandWhitelist} onChange={...} />
+        <Toggle label="写文件需确认" value={config.confirmWrite} onChange={...} />
+        <Toggle label="执行命令需确认" value={config.confirmExec} onChange={...} />
+      </Section>
+    </div>
+  );
+}
+31. 状态管理
+typescript
+// src/stores/task.ts
+import { create } from 'zustand';
+import type { Task, TaskStep, Patch, VerifyResult } from '../types';
+
+interface TaskState {
+  currentTask: Task | null;
+  steps: TaskStep[];
+  patches: Patch[];
+  verifies: VerifyResult[];
+  context: ContextFile[];
+  toolLogs: ToolLog[];
+
+  setCurrentTask: (t: Task) => void;
+  addStep: (s: TaskStep) => void;
+  addPatch: (p: Patch) => void;
+  addVerify: (v: VerifyResult) => void;
+  addToolLog: (l: ToolLog) => void;
+  reset: () => void;
+}
+
+export const useTaskStore = create<TaskState>((set) => ({
+  currentTask: null,
+  steps: [],
+  patches: [],
+  verifies: [],
+  context: [],
+  toolLogs: [],
+
+  setCurrentTask: (t) => set({ currentTask: t }),
+  addStep: (s) => set((st) => ({ steps: [...st.steps, s] })),
+  addPatch: (p) => set((st) => ({ patches: [...st.patches, p] })),
+  addVerify: (v) => set((st) => ({ verifies: [...st.verifies, v] })),
+  addToolLog: (l) => set((st) => ({ toolLogs: [...st.toolLogs, l] })),
+  reset: () => set({
+    currentTask: null,
+    steps: [],
+    patches: [],
+    verifies: [],
+    context: [],
+    toolLogs: [],
+  }),
+}));
+第六部分：工程实践
+32. 错误处理
+rust
+// src-tauri/src/errors.rs
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum XaimError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Database error: {0}")]
+    Db(#[from] rusqlite::Error),
+
+    #[error("Git error: {0}")]
+    Git(#[from] git2::Error),
+
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("Model error: {0}")]
+    Model(String),
+
+    #[error("Verify failed: {0}")]
+    Verify(String),
+
+    #[error("Patch conflict: {0}")]
+    PatchConflict(String),
+
+    #[error("Cancelled")]
+    Cancelled,
+
+    #[error("Timeout")]
+    Timeout,
+
+    #[error("Unknown: {0}")]
+    Unknown(String),
+}
+
+pub type Result<T> = std::result::Result<T, XaimError>;
+33. 日志系统
+rust
+// src-tauri/src/main.rs
+use tracing_subscriber::{fmt, EnvFilter};
+
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("xaim=debug,info"));
+
+    fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .init();
+}
+34. 配置系统
+rust
+// src-tauri/src/config/model.rs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Config {
+    pub model: ModelConfig,
+    pub fast_model: String,
+    pub strong_model: String,
+    pub index: IndexConfig,
+    pub verify: VerifyConfig,
+    pub repair: RepairConfig,
+    pub security: SecurityConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexConfig {
+    pub auto_index: bool,
+    pub ignore: Vec<String>,
+    pub max_file_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyConfig {
+    pub type_check: bool,
+    pub lint: bool,
+    pub test: bool,
+    pub build: bool,
+    pub commands: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairConfig {
+    pub max_rounds: u32,
+    pub timeout_sec: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityConfig {
+    pub command_whitelist: Vec<String>,
+    pub require_confirm: Vec<String>,
+    pub sandbox: bool,
+}
+35. 安全设计
+35.1 威胁模型
+威胁	影响	对策
+模型生成恶意命令	系统被入侵	命令白名单 + 确认
+模型修改敏感文件	数据泄露	敏感文件黑名单
+模型读取 secrets	密钥泄露	.env 等文件禁止读
+模型删除文件	数据丢失	禁止删除 + Git 备份
+模型无限循环	资源耗尽	超时 + 轮数限制
+35.2 敏感文件黑名单
+rust
+pub const SENSITIVE_PATTERNS: &[&str] = &[
+    ".env", ".env.*", "*.key", "*.pem", "*.p12",
+    "secrets.*", "credentials.*", ".aws/*",
+    "id_rsa", "id_ed25519", ".ssh/*",
+];
+35.3 命令白名单
+rust
+pub const DEFAULT_WHITELIST: &[&str] = &[
+    "npm", "pnpm", "yarn", "npx",
+    "cargo", "rustc",
+    "go", "gofmt",
+    "python", "python3", "pip", "pytest",
+    "mvn", "gradle",
+    "git",
+    "make",
+    "tsc", "eslint", "prettier",
+    "vitest", "jest",
+];
+36. 性能设计
+36.1 性能目标
+指标	目标	测量方法
+应用启动	< 2 秒	秒表
+首次索引	< 10 秒（中型项目）	tracing
+增量索引	< 1 秒	tracing
+检索延迟	< 300 毫秒	tracing
+首次响应	< 1 秒	tracing
+首次有效 Diff	< 10 秒	tracing
+常见任务完成	< 2 分钟	tracing
+36.2 缓存策略
+rust
+// src-tauri/src/store/cache.rs
+pub fn get_cache(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let now = chrono::Utc::now().timestamp();
+    let mut stmt = conn.prepare(
+        "SELECT value FROM cache WHERE key = ?1 AND (expire_at IS NULL OR expire_at > ?2)"
+    )?;
+    let mut rows = stmt.query(params![key, now])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(row.get(0)?))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn set_cache(conn: &Connection, key: &str, value: &str, ttl: Option<i64>) -> Result<()> {
+    let expire = ttl.map(|t| chrono::Utc::now().timestamp() + t);
+    conn.execute(
+        "INSERT OR REPLACE INTO cache (key, value, expire_at) VALUES (?1, ?2, ?3)",
+        params![key, value, expire],
+    )?;
+    Ok(())
+}
+36.3 并行
+rust
+// 并行验证
+let (type_check, lint) = tokio::join!(
+    run_verify(VerifyKind::TypeCheck, &config.type_check, root),
+    run_verify(VerifyKind::Lint, &config.lint, root),
+);
+
+// 并行候选生成
+let candidates = futures::future::join_all(
+    (0..3).map(|i| generate_candidate(&prompt, i))
+).await;
+37. 测试策略
+37.1 单元测试
+rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_file_hash() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let hash = file_hash(&file).unwrap();
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_detect_language() {
+        assert_eq!(detect_language(Path::new("a.ts")), "typescript");
+        assert_eq!(detect_language(Path::new("a.py")), "python");
+        assert_eq!(detect_language(Path::new("a.rs")), "rust");
+    }
+
+    #[test]
+    fn test_parse_diff() {
+        let diff = "--- a/test.txt\n+++ b/test.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let patches = parse_diff(diff).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].file_path, "test.txt");
+    }
+
+    #[tokio::test]
+    async fn test_run_verify() {
+        let dir = TempDir::new().unwrap();
+        let result = run_verify(VerifyKind::Test, "echo ok", dir.path()).await.unwrap();
+        assert!(result.passed);
+    }
+}
+37.2 集成测试
+rust
+#[tokio::test]
+async fn test_full_task_flow() {
+    let dir = TempDir::new().unwrap();
+    // 初始化项目
+    // 跑任务
+    // 验证结果
+}
+37.3 前端测试
+typescript
+// src/components/__tests__/TaskPanel.test.tsx
+import { render, screen } from '@testing-library/react';
+import { TaskPanel } from '../TaskPanel';
+
+test('renders task panel', () => {
+  render(<TaskPanel />);
+  expect(screen.getByText(/任务/)).toBeInTheDocument();
+});
+38. 评测体系
+38.1 评测任务结构
+text
+tests/eval/tasks/001-fix-null-pointer/
+├── repo/              # 初始代码
+│   ├── package.json
+│   ├── src/
+│   └── tests/
+├── task.md            # 任务描述
+├── verify.sh          # 验证命令
+└── expected.diff      # 期望 diff（可选）
+38.2 评测运行器
+rust
+// tests/eval/runner.rs
+pub async fn run_eval(tasks_dir: &Path) -> EvalReport {
+    let mut report = EvalReport::default();
+
+    for entry in std::fs::read_dir(tasks_dir).unwrap() {
+        let task_dir = entry.unwrap().path();
+        let task = std::fs::read_to_string(task_dir.join("task.md")).unwrap();
+
+        // 复制 repo 到临时目录
+        let tmp = TempDir::new().unwrap();
+        copy_dir(&task_dir.join("repo"), tmp.path()).unwrap();
+
+        // 跑任务
+        let start = std::time::Instant::now();
+        let result = run_task_on(tmp.path(), &task).await;
+        let duration = start.elapsed();
+
+        // 验证
+        let verify = run_verify_sh(&task_dir.join("verify.sh"), tmp.path()).await;
+
+        report.total += 1;
+        if verify.passed {
+            report.passed += 1;
+        } else {
+            report.failed += 1;
+        }
+        report.details.push(TaskResult { task, duration, verify });
+    }
+
+    report
+}
+38.3 评测指标
+rust
+#[derive(Default, Serialize)]
+pub struct EvalReport {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub avg_duration_ms: u64,
+    pub avg_tokens: u64,
+    pub details: Vec<TaskResult>,
+}
+39. CI/CD
+yaml
+# .github/workflows/ci.yml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: pnpm install
+      - run: pnpm tsc --noEmit
+      - run: pnpm test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+yaml
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install
+      - run: pnpm tauri build --target ${{ matrix.target }}
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            src-tauri/target/**/release/bundle/**/*.msi
+            src-tauri/target/**/release/bundle/**/*.dmg
+40. 打包发布
+40.1 Tauri 配置
+json
+// src-tauri/tauri.conf.json
+{
+  "productName": "XAim",
+  "version": "0.1.0",
+  "identifier": "com.xaim.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "XAim",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
+40.2 打包命令
+bash
+# Windows
+pnpm tauri build --target x86_64-pc-windows-msvc
+
+# macOS
+pnpm tauri build --target aarch64-apple-darwin
+第七部分：开发计划
+41. 开发路线
+41.1 六周计划
+第 1 周：桌面壳 + 基础 UI
+
+Tauri 项目初始化
+
+项目选择
+
+文件树
+
+模型接入
+
+基础聊天 UI
+
+第 2 周：索引 + 检索 + 上下文
+
+文件扫描
+
+SQLite 存储
+
+ripgrep 检索
+
+符号索引
+
+上下文查看器
+
+任务日志
+
+第 3 周：Patch + Diff + Git
+
+Patch 生成
+
+Diff 预览
+
+应用 / 拒绝
+
+Git 回滚
+
+多候选
+
+第 4 周：验证 + 修复
+
+类型检查
+
+Lint
+
+测试
+
+构建
+
+修复循环
+
+第 5 周：性能 + 评测
+
+模型路由
+
+缓存
+
+并行
+
+30 任务评测
+
+速度优化
+
+第 6 周：打包 + 发布
+
+Windows 打包
+
+macOS 打包
+
+文档
+
+发布
+
+42. 里程碑
+里程碑	时间	标准
+M1 可对话	第 1 周末	能聊天、读文件
+M2 可检索	第 2 周末	能定位相关文件
+M3 可修改	第 3 周末	能生成 Diff 并应用
+M4 可验证	第 4 周末	能跑测试并修复
+M5 可评测	第 5 周末	30 任务成功率 > 60%
+M6 可发布	第 6 周末	Windows/macOS 安装包
+43. 风险与对策
+风险	影响	对策
+准确率低	产品无价值	验证驱动、多候选、修复循环、评测
+速度慢	用户流失	本地索引、缓存、并行、模型路由
+上下文选错	修改错误	符号索引、LSP、重排
+安全	数据丢失	白名单、确认、Git 回滚、沙箱
+模型成本高	不可持续	缓存、小模型、本地模型
+名字冲突	法律风险	查 GitHub、npm、域名、商标
+竞品强	难以突围	本地优先 + 中文 + 验证透明
+44. 附录
+44.1 术语表
+术语	说明
+Agent	编程代理
+Diff	代码差异
+Patch	补丁
+LSP	语言服务器协议
+AST	抽象语法树
+RAG	检索增强生成
+Index	索引
+Context	上下文
+Verify	验证
+Repair	修复
+IPC	进程间通信
+44.2 参考项目
+Cursor
+
+Claude Code
+
+Aider
+
+Cline
+
+OpenHands
+
+Continue
+
+SWE-bench
+
+44.3 开发顺序
+text
+0. 初始化
+1. 类型与 IPC 契约
+2. SQLite 存储
+3. 项目扫描
+4. 检索与上下文
+5. 模型接入
+6. 工具调用
+7. 验证与修复
+8. Agent 编排
+9. Prompt 模板
+10. UI 实现
+11. 测试与评测
+12. 打包发布
+44.4 开发提示词手册
+见本仓库 docs/PROMPTS.md（可单独提取本文档"开发提示词手册"部分）。
+
+44.5 待定事项
+目标平台最终确认：Windows 优先还是 macOS 优先
+
+技术栈最终确认：Tauri 还是 Electron
+
+模型默认选型
+
+沙箱方案
+
+名字和域名
+
+开源协议
+
+商业模式
+
+44.6 下一步行动
+把本文档放入 docs/DEVELOPMENT.md
+
+从第 0 步开始初始化项目
+
+按周拆 Issue
+
+每周跑评测
+
+用数据驱动决策
+
+文档结束
+这份文档是 XAim 的完整工程文档，覆盖：
+
+产品与战略（1-5）
+
+架构与技术（6-10）
+
+核心模块（11-19）
+
+Prompt 工程（20-25）
+
+界面设计（26-31）
+
+工程实践（32-40）
+
+开发计划（41-44）
+
+下一步建议：
+
+把本文档保存为 docs/DEVELOPMENT.md
+
+把 Prompt 部分单独保存为 docs/PROMPTS.md
+
+把 API 部分单独保存为 docs/API.md
+
+从"开发提示词手册"的第 0.1 步开始
+
+每完成一个阶段，跑一次验收标准

@@ -1,0 +1,372 @@
+//! Full workflow tests and a test-only JSON bridge for the React integration test.
+
+use std::fs;
+use std::io::{BufRead, Write};
+use std::sync::{Arc, Mutex};
+
+use mockito::{Mock, ServerGuard};
+use serde_json::{json, Value};
+
+use super::{project, task};
+use crate::agent::orchestrator::Orchestrator;
+use crate::errors::{Result, XaimError};
+use crate::events::XaimEvent;
+use crate::repair::r#loop::EventSink;
+use crate::state::AppState;
+use crate::store::{self, Store};
+use crate::types::{Config, ModelConfig, TaskStatus};
+use crate::verify::detect::detect_verify_config;
+use crate::verify::runner::{run_verify, VerifyKind};
+
+const BROKEN: &str = "pub fn add(a: i32, b: i32) -> i32 { a - b }\n";
+const FIXED: &str = "pub fn add(a: i32, b: i32) -> i32 { a + b }\n";
+const PROMPT: &str = "Fix add so that it returns the sum of a and b";
+const DIFF: &str = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-pub fn add(a: i32, b: i32) -> i32 { a - b }\n+pub fn add(a: i32, b: i32) -> i32 { a + b }\n";
+
+#[derive(Default)]
+struct CollectSink(Mutex<Vec<Value>>);
+
+impl EventSink for CollectSink {
+    fn emit(&self, event: XaimEvent) -> Result<()> {
+        self.0.lock().unwrap().push(serde_json::to_value(event)?);
+        Ok(())
+    }
+}
+
+impl CollectSink {
+    fn drain(&self) -> Vec<Value> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+struct Harness {
+    state: AppState,
+    sink: Arc<CollectSink>,
+    fixture: tempfile::TempDir,
+    _server: ServerGuard,
+    mocks: Vec<Mock>,
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
+impl Harness {
+    async fn new() -> Self {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::create_dir_all(fixture.path().join("src")).unwrap();
+        fs::create_dir_all(fixture.path().join("tests")).unwrap();
+        fs::write(fixture.path().join(".gitignore"), "/target\n/Cargo.lock\n").unwrap();
+        fs::write(
+            fixture.path().join("Cargo.toml"),
+            "[package]\nname = \"xaim-e2e-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(fixture.path().join("src/lib.rs"), BROKEN).unwrap();
+        fs::write(
+            fixture.path().join("tests/add.rs"),
+            "#[test]\nfn adds_numbers() { assert_eq!(xaim_e2e_fixture::add(2, 3), 5); }\n",
+        )
+        .unwrap();
+        crate::git::ops::commit(fixture.path(), "Fixture baseline").unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let intent = json!({ "action": "fix_bug", "target": "add", "description": PROMPT,
+            "constraints": [], "verify": ["test"] })
+        .to_string();
+        let plan = json!({ "steps": [{ "action": "modify", "file": "src/lib.rs", "reason": "Fix addition" }],
+            "files_to_modify": ["src/lib.rs"], "risks": [] }).to_string();
+        let mut mocks = Vec::new();
+        // Every model request must match its real prompt, including retrieved source.
+        for (system, user, response) in [
+            (crate::prompts::intent::SYSTEM.to_string(), PROMPT, intent),
+            (
+                crate::prompts::plan::SYSTEM.to_string(),
+                BROKEN.trim(),
+                plan,
+            ),
+            (
+                crate::prompts::modify::SYSTEM.to_string(),
+                BROKEN.trim(),
+                DIFF.to_string(),
+            ),
+            (
+                "代码评审员".to_string(),
+                DIFF.trim(),
+                "{\"confidence\":0.95}".to_string(),
+            ),
+        ] {
+            let captured = requests.clone();
+            let mock = server
+                .mock("POST", "/v1/chat/completions")
+                .match_header("authorization", "Bearer e2e-only")
+                .match_request(move |request| {
+                    let Some(body) = request
+                        .body()
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+                    else {
+                        return false;
+                    };
+                    body["messages"][0]["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(&system))
+                        && body["messages"].as_array().is_some_and(|messages| {
+                            messages.iter().any(|message| {
+                                message["role"] == "user"
+                                    && message["content"]
+                                        .as_str()
+                                        .is_some_and(|text| text.contains(user))
+                            })
+                        })
+                })
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body_from_request(move |request| {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(request.body().unwrap()).unwrap());
+                    json!({ "choices": [{ "message": { "content": response } }],
+                        "usage": { "prompt_tokens": 20, "completion_tokens": 10 } })
+                    .to_string()
+                    .into_bytes()
+                })
+                .expect(1)
+                .create_async()
+                .await;
+            mocks.push(mock);
+        }
+        let state = AppState::with_store(Store::open_in_memory().unwrap());
+        let config = Config {
+            model: ModelConfig {
+                provider: "openai".into(),
+                name: "mock-model".into(),
+                api_key: Some("e2e-only".into()),
+                base_url: Some(format!("{}/v1", server.url())),
+                temperature: 0.0,
+                max_tokens: Some(1024),
+            },
+            ..Config::default()
+        };
+        crate::config::model::save(&state.store, &config).unwrap();
+        Self {
+            state,
+            sink: Arc::new(CollectSink::default()),
+            fixture,
+            _server: server,
+            mocks,
+            requests,
+        }
+    }
+
+    async fn verify(&self) -> Result<Value> {
+        let detected = detect_verify_config(self.fixture.path());
+        let command = detected
+            .test
+            .ok_or_else(|| XaimError::Verify("No test command detected".into()))?;
+        let result = run_verify(VerifyKind::Test, &command, self.fixture.path(), 60).await?;
+        Ok(json!({ "command": command, "passed": result.passed, "output": result.output }))
+    }
+
+    async fn dispatch(&self, command: &str, args: &Value) -> Result<Value> {
+        let id = |key| {
+            args[key]
+                .as_i64()
+                .ok_or_else(|| XaimError::Config(format!("Missing {key}")))
+        };
+        match command {
+            "open_project" => {
+                let path = args["path"]
+                    .as_str()
+                    .ok_or_else(|| XaimError::Config("Missing path".into()))?;
+                Ok(serde_json::to_value(
+                    project::open(&self.state, path).await?,
+                )?)
+            }
+            "list_projects" => Ok(serde_json::to_value(project::list(&self.state).await?)?),
+            "get_file_tree" => Ok(serde_json::to_value(
+                project::tree(&self.state, id("projectId")?).await?,
+            )?),
+            "get_model_config" => Ok(serde_json::to_value(
+                crate::config::model::load(&self.state.store).model,
+            )?),
+            "get_config" => Ok(serde_json::to_value(crate::config::model::load(
+                &self.state.store,
+            ))?),
+            "set_config" => {
+                super::config::set(&self.state, serde_json::from_value(args["config"].clone())?)
+                    .await?;
+                Ok(Value::Null)
+            }
+            "list_tasks" => Ok(serde_json::to_value(
+                task::list(&self.state, id("projectId")?).await?,
+            )?),
+            "get_task" => Ok(serde_json::to_value(
+                task::get(&self.state, id("taskId")?).await?,
+            )?),
+            "list_task_steps" => Ok(serde_json::to_value(
+                task::steps(&self.state, id("taskId")?).await?,
+            )?),
+            "list_patches" => Ok(serde_json::to_value(
+                task::patches(&self.state, id("taskId")?).await?,
+            )?),
+            "run_task" => {
+                let mut config = task::orchestrator_config(&self.state)?;
+                config.candidate_count = 1;
+                config.step_timeout_sec = 60;
+                let provider = Arc::from(crate::model::create_provider(&config.model)?);
+                let orchestrator = Orchestrator::with_sink(
+                    Arc::new(self.state.store.clone()),
+                    config,
+                    self.sink.clone(),
+                    provider,
+                );
+                let prompt = args["prompt"]
+                    .as_str()
+                    .ok_or_else(|| XaimError::Config("Missing prompt".into()))?;
+                Ok(json!(
+                    task::run(&self.state, orchestrator, id("projectId")?, prompt).await?
+                ))
+            }
+            "apply_patch" => {
+                task::apply(&self.state, id("patchId")?).await?;
+                Ok(Value::Null)
+            }
+            "close_project" => {
+                project::close(&self.state).await?;
+                Ok(Value::Null)
+            }
+            // These diagnostics are test-only; application IPC remains unchanged.
+            "e2e_verify" => self.verify().await,
+            "e2e_inspect" => {
+                let model_requests = self.requests.lock().unwrap().clone();
+                let conn = self.state.store.conn();
+                Ok(json!({
+                    "files": store::file::list_files(&conn, id("projectId")?)?,
+                    "content": fs::read_to_string(self.fixture.path().join("src/lib.rs"))?,
+                    "gitStatus": crate::git::ops::status(self.fixture.path())?,
+                    "modelCalls": model_requests.len(),
+                    "modelRequests": model_requests,
+                }))
+            }
+            "e2e_assert_model" => {
+                for mock in &self.mocks {
+                    mock.assert_async().await;
+                }
+                Ok(Value::Null)
+            }
+            _ => Err(XaimError::Config(format!(
+                "Unsupported test command: {command}"
+            ))),
+        }
+    }
+}
+
+#[tokio::test]
+async fn complete_project_to_index_task_diff_apply_and_verify_flow() {
+    let harness = Harness::new().await;
+    let baseline = harness.verify().await.unwrap();
+    assert_eq!(
+        baseline["passed"], false,
+        "Fixture must fail before the patch"
+    );
+    assert!(baseline["output"]
+        .as_str()
+        .unwrap()
+        .contains("adds_numbers"));
+    let opened = harness
+        .dispatch("open_project", &json!({"path": harness.fixture.path()}))
+        .await
+        .unwrap();
+    let project_id = opened["id"].as_i64().unwrap();
+    let indexed = harness
+        .dispatch("e2e_inspect", &json!({"projectId": project_id}))
+        .await
+        .unwrap();
+    let file = indexed["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "src/lib.rs")
+        .unwrap();
+    assert_eq!(file["language"], "rust");
+    assert!(file["hash"].as_str().is_some_and(|hash| !hash.is_empty()));
+    let task_id = harness
+        .dispatch(
+            "run_task",
+            &json!({"projectId": project_id, "prompt": PROMPT}),
+        )
+        .await
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    let waiting = task::get(&harness.state, task_id).await.unwrap();
+    assert_eq!(waiting.status, TaskStatus::WaitingConfirm);
+    assert_eq!(
+        fs::read_to_string(harness.fixture.path().join("src/lib.rs")).unwrap(),
+        BROKEN
+    );
+    let patches = task::patches(&harness.state, task_id).await.unwrap();
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].diff, DIFF);
+    assert!(!patches[0].applied);
+    assert!(patches[0].score.unwrap() > 0.7);
+    task::apply(&harness.state, patches[0].id).await.unwrap();
+    assert_eq!(
+        task::get(&harness.state, task_id).await.unwrap().status,
+        TaskStatus::Done
+    );
+    assert!(task::patches(&harness.state, task_id).await.unwrap()[0].applied);
+    assert_eq!(
+        fs::read_to_string(harness.fixture.path().join("src/lib.rs")).unwrap(),
+        FIXED
+    );
+    let verified = harness.verify().await.unwrap();
+    assert_eq!(verified["passed"], true, "{}", verified["output"]);
+    assert!(verified["output"].as_str().unwrap().contains("1 passed"));
+    assert!(crate::git::ops::status(harness.fixture.path())
+        .unwrap()
+        .is_empty());
+    let events = harness.sink.drain();
+    assert!(events
+        .iter()
+        .any(|event| event["type"] == "patch" && event["diff"] == DIFF));
+    assert!(events
+        .iter()
+        .any(|event| event["type"] == "done" && event["status"] == "done"));
+    assert!(!events.iter().any(|event| event["type"] == "error"));
+    for mock in &harness.mocks {
+        mock.assert_async().await;
+    }
+    project::close(&harness.state).await.unwrap();
+}
+
+fn write_message(message: Value) {
+    let mut output = std::io::stdout().lock();
+    writeln!(output, "XAIM_E2E {message}").unwrap();
+    output.flush().unwrap();
+}
+
+#[tokio::test]
+#[ignore = "Started by pnpm test:e2e; requires the JSON stdin bridge client"]
+async fn frontend_bridge() {
+    assert_eq!(std::env::var("XAIM_E2E_BRIDGE").as_deref(), Ok("1"));
+    let harness = Harness::new().await;
+    write_message(json!({"ready": true, "projectPath": harness.fixture.path()}));
+    for line in std::io::stdin().lock().lines() {
+        let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        let command = request["command"].as_str().unwrap();
+        if command == "shutdown" {
+            break;
+        }
+        let response = match harness.dispatch(command, &request["args"]).await {
+            Ok(result) => {
+                json!({"id": request["id"], "result": result, "events": harness.sink.drain()})
+            }
+            Err(error) => {
+                json!({"id": request["id"], "error": error.to_string(), "events": harness.sink.drain()})
+            }
+        };
+        write_message(response);
+    }
+    project::close(&harness.state).await.unwrap();
+}

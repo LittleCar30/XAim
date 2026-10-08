@@ -1,0 +1,27 @@
+{
+  "id": "023-cross-file-rust-error",
+  "category": "cross-file",
+  "language": "Rust",
+  "allowed": [
+    "src/error.rs",
+    "src/reader.rs",
+    "src/writer.rs",
+    "src/lib.rs"
+  ],
+  "required": [
+    "src/error.rs",
+    "src/reader.rs",
+    "src/writer.rs",
+    "src/lib.rs"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked"
+    ]
+  ],
+  "mutations": []
+}

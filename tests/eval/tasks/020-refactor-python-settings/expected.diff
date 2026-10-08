@@ -1,0 +1,27 @@
+diff --git a/settings.py b/settings.py
+new file mode 100644
+--- /dev/null
++++ b/settings.py
+@@ -0,0 +1,2 @@
++class Settings:
++    timeout = 30
+diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1,3 +1,3 @@
+-TIMEOUT = 30
+-def app_timeout():
+-    return TIMEOUT
++from settings import Settings
++def app_timeout():
++    return Settings.timeout
+diff --git a/worker.py b/worker.py
+--- a/worker.py
++++ b/worker.py
+@@ -1,3 +1,3 @@
+-TIMEOUT = 30
+-def worker_timeout():
+-    return TIMEOUT
++from settings import Settings
++def worker_timeout():
++    return Settings.timeout

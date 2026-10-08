@@ -1,0 +1,18 @@
+diff --git a/src/auth.ts b/src/auth.ts
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -1,7 +1,7 @@
+-export interface User {
+-  name: string;
+-}
+-
+-export function login(user: User | null | undefined): string | null {
+-  return (user as User).name;
+-}
++export interface User {
++  name: string;
++}
++
++export function login(user: User | null | undefined): string | null {
++  return user?.name ?? null;
++}

@@ -1,0 +1,251 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --slate-50: 9 9 11;
+    --slate-100: 24 24 27;
+    --slate-200: 39 39 42;
+    --slate-300: 63 63 70;
+    --slate-400: 82 82 91;
+    --slate-500: 100 100 110;
+    --slate-600: 110 110 120;
+    --slate-700: 212 212 216;
+    --slate-800: 228 228 231;
+    --slate-900: 248 248 249;
+    --slate-950: 255 255 255;
+    --sky-200: 7 89 133;
+    --sky-300: 3 105 161;
+    --sky-400: 3 105 161;
+    --sky-500: 3 105 161;
+    --emerald-200: 6 95 70;
+    --emerald-300: 4 120 87;
+    --emerald-400: 4 120 87;
+    --emerald-500: 4 120 87;
+    --rose-200: 159 18 57;
+    --rose-300: 190 18 60;
+    --rose-400: 190 18 60;
+    --amber-200: 120 53 15;
+    --amber-300: 146 64 14;
+    --amber-400: 146 64 14;
+    --cyan-200: 21 94 117;
+    --cyan-300: 14 116 144;
+    --cyan-400: 14 116 144;
+    --fuchsia-200: 134 25 143;
+    --fuchsia-300: 162 28 175;
+    --fuchsia-400: 162 28 175;
+    --orange-200: 154 52 18;
+    --orange-300: 194 65 12;
+    --orange-400: 194 65 12;
+    --pink-200: 157 23 77;
+    --pink-300: 190 24 93;
+    --pink-400: 190 24 93;
+    --violet-200: 91 33 182;
+    --violet-300: 109 40 217;
+    --violet-400: 109 40 217;
+    --yellow-200: 113 63 18;
+    --yellow-300: 133 77 14;
+    --yellow-400: 133 77 14;
+  }
+
+  :root.dark {
+    color-scheme: dark;
+    --slate-50: 248 250 252;
+    --slate-100: 241 245 249;
+    --slate-200: 226 232 240;
+    --slate-300: 203 213 225;
+    --slate-400: 148 163 184;
+    --slate-500: 100 116 139;
+    --slate-600: 71 85 105;
+    --slate-700: 51 65 85;
+    --slate-800: 30 41 59;
+    --slate-900: 15 23 42;
+    --slate-950: 2 6 23;
+    --sky-200: 186 230 253;
+    --sky-300: 125 211 252;
+    --sky-400: 56 189 248;
+    --sky-500: 14 165 233;
+    --emerald-200: 167 243 208;
+    --emerald-300: 110 231 183;
+    --emerald-400: 52 211 153;
+    --emerald-500: 16 185 129;
+    --rose-200: 254 205 211;
+    --rose-300: 253 164 175;
+    --rose-400: 251 113 133;
+    --amber-200: 253 230 138;
+    --amber-300: 252 211 77;
+    --amber-400: 251 191 36;
+    --cyan-200: 165 243 252;
+    --cyan-300: 103 232 249;
+    --cyan-400: 34 211 238;
+    --fuchsia-200: 245 208 254;
+    --fuchsia-300: 240 171 252;
+    --fuchsia-400: 232 121 249;
+    --orange-200: 254 215 170;
+    --orange-300: 253 186 116;
+    --orange-400: 251 146 60;
+    --pink-200: 251 207 232;
+    --pink-300: 249 168 212;
+    --pink-400: 244 114 182;
+    --violet-200: 221 214 254;
+    --violet-300: 196 181 253;
+    --violet-400: 167 139 250;
+    --yellow-200: 254 240 138;
+    --yellow-300: 253 224 71;
+    --yellow-400: 250 204 21;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased;
+  }
+
+  /* Shared palette also keeps native controls and scrollbars in sync. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--slate-700)) transparent;
+  }
+}
+
+@layer components {
+  .conversation-workspace { @apply flex h-screen flex-col bg-slate-950 text-slate-100; }
+  .workspace-body { @apply relative flex min-h-0 flex-1; }
+  .conversation-main { @apply flex min-w-0 flex-1 flex-col; }
+  .conversation-heading { @apply flex h-12 shrink-0 items-center gap-3 border-b border-slate-800 px-5 text-sm font-medium; }
+  .icon-button { @apply flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-slate-800 disabled:opacity-40; }
+  .detail-toggle { @apply ml-auto; }
+  .icon-button.active { @apply bg-slate-800 text-slate-100; }
+  .return-current { @apply ml-auto flex items-center gap-1 text-xs text-slate-500 hover:text-slate-100; }
+  .conversation-sidebar { @apply flex w-60 shrink-0 flex-col border-r border-slate-800 bg-slate-900; }
+  .sidebar-actions { @apply space-y-5 px-4 pb-2 pt-5; }
+  .new-chat { @apply flex w-full items-center gap-2 rounded-md border border-slate-700 bg-slate-950 px-3 py-2.5 text-sm font-medium hover:bg-slate-800 disabled:opacity-40; }
+  .sidebar-tabs { @apply grid grid-cols-2 gap-1 rounded-md bg-slate-800/60 p-1; }
+  .sidebar-tabs button { @apply flex items-center justify-center gap-2 rounded py-1.5 text-xs text-slate-500; }
+  .sidebar-tabs button[aria-selected=true] { @apply bg-slate-950 text-slate-100 shadow-sm; }
+  .chat-history { @apply min-h-0 flex-1 overflow-auto px-2; }
+  .sidebar-heading { @apply flex items-center justify-between px-3 pb-2 pt-3 text-xs text-slate-500; }
+  .history-item { @apply mb-1 block w-full rounded-md px-3 py-3 text-left hover:bg-slate-800/60; }
+  .history-item.selected { @apply bg-slate-800/70; }
+  .history-prompt { @apply block truncate text-sm text-slate-200; }
+  .history-meta { @apply mt-2 flex items-center justify-between gap-2 text-[11px] text-slate-500; }
+  .sidebar-empty, .sidebar-error { @apply px-3 py-4 text-xs text-slate-500; }
+  .sidebar-error { @apply break-all text-rose-400; }
+  .sidebar-project { @apply flex items-center gap-2 border-t border-slate-800 px-5 py-4 text-xs text-slate-400; }
+  .sidebar-project > span:last-child { @apply truncate; }
+  .project-dot { @apply h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500; }
+  .conversation-sidebar > aside { @apply min-h-0 w-full flex-1 border-r-0; }
+  .conversation-scroll { @apply min-h-0 flex-1 overflow-y-auto; }
+  .conversation-content { @apply mx-auto w-full max-w-3xl px-7 pb-8 pt-8; }
+  .conversation-empty { @apply mx-auto flex max-w-3xl flex-col items-start gap-3 px-7 pt-16; }
+  .conversation-empty h1 { @apply text-2xl font-semibold; }
+  .conversation-empty p { @apply text-sm text-slate-500; }
+  .user-message { @apply mb-9 ml-auto w-fit max-w-[85%] rounded-lg bg-slate-900 px-5 py-4; }
+  .message-label { @apply mb-1 block text-xs font-medium text-slate-500; }
+  .user-message p { @apply whitespace-pre-wrap break-words text-sm leading-7; }
+  .agent-header { @apply mb-3 flex items-center gap-2.5 text-sm; }
+  .task-status { @apply ml-auto shrink-0 rounded px-2 py-0.5 text-[11px] font-medium; }
+  .agent-summary { @apply mb-5 text-sm leading-7 text-slate-200; }
+  .message-error { @apply mb-4 break-words text-sm text-rose-400; }
+  .execution-details { @apply mb-6 text-xs text-slate-500; }
+  .execution-details summary { @apply flex cursor-pointer list-none items-center gap-2 py-2; }
+  .execution-details summary::-webkit-details-marker { display: none; }
+  .execution-details summary > span:first-of-type { @apply min-w-0 flex-1 truncate; }
+  .execution-count { @apply shrink-0 text-[11px]; }
+  .execution-details[open] summary > svg:last-child { transform: rotate(180deg); }
+  .execution-details ol { @apply mt-1 border-l border-slate-800 pl-4; }
+  .execution-details li { @apply flex items-start gap-2 py-2 leading-5; }
+  .execution-details li > svg { @apply mt-1 shrink-0; }
+  .execution-details li > span:first-of-type { @apply min-w-0 flex-1; }
+  .step-content { @apply shrink-0 text-[11px]; }
+  .message-changes { @apply mb-4; }
+  .result-heading { @apply mb-2 flex items-center justify-between; }
+  .result-heading h2 { @apply text-sm font-semibold; }
+  .result-heading > span { @apply text-xs text-slate-500; }
+  .compact-diffs > ul { @apply max-h-none p-0; }
+  .compact-diffs > ul > li { @apply rounded-md border border-slate-800 bg-slate-950; }
+  .compact-diffs > ul > li > button { @apply gap-2 px-3 py-3 text-sm; }
+  .verification-summary { @apply mb-4 flex items-center gap-2 text-xs text-slate-400; }
+  .verification-summary button { @apply ml-auto flex items-center gap-1 text-slate-500 hover:text-slate-100; }
+  .agent-message > div:last-child:not(.verification-summary) { @apply border-0 px-0; }
+  .historical-note { @apply mt-5 text-xs leading-6 text-slate-500; }
+  .conversation-composer { @apply mx-auto w-full max-w-3xl shrink-0 px-7 pb-6 pt-3; }
+  .conversation-composer > p { @apply text-xs; }
+  .composer-surface { @apply rounded-lg border border-slate-700 bg-slate-950 p-3 shadow-sm focus-within:border-slate-400; }
+  .composer-input { @apply block max-h-40 min-h-12 w-full resize-none bg-transparent px-1 py-1 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500 disabled:opacity-60; }
+  .composer-bottom { @apply mt-2 flex items-center justify-end text-xs text-slate-500; }
+  .composer-model-controls { @apply relative flex min-w-0 items-center gap-1; }
+  .composer-model-button, .composer-effort-button { @apply flex h-8 min-w-0 items-center gap-1 rounded-md px-2 text-xs text-slate-400 hover:bg-slate-900 disabled:opacity-50; }
+  .composer-model-button > span { @apply max-w-[180px] truncate; }
+  .composer-effort-button { @apply shrink-0 border-l border-slate-800; }
+  .composer-model-menu { @apply absolute bottom-full right-0 z-40 mb-2 max-h-72 w-72 overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-1 shadow-lg; }
+  .composer-model-menu > button { @apply flex w-full items-center justify-between gap-2 rounded px-3 py-2 text-left text-sm text-slate-200 hover:bg-slate-900 disabled:opacity-40; }
+  .composer-model-menu > button > span { @apply min-w-0; }
+  .composer-model-menu strong { @apply block truncate text-xs font-medium; }
+  .composer-model-menu small { @apply mt-1 block truncate text-[11px] text-slate-500; }
+  .composer-model-menu > .manage-models { @apply mt-1 justify-start border-t border-slate-800 text-xs; }
+  .effort-menu { @apply w-44; }
+  .effort-menu > p { @apply px-3 py-2 text-[11px] text-slate-500; }
+  .model-picker-error { @apply absolute bottom-full right-0 mb-2 w-64 rounded border border-rose-400 bg-slate-950 p-2 text-xs text-rose-400; }
+  .model-manager { width: min(760px, calc(100% - 32px)); @apply m-auto max-h-[90vh] overflow-auto rounded-lg border border-slate-700 bg-slate-950 p-0 text-slate-100 shadow-xl; }
+  .model-manager::backdrop { background: #00000040; }
+  .model-manager-content > header { @apply flex items-center justify-between border-b border-slate-800 px-5 py-3; }
+  .model-manager h2 { @apply text-base font-semibold; }
+  .model-manager-body { @apply grid grid-cols-[200px_minmax(0,1fr)]; }
+  .model-manager-body > nav { @apply border-r border-slate-800 bg-slate-900 p-3; }
+  .model-manager-body > nav > button { @apply mb-1 flex w-full flex-wrap items-center gap-2 rounded-md px-3 py-3 text-left text-xs hover:bg-slate-800; }
+  .model-manager-body > nav > button.selected { @apply bg-slate-800; }
+  .model-manager-body > nav > button > span { @apply min-w-0 flex-1 break-words; }
+  .model-manager-body small { @apply block w-full truncate text-[11px] text-slate-500; }
+  .model-manager-body > form { @apply min-w-0 p-5; }
+  .model-manager fieldset { @apply min-w-0 space-y-4; }
+  .model-manager label { @apply block text-xs text-slate-400; }
+  .model-manager input:not([type=checkbox]), .model-manager select { @apply mt-2 block w-full min-w-0 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-400; }
+  .model-form-grid { @apply grid grid-cols-2 gap-3; }
+  .model-manager label.model-checkbox { @apply flex items-center gap-2 leading-5; }
+  .model-checkbox input { @apply h-4 w-4 shrink-0; }
+  .model-manager footer { @apply mt-5 flex items-center gap-2; }
+  .model-manager footer > button:not(.icon-button) { @apply rounded-md border border-slate-700 px-3 py-2 text-xs disabled:opacity-40; }
+  .model-manager footer > button.primary { @apply ml-auto border-slate-100 bg-slate-100 text-slate-950; }
+  .model-error { @apply mt-3 text-xs leading-5 text-rose-400; }
+  .model-result { @apply mt-3 text-xs text-emerald-400; }
+  .send-button { @apply flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-950 hover:bg-slate-300 disabled:cursor-not-allowed disabled:opacity-30; }
+  .task-inspector { @apply flex w-80 shrink-0 flex-col border-l border-slate-800 bg-slate-950; }
+  .inspector-heading { @apply flex h-12 shrink-0 items-center justify-between gap-2 border-b border-slate-800 px-4 text-sm font-medium; }
+  .inspector-heading > span { @apply truncate; }
+  .inspector-tabs { @apply flex shrink-0 gap-5 border-b border-slate-800 px-4; }
+  .inspector-tabs button { @apply border-b-2 border-transparent py-3 text-xs text-slate-500; }
+  .inspector-tabs button[aria-selected=true] { @apply border-slate-100 text-slate-100; }
+  .inspector-empty { @apply p-4 text-xs leading-6 text-slate-500; }
+  .task-inspector > div:last-child { @apply min-h-0 flex-1 border-t-0; }
+  .navigation-backdrop { display: none; }
+  .conversation-workspace > header { background-color: rgb(var(--slate-950)); }
+  .conversation-workspace > footer { background-color: rgb(var(--slate-950)); }
+}
+
+@media (max-width: 767px) {
+  .model-manager-body { grid-template-columns: 1fr; }
+  .model-manager-body > nav { border-right: 0; border-bottom: 1px solid rgb(var(--slate-800)); max-height: 150px; overflow: auto; }
+  .model-manager-body > form { padding: 16px; }
+  .composer-model-button > span { max-width: 130px; }
+  .composer-model-menu { max-width: calc(100vw - 50px); }
+  .conversation-sidebar { position: absolute; inset: 0 auto 0 0; z-index: 20; width: min(260px, 80%); box-shadow: 8px 0 24px #00000012; }
+  .conversation-sidebar { display: none; }
+  .mobile-navigation-open .conversation-sidebar { display: flex; }
+  .navigation-backdrop { display: block; position: absolute; inset: 0; z-index: 19; background: #00000020; }
+  .conversation-content { padding: 20px 18px; }
+  .conversation-composer { padding: 12px 18px 18px; }
+  .conversation-heading { padding-inline: 14px; }
+  .task-inspector { position: absolute; inset: 0 0 0 auto; z-index: 30; width: min(340px, 95%); box-shadow: -8px 0 24px #00000012; }
+  .conversation-workspace > header { gap: 6px; padding-inline: 10px; }
+  .conversation-workspace > header > div:first-of-type { max-width: 90px; }
+  .user-message { max-width: 95%; }
+  .conversation-workspace > footer { gap: 8px; padding-inline: 10px; }
+  .conversation-workspace > footer > div { gap: 8px; }
+}

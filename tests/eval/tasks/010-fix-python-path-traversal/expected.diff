@@ -1,0 +1,15 @@
+diff --git a/paths.py b/paths.py
+--- a/paths.py
++++ b/paths.py
+@@ -1,4 +1,7 @@
+-from pathlib import Path
+-
+-def safe_path(root, user_path):
+-    return Path(root) / user_path
++from pathlib import Path
++
++def safe_path(root, user_path):
++    root = Path(root).resolve()
++    target = (root / user_path).resolve()
++    target.relative_to(root)
++    return target

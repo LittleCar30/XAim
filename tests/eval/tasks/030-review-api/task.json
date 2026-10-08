@@ -1,0 +1,14 @@
+{
+  "id": "030-review-api",
+  "category": "review",
+  "language": "TS",
+  "allowed": [
+    "REVIEW.md"
+  ],
+  "required": [
+    "REVIEW.md"
+  ],
+  "prepare": [],
+  "commands": [],
+  "mutations": []
+}

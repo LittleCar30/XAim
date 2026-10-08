@@ -1,0 +1,29 @@
+{
+  "id": "025-cross-file-ts-client",
+  "category": "cross-file",
+  "language": "TS",
+  "allowed": [
+    "src/api.ts",
+    "src/client.ts"
+  ],
+  "required": [
+    "src/api.ts",
+    "src/client.ts"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": []
+}

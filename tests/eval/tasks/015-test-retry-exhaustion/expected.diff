@@ -1,0 +1,14 @@
+diff --git a/tests/retry.test.mjs b/tests/retry.test.mjs
+--- a/tests/retry.test.mjs
++++ b/tests/retry.test.mjs
+@@ -1,4 +1,6 @@
+-import assert from 'node:assert/strict';
+-import test from 'node:test';
+-import { retry } from '../dist/retry.js';
+-test('immediate success', () => assert.equal(retry(() => true, 2), true));
++import assert from 'node:assert/strict';
++import test from 'node:test';
++import { retry } from '../dist/retry.js';
++test('immediate success', () => assert.equal(retry(() => true, 2), true));
++test('exhausted', () => { let calls = 0; assert.equal(retry(() => { calls++; return false; }, 2), false); assert.equal(calls, 2); });
++test('zero attempts', () => { let calls = 0; assert.equal(retry(() => { calls++; return false; }, 0), false); assert.equal(calls, 0); });

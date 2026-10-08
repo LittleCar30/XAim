@@ -1,0 +1,27 @@
+{
+  "id": "018-refactor-rust-format",
+  "category": "refactor",
+  "language": "Rust",
+  "allowed": [
+    "src/format.rs",
+    "src/summary.rs",
+    "src/detail.rs",
+    "src/lib.rs"
+  ],
+  "required": [
+    "src/format.rs",
+    "src/summary.rs",
+    "src/detail.rs",
+    "src/lib.rs"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked"
+    ]
+  ],
+  "mutations": []
+}

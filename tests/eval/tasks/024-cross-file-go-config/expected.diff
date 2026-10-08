@@ -1,0 +1,17 @@
+diff --git a/config.go b/config.go
+new file mode 100644
+--- /dev/null
++++ b/config.go
+@@ -0,0 +1,4 @@
++package fixture
++import ("os"; "strconv")
++type Config struct { Port int }
++func LoadConfig() Config { value, err := strconv.Atoi(os.Getenv("PORT")); if err != nil || value <= 0 { value = 8080 }; return Config{Port: value} }
+diff --git a/server.go b/server.go
+--- a/server.go
++++ b/server.go
+@@ -1,2 +1,2 @@
+-package fixture
+-func Port() int { return 8080 }
++package fixture
++func Port() int { return LoadConfig().Port }

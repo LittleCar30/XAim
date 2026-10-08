@@ -1,0 +1,26 @@
+diff --git a/normalize.go b/normalize.go
+new file mode 100644
+--- /dev/null
++++ b/normalize.go
+@@ -0,0 +1,3 @@
++package fixture
++import "strings"
++func Normalize(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
+diff --git a/user.go b/user.go
+--- a/user.go
++++ b/user.go
+@@ -1,3 +1,2 @@
+-package fixture
+-import "strings"
+-func UserName(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
++package fixture
++func UserName(value string) string { return Normalize(value) }
+diff --git a/team.go b/team.go
+--- a/team.go
++++ b/team.go
+@@ -1,3 +1,2 @@
+-package fixture
+-import "strings"
+-func TeamName(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
++package fixture
++func TeamName(value string) string { return Normalize(value) }

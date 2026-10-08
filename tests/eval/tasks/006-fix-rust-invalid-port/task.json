@@ -1,0 +1,21 @@
+{
+  "id": "006-fix-rust-invalid-port",
+  "category": "bugfix",
+  "language": "Rust",
+  "allowed": [
+    "src/lib.rs"
+  ],
+  "required": [
+    "src/lib.rs"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "cargo",
+      "test",
+      "--offline",
+      "--locked"
+    ]
+  ],
+  "mutations": []
+}

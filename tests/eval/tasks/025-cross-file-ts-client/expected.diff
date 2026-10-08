@@ -1,0 +1,13 @@
+diff --git a/src/api.ts b/src/api.ts
+new file mode 100644
+--- /dev/null
++++ b/src/api.ts
+@@ -0,0 +1,1 @@
++export async function request(url: string): Promise<Response> { return fetch(url); }
+diff --git a/src/client.ts b/src/client.ts
+--- a/src/client.ts
++++ b/src/client.ts
+@@ -1,1 +1,2 @@
+-export async function getUser(id: string) { return fetch(`/users/${id}`); }
++import { request } from "./api.js";
++export async function getUser(id: string) { return request(`/users/${id}`); }

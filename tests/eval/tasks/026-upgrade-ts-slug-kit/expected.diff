@@ -1,0 +1,136 @@
+diff --git a/src/app.ts b/src/app.ts
+--- a/src/app.ts
++++ b/src/app.ts
+@@ -1,2 +1,2 @@
+-import { slug } from "slug-kit";
+-export function title(value: string): string { return slug(value); }
++import { slugify } from "slug-kit";
++export function title(value: string): string { return slugify(value); }
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -1,18 +1,18 @@
+-{
+-  "name": "eval-fixture",
+-  "version": "1.0.0",
+-  "private": true,
+-  "type": "module",
+-  "engines": {
+-    "node": ">=18"
+-  },
+-  "scripts": {
+-    "test": "tsc -p tsconfig.json && node --test tests/*.test.mjs"
+-  },
+-  "devDependencies": {
+-    "typescript": "5.5.4"
+-  },
+-  "dependencies": {
+-    "slug-kit": "file:vendor/slug-v1"
+-  }
+-}
++{
++  "name": "eval-fixture",
++  "version": "1.0.0",
++  "private": true,
++  "type": "module",
++  "engines": {
++    "node": ">=18"
++  },
++  "scripts": {
++    "test": "tsc -p tsconfig.json && node --test tests/*.test.mjs"
++  },
++  "devDependencies": {
++    "typescript": "5.5.4"
++  },
++  "dependencies": {
++    "slug-kit": "file:vendor/slug-v2"
++  }
++}
+diff --git a/package-lock.json b/package-lock.json
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,42 +1,42 @@
+-{
+-  "name": "eval-fixture",
+-  "version": "1.0.0",
+-  "lockfileVersion": 3,
+-  "requires": true,
+-  "packages": {
+-    "": {
+-      "name": "eval-fixture",
+-      "version": "1.0.0",
+-      "devDependencies": {
+-        "typescript": "5.5.4"
+-      },
+-      "engines": {
+-        "node": ">=18"
+-      },
+-      "dependencies": {
+-        "slug-kit": "file:vendor/slug-v1"
+-      }
+-    },
+-    "node_modules/typescript": {
+-      "version": "5.5.4",
+-      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.5.4.tgz",
+-      "integrity": "sha512-Mtq29sKDAEYP7aljRgtPOpTvOfbwRWlS6dPRzwjdE+C0R4brX/GUyhHSecbHMFLNBLcJIPt9nl9yG5TZ1weH+Q==",
+-      "dev": true,
+-      "bin": {
+-        "tsc": "bin/tsc",
+-        "tsserver": "bin/tsserver"
+-      },
+-      "engines": {
+-        "node": ">=14.17"
+-      }
+-    },
+-    "node_modules/slug-kit": {
+-      "resolved": "vendor/slug-v1",
+-      "link": true
+-    },
+-    "vendor/slug-v1": {
+-      "name": "slug-kit",
+-      "version": "1.0.0"
+-    }
+-  }
+-}
++{
++  "name": "eval-fixture",
++  "version": "1.0.0",
++  "lockfileVersion": 3,
++  "requires": true,
++  "packages": {
++    "": {
++      "name": "eval-fixture",
++      "version": "1.0.0",
++      "devDependencies": {
++        "typescript": "5.5.4"
++      },
++      "engines": {
++        "node": ">=18"
++      },
++      "dependencies": {
++        "slug-kit": "file:vendor/slug-v2"
++      }
++    },
++    "node_modules/typescript": {
++      "version": "5.5.4",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.5.4.tgz",
++      "integrity": "sha512-Mtq29sKDAEYP7aljRgtPOpTvOfbwRWlS6dPRzwjdE+C0R4brX/GUyhHSecbHMFLNBLcJIPt9nl9yG5TZ1weH+Q==",
++      "dev": true,
++      "bin": {
++        "tsc": "bin/tsc",
++        "tsserver": "bin/tsserver"
++      },
++      "engines": {
++        "node": ">=14.17"
++      }
++    },
++    "node_modules/slug-kit": {
++      "resolved": "vendor/slug-v2",
++      "link": true
++    },
++    "vendor/slug-v2": {
++      "name": "slug-kit",
++      "version": "2.0.0"
++    }
++  }
++}

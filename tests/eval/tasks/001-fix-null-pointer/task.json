@@ -1,0 +1,27 @@
+{
+  "id": "001-fix-null-pointer",
+  "category": "bugfix",
+  "language": "TS",
+  "allowed": [
+    "src/auth.ts"
+  ],
+  "required": [
+    "src/auth.ts"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": []
+}

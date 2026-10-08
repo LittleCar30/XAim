@@ -1,0 +1,27 @@
+{
+  "id": "017-refactor-python-validator",
+  "category": "refactor",
+  "language": "Python",
+  "allowed": [
+    "validators.py",
+    "user.py",
+    "order.py"
+  ],
+  "required": [
+    "validators.py",
+    "user.py",
+    "order.py"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests"
+    ]
+  ],
+  "mutations": []
+}

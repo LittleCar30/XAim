@@ -1,0 +1,7 @@
+diff --git a/REVIEW.md b/REVIEW.md
+new file mode 100644
+--- /dev/null
++++ b/REVIEW.md
+@@ -0,0 +1,2 @@
++# Review
++- P1 `src/api.ts:2`: 网络断开时 catch 吞掉请求错误并返回 null，调用方无法诊断原因；建议重新抛出或返回包含错误上下文的 Result。

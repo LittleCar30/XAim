@@ -1,0 +1,12 @@
+diff --git a/pagination.py b/pagination.py
+--- a/pagination.py
++++ b/pagination.py
+@@ -1,4 +1,4 @@
+-def pages(items, size):
+-    if size <= 0:
+-        raise ValueError("size must be positive")
+-    return [items[i:i + size] for i in range(0, len(items) - size + 1, size)]
++def pages(items, size):
++    if size <= 0:
++        raise ValueError("size must be positive")
++    return [items[i:i + size] for i in range(0, len(items), size)]

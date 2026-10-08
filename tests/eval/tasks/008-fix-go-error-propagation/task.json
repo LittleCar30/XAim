@@ -1,0 +1,20 @@
+{
+  "id": "008-fix-go-error-propagation",
+  "category": "bugfix",
+  "language": "Go",
+  "allowed": [
+    "parse.go"
+  ],
+  "required": [
+    "parse.go"
+  ],
+  "prepare": [],
+  "commands": [
+    [
+      "go",
+      "test",
+      "./..."
+    ]
+  ],
+  "mutations": []
+}

@@ -1,0 +1,25 @@
+diff --git a/validators.py b/validators.py
+new file mode 100644
+--- /dev/null
++++ b/validators.py
+@@ -0,0 +1,2 @@
++def require_text(value):
++    return isinstance(value, str) and bool(value.strip())
+diff --git a/user.py b/user.py
+--- a/user.py
++++ b/user.py
+@@ -1,2 +1,3 @@
+-def valid_user(name):
+-    return isinstance(name, str) and bool(name.strip())
++from validators import require_text
++def valid_user(name):
++    return require_text(name)
+diff --git a/order.py b/order.py
+--- a/order.py
++++ b/order.py
+@@ -1,2 +1,3 @@
+-def valid_order(reference):
+-    return isinstance(reference, str) and bool(reference.strip())
++from validators import require_text
++def valid_order(reference):
++    return require_text(reference)

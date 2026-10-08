@@ -1,0 +1,22 @@
+# Node
+node_modules/
+
+# Frontend build output
+dist/
+coverage/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/coverage/
+src-tauri/gen/schemas/
+/target/
+
+# Logs & OS noise
+*.log
+.DS_Store
+Thumbs.db

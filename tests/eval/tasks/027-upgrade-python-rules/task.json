@@ -1,0 +1,39 @@
+{
+  "id": "027-upgrade-python-rules",
+  "category": "dependency",
+  "language": "Python",
+  "allowed": [
+    "requirements.txt",
+    "app.py"
+  ],
+  "required": [
+    "requirements.txt",
+    "app.py"
+  ],
+  "prepare": [
+    [
+      "python",
+      "-m",
+      "pip",
+      "install",
+      "--no-deps",
+      "--no-build-isolation",
+      "--upgrade",
+      "--target",
+      ".venv/lib",
+      "-r",
+      "requirements.txt"
+    ]
+  ],
+  "commands": [
+    [
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests"
+    ]
+  ],
+  "mutations": []
+}

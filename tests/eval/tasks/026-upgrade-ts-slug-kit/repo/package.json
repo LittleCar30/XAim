@@ -1,0 +1,18 @@
+{
+  "name": "eval-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "tsc -p tsconfig.json && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.5.4"
+  },
+  "dependencies": {
+    "slug-kit": "file:vendor/slug-v1"
+  }
+}

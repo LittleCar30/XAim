@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: msi nsis
+            artifact: xaim-windows-x64
+            artifact-path: |
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          - platform: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: dmg
+            artifact: xaim-macos-arm64
+            artifact-path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: xaim-release-${{ matrix.target }}
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build bundles
+        shell: bash
+        run: pnpm tauri build --target "${{ matrix.target }}" --bundles ${{ matrix.bundles }} --ci -- --locked
+
+      - name: Check Windows installer sizes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundleRoot = 'src-tauri/target/x86_64-pc-windows-msvc/release/bundle'
+          foreach ($pattern in @('msi/*.msi', 'nsis/*-setup.exe')) {
+            $installers = @(Get-ChildItem -Path (Join-Path $bundleRoot $pattern) -File -ErrorAction Stop)
+            if ($installers.Count -eq 0) { throw "Missing installer: $pattern" }
+            foreach ($installer in $installers) {
+              if ($installer.Length -ge 20000000) { throw "Installer exceeds 20 MB: $($installer.Name)" }
+              Write-Host "$($installer.Name): $($installer.Length) bytes"
+            }
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact-path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

@@ -1,0 +1,72 @@
+{
+  "id": "011-test-discount-boundaries",
+  "category": "tests",
+  "language": "TS",
+  "allowed": [
+    "tests/discount.test.mjs"
+  ],
+  "required": [
+    "tests/discount.test.mjs"
+  ],
+  "prepare": [
+    [
+      "npm",
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ],
+  "commands": [
+    [
+      "npm",
+      "test"
+    ]
+  ],
+  "mutations": [
+    {
+      "name": "negative rate accepted",
+      "file": "src/discount.ts",
+      "before": "rate < 0 || rate > 1",
+      "after": "rate > 1",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "failure": "AssertionError"
+    },
+    {
+      "name": "excessive rate accepted",
+      "file": "src/discount.ts",
+      "before": "rate < 0 || rate > 1",
+      "after": "rate < 0",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "failure": "AssertionError"
+    },
+    {
+      "name": "zero discount wrong",
+      "file": "src/discount.ts",
+      "before": "return price * (1 - rate);",
+      "after": "return rate === 0 ? 0 : price * (1 - rate);",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "failure": "AssertionError"
+    },
+    {
+      "name": "full discount wrong",
+      "file": "src/discount.ts",
+      "before": "return price * (1 - rate);",
+      "after": "return rate === 1 ? price : price * (1 - rate);",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "failure": "AssertionError"
+    }
+  ]
+}

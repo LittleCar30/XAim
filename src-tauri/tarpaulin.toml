@@ -1,0 +1,9 @@
+[coverage]
+engine = "Llvm"
+run-types = ["Lib"]
+out = ["Html", "Xml", "Json", "Lcov"]
+output-dir = "coverage"
+target-dir = "target/coverage"
+timeout = "180s"
+fail-under = 60.1
+locked = true

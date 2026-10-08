@@ -1,0 +1,47 @@
+import { Check, ChevronDown, ChevronRight, Circle, Loader2 } from 'lucide-react'
+import ActionBar from '@/components/ActionBar'
+import DiffView from '@/components/DiffView'
+import { TASK_STATUS_LABELS, taskStatusBadgeCls } from '@/lib/task-format'
+import { useConversationStore } from '@/stores/conversation'
+import { useProjectStore } from '@/stores/project'
+import { useTaskStore } from '@/stores/task'
+import { useUiStore } from '@/stores/ui'
+
+export default function TaskPanel() {
+  const currentTask = useTaskStore((s) => s.currentTask)
+  const livePatches = useTaskStore((s) => s.patches)
+  const liveSteps = useTaskStore((s) => s.steps)
+  const liveVerifies = useTaskStore((s) => s.verifies)
+  const events = useTaskStore((s) => s.events)
+  const project = useProjectStore((s) => s.currentProject)
+  const { selectedId, record, loading, error } = useConversationStore()
+  const historical = selectedId !== null
+  const task = historical ? record?.task : currentTask
+  const patches = historical ? record?.patches ?? [] : livePatches
+  const steps = historical ? record?.steps ?? [] : liveSteps
+  const verifies = historical ? record?.verifies ?? [] : liveVerifies
+  if (loading || error) return <div className="conversation-scroll"><div className="conversation-content"><p role={error ? 'alert' : 'status'}>{error ? `无法读取历史对话：${error}` : '正在读取历史对话…'}</p></div></div>
+  if (!task) return <div className="conversation-scroll"><div className="conversation-empty"><img src="/xaim.svg" alt="XAim" width="44" height="44" /><h1>新对话</h1><p>{project?.name ?? '未打开项目'}</p></div></div>
+  const running = !['waitingConfirm', 'idle', 'done', 'applied', 'failed', 'cancelled', 'rolledBack'].includes(task.status)
+  // Coalesce running/done event pairs into one row per stage.
+  const stages = [...new Map(steps.map((step) => [step.stepType, step])).values()]
+  const latest = stages.at(-1)
+  const passed = verifies.filter((verify) => verify.passed).length
+  const errorEvent = !historical ? [...events].reverse().find((event) => event.type === 'error' && event.taskId === task.id) : null
+  const summary = task.status === 'waitingConfirm' ? `已生成 ${patches.length} 个代码变更，等待你确认后应用。`
+    : task.status === 'done' || task.status === 'applied' ? `任务已完成${patches.some((patch) => patch.applied) ? `，已应用 ${patches.filter((patch) => patch.applied).length} 个代码变更` : ''}。`
+      : task.status === 'rolledBack' ? '本次代码变更已回滚。' : task.status === 'cancelled' ? '本次任务已取消。' : task.status === 'failed' ? '任务执行失败。' : '正在处理你的请求。'
+  return <div className="conversation-scroll" role="log" aria-label="对话记录"><div className="conversation-content" key={task.id}>
+    <article className="user-message"><span className="message-label">你</span><p>{task.prompt}</p></article>
+    <article className="agent-message">
+      <header className="agent-header"><img src="/xaim.svg" width="28" height="28" alt="" /><strong>XAim</strong><span className={`task-status ${taskStatusBadgeCls(task.status)}`}>{TASK_STATUS_LABELS[task.status]}</span></header>
+      <p className="agent-summary">{summary}</p>
+      {errorEvent?.type === 'error' && <p className="message-error">{errorEvent.message}</p>}
+      {stages.length > 0 && <details className="execution-details" open={running || undefined}><summary>{running ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}<span>{running ? latest?.stepType : '执行过程'}</span><span className="execution-count">{stages.length} 个步骤</span><ChevronDown size={15} /></summary><ol aria-label="任务步骤">{stages.map((step) => <li key={step.stepType}>{/done|完成|成功/.test(step.content) ? <Check size={14} className="text-emerald-400" /> : <Circle size={12} />}<span>{step.stepType}</span><span className="step-content">{step.content === 'done' ? '完成' : step.content === 'running' ? '进行中' : step.content}</span></li>)}</ol></details>}
+      {patches.length > 0 && <section className="message-changes" aria-label="代码变更"><div className="result-heading"><h2>代码变更</h2><span>{new Set(patches.map((patch) => patch.filePath)).size} 个文件</span></div><DiffView patches={patches} compact /></section>}
+      {verifies.length > 0 && <div className="verification-summary"><Check size={15} className={passed === verifies.length ? 'text-emerald-400' : 'text-rose-400'} /><span>验证 · {passed}/{verifies.length} 通过</span><button onClick={() => useUiStore.setState({ rightPanelOpen: true, previewPath: null, detailTab: 'verify' })}>查看详情<ChevronRight size={14} /></button></div>}
+      {!historical && patches.length > 0 && <ActionBar />}
+      {historical && <p className="historical-note">历史任务 · {new Date(task.createdAt).toLocaleString('zh-CN')}{verifies.length === 0 ? ' · 未保存验证输出' : ''}</p>}
+    </article>
+  </div></div>
+}

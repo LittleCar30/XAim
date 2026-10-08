@@ -1,0 +1,14 @@
+{
+  "id": "029-review-checkout",
+  "category": "review",
+  "language": "Python",
+  "allowed": [
+    "REVIEW.md"
+  ],
+  "required": [
+    "REVIEW.md"
+  ],
+  "prepare": [],
+  "commands": [],
+  "mutations": []
+}

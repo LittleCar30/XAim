@@ -56,7 +56,8 @@ export const useConfigStore = create<ConfigState>()((set, get) => ({
     set({ loading: true })
     try {
       const modelConfig = await ipc.getModelConfig()
-      set({ modelConfig })
+      // A full config response or model selection may have completed during this request.
+      set((state) => ({ modelConfig: state.config?.model ?? modelConfig }))
     } finally {
       set({ loading: false })
     }

@@ -117,6 +117,15 @@ describe('useConfigStore', () => {
   })
 
   describe('loadModelConfig', () => {
+    it('does not overwrite a newer selected model when an older read finishes', async () => {
+      let finishRead!: (value: ModelConfig) => void
+      mockedIpc.getModelConfig.mockImplementation(() => new Promise((resolve) => { finishRead = resolve }))
+      const pending = useConfigStore.getState().loadModelConfig()
+      useConfigStore.setState({ config, modelConfig })
+      finishRead(strongModel)
+      await pending
+      expect(useConfigStore.getState().modelConfig).toEqual(config.model)
+    })
     it('stores only the model config', async () => {
       mockedIpc.getModelConfig.mockResolvedValue(strongModel)
 

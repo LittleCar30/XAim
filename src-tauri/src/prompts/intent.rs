@@ -7,7 +7,7 @@ pub const SYSTEM: &str = r#"你是 XAim 的意图解析器。
 
 输出格式：
 {
-  "action": "fix_bug | add_test | refactor | review | explain | upgrade | cross_file",
+  "action": "fix_bug | add_feature | add_test | refactor | review | explain | upgrade | cross_file",
   "target": "文件或模块名",
   "description": "一句话描述",
   "constraints": ["约束1"],
@@ -16,7 +16,7 @@ pub const SYSTEM: &str = r#"你是 XAim 的意图解析器。
 
 规则：
 1. 只输出 JSON，不输出其他内容
-2. 不编造不存在的文件
+2. 不编造已有文件；用户要求创建文件、页面或功能时使用 add_feature，target 可填写拟新建的项目相对路径
 3. 不确定的字段留空
 4. action 必须是给定枚举之一
 "#;
@@ -258,7 +258,7 @@ mod tests {
     fn system_prompt_states_output_contract() {
         for rule in [
             "只输出 JSON",
-            "不编造不存在的文件",
+            "add_feature",
             "不确定的字段留空",
             "action 必须是给定枚举之一",
             "target",

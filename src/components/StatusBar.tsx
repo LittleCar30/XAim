@@ -36,7 +36,7 @@ export default function StatusBar({ task }: { task?: Task | null }) {
   const hasProject = useProjectStore((s) => s.currentProject !== null)
   const liveTask = useTaskStore((s) => s.currentTask)
   const currentTask = task === undefined ? liveTask : task
-  const modelConfig = useConfigStore((s) => s.modelConfig)
+  const modelConfig = useConfigStore((s) => s.config?.model ?? s.modelConfig)
   const loadModelConfig = useConfigStore((s) => s.loadModelConfig)
 
   // 模型名兜底加载（TopBar 通常已拉取；此处保证独立挂载时也可见）。
@@ -44,7 +44,7 @@ export default function StatusBar({ task }: { task?: Task | null }) {
   useEffect(() => {
     if (triedConfigRef.current) return
     triedConfigRef.current = true
-    loadModelConfig().catch(() => {})
+    if (!useConfigStore.getState().config) loadModelConfig().catch(() => {})
   }, [loadModelConfig])
 
   const running = currentTask !== null && !TERMINAL_STATUSES.includes(currentTask.status)

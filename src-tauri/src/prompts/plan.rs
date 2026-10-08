@@ -23,7 +23,8 @@ pub const SYSTEM: &str = r#"你是 XAim 的任务规划器。
 2. 步骤要具体，action 只能是 read / modify / test，test 步骤的 file 填要运行的验证命令
 3. files_to_modify 必须列出所有要修改的文件
 4. 标注风险
-5. 不编造不存在的文件
+5. 修改已有文件时不得编造其内容；用户要求新建文件或项目时，允许规划新路径，并在 modify 步骤及 files_to_modify 中列出
+6. 空项目的新建文件任务无需读取不存在的文件，也不要假设存在 package.json 或测试工具
 "#;
 
 /// 渲染用户消息：任务 + 上下文摘要（[`format_context`]），并重申只输出 JSON。
@@ -75,7 +76,7 @@ mod tests {
             "步骤要具体",
             "files_to_modify 必须列出所有要修改的文件",
             "标注风险",
-            "不编造不存在的文件",
+            "允许规划新路径",
             "\"read\"",
             "\"modify\"",
             "\"test\"",

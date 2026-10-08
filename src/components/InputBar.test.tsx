@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import InputBar from './InputBar'
+import TaskPanel from './TaskPanel'
+import { useConfigStore } from '@/stores/config'
 import { ipc } from '@/services/ipc'
 import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
@@ -80,5 +82,36 @@ describe('InputBar', () => {
     expect(await screen.findByText('offline')).toBeInTheDocument()
     expect(screen.getByRole('textbox')).toHaveValue('retry me')
     expect(screen.getByRole('button', { name: '发送' })).toBeEnabled()
+  })
+
+  it('shows a backend failure only once and preserves cancellation status', async () => {
+    useProjectStore.setState({ currentProject: project })
+    mocked.runTask.mockImplementation(async () => {
+      useTaskStore.getState().handleEvent({ type: 'error', taskId: task.id, message: 'invalid patch' })
+      useTaskStore.getState().handleEvent({ type: 'done', taskId: task.id, status: 'failed' })
+      throw 'invalid patch'
+    })
+    render(<><TaskPanel /><InputBar /></>)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'create page' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled())
+    expect(screen.getAllByText('invalid patch')).toHaveLength(1)
+    mocked.runTask.mockImplementation(async () => {
+      useTaskStore.getState().handleEvent({ type: 'done', taskId: 43, status: 'cancelled' })
+      throw 'cancelled'
+    })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled())
+    expect(useTaskStore.getState().currentTask?.status).toBe('cancelled')
+  })
+
+  it('blocks Enter while model settings are saving', () => {
+    useProjectStore.setState({ currentProject: project })
+    render(<InputBar />)
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'create page' } })
+    act(() => useConfigStore.setState({ loading: true }))
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(mocked.runTask).not.toHaveBeenCalled()
   })
 })

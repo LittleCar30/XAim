@@ -33,3 +33,24 @@ it('shows historical messages without offering live patch actions', () => {
   expect(screen.queryByText('active task')).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: '回滚' })).not.toBeInTheDocument()
 })
+
+it('shows unfinished stages as failed after the task fails', () => {
+  useTaskStore.setState({ currentTask: { ...task, status: 'failed' } })
+  useTaskStore.getState().handleEvent({ type: 'step', taskId: task.id, name: '生成候选', status: 'running' })
+  render(<TaskPanel />)
+  const steps = screen.getByRole('list', { name: '任务步骤' })
+  expect(within(steps).getByText('失败')).toBeInTheDocument()
+  expect(within(steps).queryByText('进行中')).not.toBeInTheDocument()
+})
+
+it('shows historical cancelled stages and hides saved plan JSON', () => {
+  useConversationStore.setState({ selectedId: task.id, record: {
+    task: { ...task, status: 'cancelled' }, patches: [], verifies: [], steps: [
+      { id: 1, taskId: task.id, stepType: 'plan', content: '{"steps":[]}', createdAt: 0 },
+      { id: 2, taskId: task.id, stepType: '生成候选', content: 'running', createdAt: 0 },
+    ],
+  } })
+  render(<TaskPanel />)
+  expect(within(screen.getByRole('list', { name: '任务步骤' })).getByText('已取消')).toBeInTheDocument()
+  expect(screen.queryByText('{"steps":[]}')).not.toBeInTheDocument()
+})

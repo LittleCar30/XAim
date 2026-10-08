@@ -46,13 +46,15 @@ export default function InputBar() {
   const currentTask = useTaskStore((s) => s.currentTask)
   const setCurrentTask = useTaskStore((s) => s.setCurrentTask)
   const configLoading = useConfigStore((s) => s.loading)
+  const events = useTaskStore((s) => s.events)
+  const selectedId = useConversationStore((s) => s.selectedId)
   const awaitingConfirmation = currentTask?.status === 'waitingConfirm'
 
   const [value, setValue] = useState('')
   const [history, setHistory] = useState<string[]>(loadHistory)
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
   const [sending, setSending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<{ message: string; taskId?: number } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const running = currentTask !== null && !TERMINAL_STATUSES.includes(currentTask.status)
@@ -70,7 +72,7 @@ export default function InputBar() {
   const send = async () => {
     const project = currentProject
     const prompt = value.trim()
-    if (sending || running || project === null || prompt === '') return
+    if (sending || running || configLoading || project === null || prompt === '') return
     setSending(true)
     setError(null)
     try {
@@ -97,13 +99,20 @@ export default function InputBar() {
         // 持久化失败不影响发送
       }
     } catch (e) {
-      setError(toMessage(e))
       const task = useTaskStore.getState().currentTask
-      if (task) setCurrentTask({ ...task, status: 'failed', finishedAt: Date.now() })
+      setError({ message: toMessage(e), taskId: task?.id })
+      if (task && !['cancelled', 'done', 'rolledBack', 'failed'].includes(task.status)) {
+        setCurrentTask({ ...task, status: 'failed', finishedAt: Date.now() })
+      }
     } finally {
       setSending(false)
     }
   }
+
+  const errorInConversation = selectedId === null && error?.taskId !== undefined && events.some((event) =>
+    event.type === 'error' && event.taskId === currentTask?.id &&
+    (error.taskId === -1 || error.taskId === event.taskId) && event.message === error.message,
+  )
 
   const recall = (index: number) => {
     setHistoryIndex(index)
@@ -149,7 +158,7 @@ export default function InputBar() {
       {running && (
         <p className="mb-2 text-[11px] text-slate-500">{awaitingConfirmation ? '等待确认本次代码变更' : '任务运行中，输入暂时禁用…'}</p>
       )}
-      {error && <p className="mb-2 text-[11px] text-rose-400">{error}</p>}
+      {error && !errorInConversation && <p role="alert" className="mb-2 text-[11px] text-rose-400">{error.message}</p>}
       <div className="composer-surface">
         <textarea
           ref={textareaRef}
@@ -170,7 +179,7 @@ export default function InputBar() {
           className="composer-input"
         />
         <div className="composer-bottom justify-end gap-2"><ModelPicker disabled={running || sending} /><div className="flex gap-2">
-        {running && !awaitingConfirmation && currentTask && currentTask.id >= 0 && <button className="icon-button" aria-label="停止任务" title="停止任务" onClick={() => void ipc.cancelTask(currentTask.id).catch((e) => setError(toMessage(e)))}><Square size={14} /></button>}
+        {running && !awaitingConfirmation && currentTask && currentTask.id >= 0 && <button className="icon-button" aria-label="停止任务" title="停止任务" onClick={() => void ipc.cancelTask(currentTask.id).catch((e) => setError({ message: toMessage(e) }))}><Square size={14} /></button>}
         <button
           type="button"
           onClick={() => void send()}

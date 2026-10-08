@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronRight, Circle, Loader2 } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Circle, Loader2, X } from 'lucide-react'
 import ActionBar from '@/components/ActionBar'
 import DiffView from '@/components/DiffView'
 import { TASK_STATUS_LABELS, taskStatusBadgeCls } from '@/lib/task-format'
@@ -24,7 +24,12 @@ export default function TaskPanel() {
   if (!task) return <div className="conversation-scroll"><div className="conversation-empty"><img src="/xaim.svg" alt="XAim" width="44" height="44" /><h1>新对话</h1><p>{project?.name ?? '未打开项目'}</p></div></div>
   const running = !['waitingConfirm', 'idle', 'done', 'applied', 'failed', 'cancelled', 'rolledBack'].includes(task.status)
   // Coalesce running/done event pairs into one row per stage.
-  const stages = [...new Map(steps.map((step) => [step.stepType, step])).values()]
+  const stages = [...new Map(steps.filter((step) =>
+    !(['intent', 'plan'].includes(step.stepType) && step.content.trim().startsWith('{')),
+  ).map((step) => [step.stepType, step])).values()].map((step) => ({
+    ...step,
+    content: step.content === 'running' && ['failed', 'cancelled'].includes(task.status) ? task.status : step.content,
+  }))
   const latest = stages.at(-1)
   const passed = verifies.filter((verify) => verify.passed).length
   const errorEvent = !historical ? [...events].reverse().find((event) => event.type === 'error' && event.taskId === task.id) : null
@@ -37,7 +42,13 @@ export default function TaskPanel() {
       <header className="agent-header"><img src="/xaim.svg" width="28" height="28" alt="" /><strong>XAim</strong><span className={`task-status ${taskStatusBadgeCls(task.status)}`}>{TASK_STATUS_LABELS[task.status]}</span></header>
       <p className="agent-summary">{summary}</p>
       {errorEvent?.type === 'error' && <p className="message-error">{errorEvent.message}</p>}
-      {stages.length > 0 && <details className="execution-details" open={running || undefined}><summary>{running ? <Loader2 size={15} className="animate-spin" /> : <Check size={15} />}<span>{running ? latest?.stepType : '执行过程'}</span><span className="execution-count">{stages.length} 个步骤</span><ChevronDown size={15} /></summary><ol aria-label="任务步骤">{stages.map((step) => <li key={step.stepType}>{/done|完成|成功/.test(step.content) ? <Check size={14} className="text-emerald-400" /> : <Circle size={12} />}<span>{step.stepType}</span><span className="step-content">{step.content === 'done' ? '完成' : step.content === 'running' ? '进行中' : step.content}</span></li>)}</ol></details>}
+      {stages.length > 0 && <details className="execution-details" open={running || task.status === 'failed' || undefined}>
+        <summary>{running ? <Loader2 size={15} className="animate-spin" /> : task.status === 'failed' ? <X size={15} className="text-rose-400" /> : task.status === 'cancelled' ? <Circle size={15} /> : <Check size={15} />}<span>{running ? latest?.stepType : '执行过程'}</span><span className="execution-count">{stages.length} 个步骤</span><ChevronDown size={15} /></summary>
+        <ol aria-label="任务步骤">{stages.map((step) => <li key={step.stepType}>
+          {/done|完成|成功/.test(step.content) ? <Check size={14} className="text-emerald-400" /> : step.content === 'failed' ? <X size={14} className="text-rose-400" /> : <Circle size={12} />}
+          <span>{step.stepType}</span><span className="step-content">{({ done: '完成', running: '进行中', failed: '失败', cancelled: '已取消' } as Record<string, string>)[step.content] ?? step.content}</span>
+        </li>)}</ol>
+      </details>}
       {patches.length > 0 && <section className="message-changes" aria-label="代码变更"><div className="result-heading"><h2>代码变更</h2><span>{new Set(patches.map((patch) => patch.filePath)).size} 个文件</span></div><DiffView patches={patches} compact /></section>}
       {verifies.length > 0 && <div className="verification-summary"><Check size={15} className={passed === verifies.length ? 'text-emerald-400' : 'text-rose-400'} /><span>验证 · {passed}/{verifies.length} 通过</span><button onClick={() => useUiStore.setState({ rightPanelOpen: true, previewPath: null, detailTab: 'verify' })}>查看详情<ChevronRight size={14} /></button></div>}
       {!historical && patches.length > 0 && <ActionBar />}

@@ -14,7 +14,7 @@
 //! 安全：diff 内的目标路径必须落在项目根目录内（拒绝绝对路径与 `..` 越界，
 //! 已存在目标经 canonicalize 拦截符号链接逃逸）。
 //!
-//! TODO: 文件级删除/重命名（当前删除补丁只清空内容）；二进制补丁。
+//! TODO: 文件级重命名；二进制补丁。
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -60,7 +60,13 @@ pub fn parse_diff(text: &str) -> Result<Vec<PatchCandidate>> {
         let boundary_end = next_minus.min(next_git.unwrap_or(lines.len()));
         // 段尾裁剪：hunk 之后可能出现空行、说明文字、代码围栏等杂项，
         // 按 hunk 头声明的行数精确消费，hunk 结束处即段尾。
-        let seg_end = boundary_end.min(hunk_content_end(&lines, minus));
+        let mut seg_end = boundary_end.min(hunk_content_end(&lines, minus));
+        // Keep excess +/- body lines so a wrong hunk count is rejected, not silently truncated.
+        while seg_end < boundary_end
+            && (lines[seg_end].starts_with('+') || lines[seg_end].starts_with('-'))
+        {
+            seg_end += 1;
+        }
         let diff = format!("{}\n", lines[minus..seg_end].join("\n"));
         let file_path = extract_target_path(lines[minus], lines[minus + 1])?;
         candidates.push(PatchCandidate {
@@ -100,6 +106,12 @@ fn hunk_content_end(lines: &[&str], start: usize) -> usize {
             }
             i += 1;
         }
+        while lines
+            .get(i)
+            .is_some_and(|line| line.starts_with("\\ No newline"))
+        {
+            i += 1;
+        }
     }
     i
 }
@@ -129,7 +141,7 @@ pub fn apply_diff(diff: &str, root: &Path) -> Result<()> {
     let planned = plan_apply(diff, root)?;
     let mut written: Vec<&PlannedChange> = Vec::new();
     for change in &planned {
-        if let Err(e) = std::fs::write(&change.target, &change.patched) {
+        if let Err(e) = write_change(&change.target, change.patched.as_deref()) {
             let rollback = rollback(&written);
             return Err(XaimError::Unknown(format!(
                 "写入 {} 失败: {e}；{rollback}",
@@ -172,8 +184,20 @@ pub fn generate_diff(old: &str, new: &str, path: &str) -> String {
 /// 一段补丁的计划结果：目标路径、应用前的原内容与试应用后的新内容。
 struct PlannedChange {
     target: PathBuf,
-    original: String,
-    patched: String,
+    original: Option<String>,
+    patched: Option<String>,
+}
+
+fn write_change(target: &Path, content: Option<&str>) -> std::io::Result<()> {
+    match content {
+        Some(content) => {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(target, content)
+        }
+        None => std::fs::remove_file(target),
+    }
 }
 
 /// 两阶段的公共执行体：解析 → 逐段定位目标并读取原内容 → 内存试应用。
@@ -186,12 +210,39 @@ fn plan_apply(diff: &str, root: &Path) -> Result<Vec<PlannedChange>> {
     let mut planned = Vec::with_capacity(candidates.len());
     for cand in &candidates {
         let target = resolve_in_root(root, &cand.file_path)?;
+        let existed = target.exists();
+        if is_new_file_patch(&cand.diff) && existed {
+            return Err(XaimError::PatchConflict(format!(
+                "{}: 新文件目标已存在",
+                cand.file_path
+            )));
+        }
         let original = read_current(&target, cand)?;
         let patched = apply_patch_text(&original, &cand.diff, &cand.file_path)?;
+        let deleted = cand
+            .diff
+            .lines()
+            .nth(1)
+            .is_some_and(|line| line == "+++ /dev/null");
+        if deleted && !patched.is_empty() {
+            return Err(XaimError::PatchConflict(format!(
+                "{}: 删除补丁必须移除全部内容",
+                cand.file_path
+            )));
+        }
+        if planned
+            .iter()
+            .any(|change: &PlannedChange| change.target == target)
+        {
+            return Err(XaimError::PatchConflict(format!(
+                "{}: 补丁含重复目标",
+                cand.file_path
+            )));
+        }
         planned.push(PlannedChange {
             target,
-            original,
-            patched,
+            original: existed.then_some(original),
+            patched: (!deleted).then_some(patched),
         });
     }
     Ok(planned)
@@ -204,7 +255,7 @@ fn rollback(written: &[&PlannedChange]) -> String {
     }
     let mut failures = Vec::new();
     for change in written.iter().rev() {
-        if let Err(e) = std::fs::write(&change.target, &change.original) {
+        if let Err(e) = write_change(&change.target, change.original.as_deref()) {
             failures.push(format!("{} 回滚失败: {e}", change.target.display()));
         }
     }
@@ -217,7 +268,7 @@ fn rollback(written: &[&PlannedChange]) -> String {
 
 /// 解析 diff 内的目标路径并做项目内校验：拒绝绝对路径；
 /// 已存在文件经 canonicalize 检查（顺带拦截符号链接逃逸），
-/// 尚不存在的新文件退回词法前缀比对。
+/// 尚不存在的新文件校验最近的已有父目录，拦截父目录符号链接逃逸。
 pub(crate) fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf> {
     if Path::new(rel).is_absolute() {
         return Err(XaimError::Security(format!(
@@ -235,6 +286,15 @@ pub(crate) fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if !candidate.starts_with(normalize(root)) {
+                return Err(XaimError::Security(format!("diff 路径越出项目目录: {rel}")));
+            }
+            let ancestor = candidate
+                .ancestors()
+                .skip(1)
+                .find(|path| path.exists())
+                .ok_or_else(|| XaimError::Security(format!("diff 路径无有效父目录: {rel}")))?;
+            let real_parent = std::fs::canonicalize(ancestor)?;
+            if !real_parent.starts_with(&canonical_root) {
                 return Err(XaimError::Security(format!("diff 路径越出项目目录: {rel}")));
             }
             Ok(candidate)
@@ -451,6 +511,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_extra_body_lines_instead_of_creating_truncated_file() {
+        let dir = tempdir().unwrap();
+        let diff = "--- /dev/null\n+++ b/index.html\n@@ -0,0 +1 @@\n+<html>\n+</html>\n";
+        assert!(validate_diff(diff, dir.path()).is_err());
+        assert!(!dir.path().join("index.html").exists());
+    }
+
+    #[test]
     fn validate_passes_on_matching_workspace_and_rejects_conflict() {
         let dir = tempdir().unwrap();
         write_file(dir.path(), "src/main.rs", OLD);
@@ -502,6 +570,75 @@ mod tests {
 
         let written = fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
         assert_eq!(written, NEW);
+    }
+
+    #[test]
+    fn new_nested_html_applies_and_reverses_without_leaving_empty_file() {
+        let dir = tempdir().unwrap();
+        let diff = "--- /dev/null\n+++ b/web/index.html\n@@ -0,0 +1,2 @@\n+<!doctype html>\n+<html></html>\n";
+        validate_diff(diff, dir.path()).unwrap();
+        assert!(
+            !dir.path().join("web").exists(),
+            "dry-run must not create directories"
+        );
+        apply_diff(diff, dir.path()).unwrap();
+        let target = dir.path().join("web/index.html");
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "<!doctype html>\n<html></html>\n"
+        );
+        assert!(
+            apply_diff(diff, dir.path()).is_err(),
+            "new-file patch must not overwrite existing file"
+        );
+        reverse_diff(diff, dir.path()).unwrap();
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn preserves_missing_trailing_newline_when_parsing_and_applying() {
+        let dir = tempdir().unwrap();
+        let diff = "--- /dev/null\n+++ b/index.html\n@@ -0,0 +1 @@\n+<html></html>\n\\ No newline at end of file\n```\n";
+        apply_diff(diff, dir.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("index.html")).unwrap(),
+            "<html></html>"
+        );
+        reverse_diff(diff, dir.path()).unwrap();
+        assert!(!dir.path().join("index.html").exists());
+    }
+
+    #[test]
+    fn failed_batch_removes_new_files_during_rollback() {
+        let dir = tempdir().unwrap();
+        let blocked = dir.path().join("blocked.html");
+        fs::write(&blocked, "old\n").unwrap();
+        let mut permissions = fs::metadata(&blocked).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&blocked, permissions).unwrap();
+        let diff = "--- /dev/null\n+++ b/new.html\n@@ -0,0 +1 @@\n+hello\n--- a/blocked.html\n+++ b/blocked.html\n@@ -1 +1 @@\n-old\n+new\n";
+        validate_diff(diff, dir.path()).unwrap();
+        let error = apply_diff(diff, dir.path()).unwrap_err();
+        assert!(error.to_string().contains("已回滚 1 个文件"));
+        assert!(!dir.path().join("new.html").exists());
+        assert_eq!(fs::read_to_string(&blocked).unwrap(), "old\n");
+        let mut permissions = fs::metadata(&blocked).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&blocked, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_file_rejects_parent_symlink_outside_root() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("web")).unwrap();
+        let diff = "--- /dev/null\n+++ b/web/index.html\n@@ -0,0 +1 @@\n+hello\n";
+        assert!(matches!(
+            apply_diff(diff, dir.path()),
+            Err(XaimError::Security(_))
+        ));
+        assert!(!outside.path().join("index.html").exists());
     }
 
     #[test]
@@ -621,10 +758,9 @@ mod tests {
         );
 
         reverse_diff(create, dir.path()).unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("created.rs")).unwrap(),
-            "",
-            "反向后内容应清空（文件级删除为 TODO）"
+        assert!(
+            !dir.path().join("created.rs").exists(),
+            "反向新文件应被删除"
         );
     }
 

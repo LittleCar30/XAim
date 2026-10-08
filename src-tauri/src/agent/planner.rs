@@ -12,8 +12,9 @@ use crate::search::context::Context;
 use crate::tools::patch::{parse_diff, PatchCandidate};
 
 /// 意图解析允许的动作枚举，与 [`prompts::intent::SYSTEM`] 的输出格式一致。
-pub const ACTIONS: [&str; 7] = [
+pub const ACTIONS: [&str; 8] = [
     "fix_bug",
+    "add_feature",
     "add_test",
     "refactor",
     "review",
@@ -130,7 +131,7 @@ const RETRY_HINT: &str =
 ///
 /// 隔离规则：每个候选独立调用、独立解析，单个候选的传输错误或无效输出
 /// 只淘汰该候选，不影响其余；`n` 为 0 时直接返回空向量；全部候选失败时
-/// 返回 [`XaimError::Model`]。
+/// 返回 [`XaimError::Model`]；全部输出格式无效时额外进行一次格式纠正。
 pub async fn generate_candidates(
     task: &str,
     plan: &Plan,
@@ -169,35 +170,92 @@ pub async fn generate_candidates_with_model(
             );
             request.temperature = candidate_temperature(index);
             let response = provider.complete(request).await?;
-            parse_diff(&response.content)
+            Ok::<_, XaimError>((
+                response.content.clone(),
+                parse_candidate_output(&response.content),
+            ))
         }
     });
     let results = futures::future::join_all(attempts).await;
 
     let mut candidates: Vec<PatchCandidate> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
+    let mut invalid_output = None;
     let mut seen: HashSet<(String, String)> = HashSet::new();
     for result in results {
         match result {
-            Ok(parsed) if parsed.is_empty() => {
-                failures.push("输出中未找到 diff 块".to_string());
-            }
-            Ok(parsed) => {
+            Ok((_, Ok(parsed))) => {
                 for candidate in parsed {
                     if seen.insert((candidate.file_path.clone(), candidate.diff.clone())) {
                         candidates.push(candidate);
                     }
                 }
             }
+            Ok((output, Err(error))) => {
+                failures.push(error.to_string());
+                invalid_output = Some(output);
+            }
             Err(error) => failures.push(error.to_string()),
         }
     }
 
+    // One correction call only when the initial batch yielded no usable output.
+    let mut corrected = false;
     if candidates.is_empty() {
-        let reason = failures.first().map(String::as_str).unwrap_or("未知原因");
+        if let Some(output) = invalid_output {
+            corrected = true;
+            let reason = failures.last().map(String::as_str).unwrap_or("格式无效");
+            let request = CompletionRequest::new(
+                model,
+                vec![
+                    Message::system(prompts::modify::SYSTEM),
+                    Message::user(user_message),
+                    Message::assistant(output),
+                    Message::user(format!(
+                        "上次输出无法作为补丁解析：{reason}。请重新输出完整、合法的 unified diff。\
+                     新文件必须使用 --- /dev/null、+++ b/项目相对路径、@@ -0,0 +1,N @@，\
+                     所有正文行前加 + 并准确计算 N。不要直接输出 HTML 或代码块。"
+                    )),
+                ],
+            );
+            match provider.complete(request).await {
+                Ok(response) => match parse_candidate_output(&response.content) {
+                    Ok(parsed) => candidates.extend(parsed),
+                    Err(error) => failures.push(error.to_string()),
+                },
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+    }
+    if candidates.is_empty() {
+        let reason = failures.last().map(String::as_str).unwrap_or("未知原因");
+        let correction = if corrected {
+            "，格式纠正后仍无有效补丁"
+        } else {
+            ""
+        };
         return Err(XaimError::Model(format!(
-            "候选生成失败：{n} 次调用均未产出有效补丁。最后一次原因：{reason}"
+            "候选生成失败：{n} 个候选均未产出有效补丁{correction}。最后一次原因：{reason}"
         )));
+    }
+    Ok(candidates)
+}
+
+fn parse_candidate_output(output: &str) -> Result<Vec<PatchCandidate>> {
+    let candidates = parse_diff(output)?;
+    if candidates.is_empty() {
+        return Err(XaimError::PatchConflict("输出中未找到 diff 块".into()));
+    }
+    for candidate in &candidates {
+        if !candidate.diff.lines().any(|line| line.starts_with("@@ ")) {
+            return Err(XaimError::PatchConflict(format!(
+                "{}: diff 缺少 hunk",
+                candidate.file_path
+            )));
+        }
+        diffy::Patch::from_str(&candidate.diff).map_err(|error| {
+            XaimError::PatchConflict(format!("{}: diff 格式无效: {error}", candidate.file_path))
+        })?;
     }
     Ok(candidates)
 }
@@ -869,9 +927,10 @@ mod tests {
 
     #[test]
     fn actions_enum_matches_prompt_contract() {
-        assert_eq!(ACTIONS.len(), 7);
+        assert_eq!(ACTIONS.len(), 8);
         let expected = [
             "fix_bug",
+            "add_feature",
             "add_test",
             "refactor",
             "review",
@@ -1401,7 +1460,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, XaimError::Model(_)), "实际错误: {error:?}");
-        assert_eq!(provider.call_count(), 2, "每个候选独立调用");
+        assert_eq!(provider.call_count(), 3, "候选失败后只追加一次格式纠正");
         let message = error.to_string();
         assert!(
             message.contains("候选生成失败"),
@@ -1417,6 +1476,56 @@ mod tests {
             .unwrap();
         assert!(candidates.is_empty());
         assert_eq!(provider.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn raw_html_is_corrected_to_new_file_diff() {
+        let diff = "--- /dev/null\n+++ b/web/index.html\n@@ -0,0 +1,2 @@\n+<!doctype html>\n+<html></html>\n";
+        let provider = SeqProvider::new(&["<!doctype html><html></html>", diff]);
+        let candidates = generate_candidates_with_model(
+            "创建 HTML",
+            &simple_plan(),
+            &context(&[]),
+            "selected-model",
+            &provider,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(candidates[0].file_path, "web/index.html");
+        assert_eq!(provider.call_count(), 2);
+        assert_eq!(provider.requested_model(1), "selected-model");
+        let messages = provider.requested_messages(1);
+        assert_eq!(messages[2].role, "assistant");
+        assert!(messages.last().unwrap().content.contains("--- /dev/null"));
+        let root = tempfile::tempdir().unwrap();
+        crate::tools::patch::apply_diff(&candidates[0].diff, root.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("web/index.html")).unwrap(),
+            "<!doctype html>\n<html></html>\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_hunk_is_corrected_and_retry_is_bounded() {
+        let invalid = "--- /dev/null\n+++ b/index.html\n@@ -0,0 +1,9 @@\n+<html></html>\n";
+        let provider = SeqProvider::new(&[invalid]);
+        let error = generate_candidates("创建 HTML", &simple_plan(), &context(&[]), &provider, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(provider.call_count(), 2);
+        assert!(error.to_string().contains("格式纠正后仍无有效补丁"));
+    }
+
+    #[tokio::test]
+    async fn transport_errors_do_not_trigger_format_correction() {
+        let provider = SeqProvider::new(&["unused"]).with_error("offline");
+        assert!(
+            generate_candidates("创建 HTML", &simple_plan(), &context(&[]), &provider, 2)
+                .await
+                .is_err()
+        );
+        assert_eq!(provider.call_count(), 2);
     }
 
     #[tokio::test]

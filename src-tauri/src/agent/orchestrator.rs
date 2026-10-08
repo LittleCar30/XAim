@@ -216,6 +216,9 @@ impl Orchestrator {
                 .path
         });
 
+        // Preserve the workspace before the task commit, including an empty initial project.
+        crate::git::ops::create_rollback_point(&root, task_id)?;
+
         // WaitingConfirm -> Applied
         let mut status = task.status;
         self.transition(task_id, &mut status, TaskStatus::Applied)?;
@@ -527,6 +530,17 @@ impl Orchestrator {
             }
             Ok(Err(error)) => {
                 tracing::warn!(task_id, step = name, error = %error, "步骤失败");
+                if let Err(emit_error) = self.emit_step(
+                    task_id,
+                    name,
+                    if matches!(error, XaimError::Cancelled) {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    },
+                ) {
+                    tracing::error!(task_id, error = %emit_error, "步骤终态记录失败");
+                }
                 Err(error)
             }
             Err(_elapsed) => {
@@ -535,6 +549,9 @@ impl Orchestrator {
                     self.config.step_timeout_sec
                 ));
                 tracing::warn!(task_id, step = name, error = %error, "步骤超时");
+                if let Err(emit_error) = self.emit_step(task_id, name, "failed") {
+                    tracing::error!(task_id, error = %emit_error, "步骤终态记录失败");
+                }
                 Err(error)
             }
         }
@@ -557,6 +574,10 @@ impl Orchestrator {
     }
 
     fn emit_step(&self, task_id: i64, name: &str, step_status: &str) -> Result<()> {
+        {
+            let conn = self.store.conn();
+            store::task::insert_step(&conn, task_id, name, step_status)?;
+        }
         self.sink.emit(XaimEvent::Step {
             task_id,
             name: name.to_string(),
@@ -964,9 +985,11 @@ fn restore_file(root: &Path, file_path: &str, backup: &FileBackup) -> Result<()>
             }
             fs::write(&target, content)?;
         }
-        FileBackup::Absent => {
-            let _ = fs::remove_file(&target);
-        }
+        FileBackup::Absent => match fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        },
     }
     Ok(())
 }
@@ -1365,6 +1388,11 @@ mod tests {
         assert_eq!(task_status(&store, task_id_of(&store)), TaskStatus::Failed);
         assert!(sink.has_event("error", ""), "应推送错误事件");
         assert!(sink.has_event("done", "failed"), "应推送失败终态事件");
+        assert_eq!(sink.step_names("failed"), ["解析意图"]);
+        let task_id = task_id_of(&store);
+        let conn = store.conn();
+        let steps = store::task::list_steps(&conn, task_id).unwrap();
+        assert_eq!(steps.last().unwrap().content, "failed");
         assert_eq!(lib_content(dir.path()), BROKEN_LIB);
     }
 
@@ -1391,6 +1419,50 @@ mod tests {
         assert!(matches!(error, XaimError::Timeout(_)), "实际 {error:?}");
         assert_eq!(task_status(&store, task_id_of(&store)), TaskStatus::Failed);
         assert!(sink.has_event("done", "failed"));
+        assert_eq!(sink.step_names("failed"), ["解析意图"]);
+    }
+
+    #[tokio::test]
+    async fn empty_project_creates_html_after_correcting_output_and_can_rollback() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, project_id) = setup_project(dir.path());
+        let diff = "--- /dev/null\n+++ b/web/index.html\n@@ -0,0 +1,2 @@\n+<!doctype html>\n+<html><svg></svg></html>\n";
+        let provider = Arc::new(ScriptedProvider::new(&[
+            r#"{"action":"add_feature","target":"web/index.html"}"#,
+            r#"{"steps":[{"action":"modify","file":"web/index.html","reason":"新建动画页面"}],"files_to_modify":["web/index.html"],"risks":[]}"#,
+            "<html><svg></svg></html>",
+            diff,
+            CONFIDENCE_JSON,
+        ]));
+        let sink = CollectSink::default();
+        let orchestrator = Orchestrator::with_sink(
+            store.clone(),
+            OrchestratorConfig {
+                candidate_count: 1,
+                ..Default::default()
+            },
+            Arc::new(sink.clone()),
+            provider,
+        );
+        let task_id = orchestrator
+            .run_task(project_id, "创建一个 HTML 动画页面".into())
+            .await
+            .unwrap();
+        assert_eq!(task_status(&store, task_id), TaskStatus::WaitingConfirm);
+        let target = dir.path().join("web/index.html");
+        assert!(
+            !target.exists(),
+            "evaluation must restore absent target before confirmation"
+        );
+        orchestrator.confirm_task(task_id).await.unwrap();
+        assert_eq!(task_status(&store, task_id), TaskStatus::Done);
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "<!doctype html>\n<html><svg></svg></html>\n"
+        );
+        orchestrator.rollback_task(task_id).await.unwrap();
+        assert_eq!(task_status(&store, task_id), TaskStatus::RolledBack);
+        assert!(!target.exists());
     }
 
     #[tokio::test]

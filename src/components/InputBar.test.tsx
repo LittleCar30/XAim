@@ -44,7 +44,7 @@ describe('InputBar', () => {
     expect(mocked.runTask).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(input).toHaveValue(''))
-    expect(mocked.runTask).toHaveBeenCalledWith(7, 'fix login')
+    expect(mocked.runTask).toHaveBeenCalledWith(7, 'fix login', false)
     expect(mocked.getTask).toHaveBeenCalledWith(42)
     expect(useTaskStore.getState().currentTask).toEqual(task)
     expect(mocked.listPatches).toHaveBeenCalledWith(42)
@@ -82,6 +82,23 @@ describe('InputBar', () => {
     expect(await screen.findByText('offline')).toBeInTheDocument()
     expect(screen.getByRole('textbox')).toHaveValue('retry me')
     expect(screen.getByRole('button', { name: '发送' })).toBeEnabled()
+  })
+
+  it('consumes verification approval for only one task', async () => {
+    useProjectStore.setState({ currentProject: project })
+    mocked.runTask.mockRejectedValue('offline')
+    render(<InputBar />)
+    const checkbox = screen.getByRole('checkbox', { name: '运行项目检查' })
+    expect(checkbox).not.toBeChecked()
+    fireEvent.click(checkbox)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'check code' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled())
+    expect(mocked.runTask).toHaveBeenLastCalledWith(project.id, 'check code', true)
+    expect(checkbox).not.toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledTimes(2))
+    expect(mocked.runTask).toHaveBeenLastCalledWith(project.id, 'check code', false)
   })
 
   it('shows a backend failure only once and preserves cancellation status', async () => {

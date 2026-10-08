@@ -13,12 +13,16 @@ use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
-use super::provider::{CompletionRequest, CompletionResponse, ModelProvider, Usage};
+use super::provider::{
+    CompletionRequest, CompletionResponse, ModelProvider, ToolMessage, ToolRequest, ToolResponse,
+    Usage,
+};
 use crate::errors::{Result, XaimError};
 
 /// 单次请求超时：非流式补全的整体上限；流式请求用它限制读空闲
 /// （120s 内未收到任何字节即断开），整体时长不设上限以免截断长生成。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+const TOOL_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// 失败后的重试次数（不含首次请求）。
 const MAX_RETRIES: u32 = 2;
 /// 指数退避基数：第 n 次重试前等待 `BACKOFF_BASE_MS * 2^(n-1)` 毫秒。
@@ -31,6 +35,7 @@ pub struct OpenAiProvider {
     base_url: String,
     api_key: String,
     client: reqwest::Client,
+    tool_client: reqwest::Client,
     reasoning_effort: Option<String>,
     reasoning_model: bool,
     deepseek: bool,
@@ -44,10 +49,15 @@ impl OpenAiProvider {
             .read_timeout(REQUEST_TIMEOUT)
             .build()
             .expect("构建 reqwest Client 失败");
+        let tool_client = reqwest::Client::builder()
+            .read_timeout(TOOL_REQUEST_TIMEOUT)
+            .build()
+            .expect("构建工具请求 Client 失败");
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             client,
+            tool_client,
             reasoning_effort: None,
             reasoning_model: false,
             deepseek: false,
@@ -111,21 +121,23 @@ impl OpenAiProvider {
 
     /// 发送请求并在可重试的失败（网络错误、408/429/5xx）上指数退避重试。
     /// 只重试到拿到成功响应为止，响应体的消费不在重试范围内。
-    /// `timeout` 为整体超时：非流式传 [`REQUEST_TIMEOUT`]，流式传 `None`
+    /// `timeout` 为整体超时：文本补全传 [`REQUEST_TIMEOUT`]，工具补全传
+    /// [`TOOL_REQUEST_TIMEOUT`]，流式传 `None`
     /// （流式只受客户端 read_timeout 的空闲保护）。
-    async fn send_with_retries(
+    async fn send_with_retries<T: Serialize + Sync>(
         &self,
-        payload: &WireRequest<'_>,
+        payload: &T,
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url);
         let mut attempt = 0u32;
         loop {
-            let mut request = self
-                .client
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .json(payload);
+            let client = if timeout == Some(TOOL_REQUEST_TIMEOUT) {
+                &self.tool_client
+            } else {
+                &self.client
+            };
+            let mut request = client.post(&url).bearer_auth(&self.api_key).json(payload);
             if let Some(timeout) = timeout {
                 request = request.timeout(timeout);
             }
@@ -205,6 +217,61 @@ fn wire_request(req: &CompletionRequest, stream: bool) -> WireRequest<'_> {
 
 #[async_trait]
 impl ModelProvider for OpenAiProvider {
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
+    async fn complete_tools(&self, req: ToolRequest) -> Result<ToolResponse> {
+        let plain = CompletionRequest::new(&req.model, vec![]);
+        let mut payload = serde_json::to_value(self.payload(&plain, false))?;
+        payload["messages"] = serde_json::to_value(&req.messages)?;
+        payload["tools"] = serde_json::to_value(&req.tools)?;
+        // The loop owns this budget; a saved limit is its hard ceiling.
+        let limit = self
+            .output_limit
+            .map_or(req.max_tokens, |saved| saved.min(req.max_tokens));
+        let key = if self.reasoning_model && !self.deepseek
+            || self.reasoning_effort.is_some() && !self.deepseek
+        {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        payload.as_object_mut().unwrap().remove("max_tokens");
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("max_completion_tokens");
+        payload[key] = serde_json::json!(limit);
+        if self.deepseek {
+            payload.as_object_mut().unwrap().remove("reasoning_effort");
+        }
+        let resp = self
+            .send_with_retries(&payload, Some(TOOL_REQUEST_TIMEOUT))
+            .await?;
+        let parsed: ToolWireResponse = serde_json::from_str(&resp.text().await?)
+            .map_err(|error| XaimError::Model(format!("工具响应 JSON 无效: {error}")))?;
+        let mut choice = parsed
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| XaimError::Model("模型响应缺少 choices".into()))?;
+        if choice.message.role != "assistant" {
+            return Err(XaimError::Model("工具响应角色不是 assistant".into()));
+        }
+        if !self.deepseek {
+            choice.message.reasoning_content = None;
+        }
+        Ok(ToolResponse {
+            message: choice.message,
+            finish_reason: choice.finish_reason.unwrap_or_default(),
+            usage: parsed
+                .usage
+                .map(|u| Usage::new(u.prompt_tokens, u.completion_tokens))
+                .unwrap_or_default(),
+        })
+    }
+
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let payload = self.payload(&req, false);
         let resp = self
@@ -324,6 +391,18 @@ struct ChatCompletionResponse {
 }
 
 #[derive(Deserialize)]
+struct ToolWireResponse {
+    choices: Vec<ToolWireChoice>,
+    usage: Option<ApiUsage>,
+}
+
+#[derive(Deserialize)]
+struct ToolWireChoice {
+    message: ToolMessage,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ResponseChoice {
     message: ResponseMessage,
     #[serde(default)]
@@ -367,6 +446,43 @@ struct CompletionTokenDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_tool_calls_keep_deepseek_reasoning_only_in_wire_conversation() {
+        let mut server = Server::new_async().await;
+        let mock=server.mock("POST","/chat/completions")
+            .match_body(Matcher::PartialJson(json!({"model":"deepseek-flash","max_tokens":8192,"tools":[{"type":"function","function":{"name":"list_dir","parameters":{"type":"object"}}}]})))
+            .with_status(200).with_body(json!({"choices":[{"finish_reason":"tool_calls","message":{
+                "role":"assistant","content":null,"reasoning_content":"private reasoning",
+                "tool_calls":[{"id":"call-a","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}}]}}],
+                "usage":{"prompt_tokens":17,"completion_tokens":23}}).to_string()).create_async().await;
+        let provider = provider_with(server.url()).with_deepseek_defaults();
+        let response=provider.complete_tools(ToolRequest {model:"deepseek-flash".into(),messages:vec![ToolMessage::text("user","List files")],
+            tools:vec![json!({"type":"function","function":{"name":"list_dir","parameters":{"type":"object"}}})],max_tokens:8192}).await.unwrap();
+        assert_eq!(
+            response.message.reasoning_content.as_deref(),
+            Some("private reasoning")
+        );
+        assert_eq!(response.message.tool_calls[0].id, "call-a");
+        assert_eq!(response.usage, Usage::new(17, 23));
+        mock.assert_async().await;
+        let replay=server.mock("POST","/chat/completions")
+            .match_body(Matcher::PartialJson(json!({"messages":[
+                {"role":"assistant","reasoning_content":"private reasoning","tool_calls":[{"id":"call-a","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}}]},
+                {"role":"tool","tool_call_id":"call-a","content":"ok"}]})))
+            .with_status(200).with_body(r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}]}"#)
+            .create_async().await;
+        provider
+            .complete_tools(ToolRequest {
+                model: "deepseek-flash".into(),
+                messages: vec![response.message, ToolMessage::result("call-a", "ok".into())],
+                tools: vec![],
+                max_tokens: 8192,
+            })
+            .await
+            .unwrap();
+        replay.assert_async().await;
+    }
     use crate::model::provider::Message;
     use futures::StreamExt;
     use mockito::{Matcher, Server};

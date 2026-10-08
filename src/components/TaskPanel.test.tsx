@@ -54,3 +54,15 @@ it('shows historical cancelled stages and hides saved plan JSON', () => {
   expect(within(screen.getByRole('list', { name: '任务步骤' })).getByText('已取消')).toBeInTheDocument()
   expect(screen.queryByText('{"steps":[]}')).not.toBeInTheDocument()
 })
+
+it('restores progress and final summary from persisted events without showing raw JSON', () => {
+  const progress = { type: 'step', taskId: task.id, name: 'read_file #1：src/a.ts', status: 'done' }
+  const summary = { type: 'message', taskId: task.id, content: 'Updated authentication.' }
+  useConversationStore.setState({ selectedId: task.id, record: { task, patches: [], verifies: [], steps: [progress, summary].map((event, id) => ({
+    id, taskId: task.id, stepType: 'event', content: JSON.stringify(event), createdAt: id,
+  })) } })
+  render(<TaskPanel />)
+  expect(screen.getByText('Updated authentication.')).toBeInTheDocument()
+  expect(screen.getByText('read_file #1：src/a.ts')).toBeInTheDocument()
+  expect(screen.queryByText(JSON.stringify(summary))).not.toBeInTheDocument()
+})

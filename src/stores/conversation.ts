@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { ipc } from '@/services/ipc'
 import { useTaskStore } from '@/stores/task'
-import type { Patch, Task, TaskStep, VerifyResult } from '@/types'
+import type { Patch, Task, TaskStep, VerifyResult, XaimEvent } from '@/types'
 
 export interface ConversationRecord {
   task: Task
@@ -42,7 +42,14 @@ export const useConversationStore = create<{
         ipc.getTask(taskId), ipc.listTaskSteps(taskId), ipc.listPatches(taskId),
       ])
       if (version !== requestVersion) return
-      set({ record: { task, steps, patches, verifies: get().cache[taskId]?.verifies ?? [] }, loading: false })
+      const persisted = steps.filter((step) => step.stepType === 'event').flatMap((step): VerifyResult[] => {
+        try {
+          const event = JSON.parse(step.content) as XaimEvent
+          return event.type === 'verify' ? [{ kind: event.kind, passed: event.passed, output: event.output, durationMs: 0,
+            ...(event.status ? { status: event.status } : {}) }] : []
+        } catch { return [] }
+      })
+      set({ record: { task, steps, patches, verifies: persisted.length ? persisted : get().cache[taskId]?.verifies ?? [] }, loading: false })
     } catch (error) {
       if (version !== requestVersion) return
       set({ loading: false, error: error instanceof Error ? error.message : String(error) })

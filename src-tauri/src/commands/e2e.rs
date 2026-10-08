@@ -69,29 +69,35 @@ impl Harness {
 
         let mut server = mockito::Server::new_async().await;
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let intent = json!({ "action": "fix_bug", "target": "add", "description": PROMPT,
-            "constraints": [], "verify": ["test"] })
-        .to_string();
-        let plan = json!({ "steps": [{ "action": "modify", "file": "src/lib.rs", "reason": "Fix addition" }],
-            "files_to_modify": ["src/lib.rs"], "risks": [] }).to_string();
         let mut mocks = Vec::new();
-        // Every model request must match its real prompt, including retrieved source.
-        for (system, user, response) in [
-            (crate::prompts::intent::SYSTEM.to_string(), PROMPT, intent),
+        let call = |id: &str, name: &str, args: Value| {
+            json!({"role":"assistant","content":null,
+            "tool_calls":[{"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}}]})
+        };
+        for (previous, response, finish) in [
             (
-                crate::prompts::plan::SYSTEM.to_string(),
-                BROKEN.trim(),
-                plan,
+                None,
+                call("list", "list_dir", json!({"path":"."})),
+                "tool_calls",
             ),
             (
-                crate::prompts::modify::SYSTEM.to_string(),
-                BROKEN.trim(),
-                DIFF.to_string(),
+                Some("list"),
+                call("read", "read_file", json!({"path":"src/lib.rs","offset":0})),
+                "tool_calls",
             ),
             (
-                "代码评审员".to_string(),
-                DIFF.trim(),
-                "{\"confidence\":0.95}".to_string(),
+                Some("read"),
+                call(
+                    "edit",
+                    "edit_file",
+                    json!({"path":"src/lib.rs","expected_hash":blake3::hash(BROKEN.as_bytes()).to_hex().to_string(),"old_text":"a - b","new_text":"a + b"}),
+                ),
+                "tool_calls",
+            ),
+            (
+                Some("edit"),
+                json!({"role":"assistant","content":"Fixed addition. Program must verify the result."}),
+                "stop",
             ),
         ] {
             let captured = requests.clone();
@@ -106,17 +112,14 @@ impl Harness {
                     else {
                         return false;
                     };
-                    body["messages"][0]["content"]
-                        .as_str()
-                        .is_some_and(|text| text.contains(&system))
-                        && body["messages"].as_array().is_some_and(|messages| {
-                            messages.iter().any(|message| {
-                                message["role"] == "user"
-                                    && message["content"]
-                                        .as_str()
-                                        .is_some_and(|text| text.contains(user))
-                            })
-                        })
+                    let messages = body["messages"].as_array().unwrap();
+                    let last = messages.last().unwrap();
+                    body["tools"].is_array()
+                        && messages[1]["content"] == PROMPT
+                        && match previous {
+                            None => last["role"] == "user",
+                            Some(id) => last["role"] == "tool" && last["tool_call_id"] == id,
+                        }
                 })
                 .with_status(200)
                 .with_header("content-type", "application/json")
@@ -125,7 +128,7 @@ impl Harness {
                         .lock()
                         .unwrap()
                         .push(serde_json::from_slice(request.body().unwrap()).unwrap());
-                    json!({ "choices": [{ "message": { "content": response } }],
+                    json!({ "choices": [{ "message": response, "finish_reason":finish }],
                         "usage": { "prompt_tokens": 20, "completion_tokens": 10 } })
                     .to_string()
                     .into_bytes()
@@ -213,6 +216,8 @@ impl Harness {
                 let mut config = task::orchestrator_config(&self.state)?;
                 config.candidate_count = 1;
                 config.step_timeout_sec = 60;
+                config.tool_loop.allow_verification =
+                    args["allowVerification"].as_bool().unwrap_or(false);
                 let provider = Arc::from(crate::model::create_provider(&config.model)?);
                 let orchestrator = Orchestrator::with_sink(
                     Arc::new(self.state.store.clone()),
@@ -293,7 +298,7 @@ async fn complete_project_to_index_task_diff_apply_and_verify_flow() {
     let task_id = harness
         .dispatch(
             "run_task",
-            &json!({"projectId": project_id, "prompt": PROMPT}),
+            &json!({"projectId": project_id, "prompt": PROMPT, "allowVerification":true}),
         )
         .await
         .unwrap()
@@ -309,7 +314,7 @@ async fn complete_project_to_index_task_diff_apply_and_verify_flow() {
     assert_eq!(patches.len(), 1);
     assert_eq!(patches[0].diff, DIFF);
     assert!(!patches[0].applied);
-    assert!(patches[0].score.unwrap() > 0.7);
+    assert!(patches[0].score.is_none(), "单执行路径不再使用模型评分");
     task::apply(&harness.state, patches[0].id).await.unwrap();
     assert_eq!(
         task::get(&harness.state, task_id).await.unwrap().status,
@@ -323,9 +328,13 @@ async fn complete_project_to_index_task_diff_apply_and_verify_flow() {
     let verified = harness.verify().await.unwrap();
     assert_eq!(verified["passed"], true, "{}", verified["output"]);
     assert!(verified["output"].as_str().unwrap().contains("1 passed"));
-    assert!(crate::git::ops::status(harness.fixture.path())
-        .unwrap()
-        .is_empty());
+    assert!(
+        crate::git::ops::status(harness.fixture.path())
+            .unwrap()
+            .iter()
+            .any(|s| s.ends_with("src/lib.rs")),
+        "确认保留未提交的任务变更"
+    );
     let events = harness.sink.drain();
     assert!(events
         .iter()

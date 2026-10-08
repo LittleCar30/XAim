@@ -36,14 +36,18 @@ impl AnthropicProvider {
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse> {
-        todo!("model::anthropic::complete")
+        Err(crate::errors::XaimError::Model(
+            "Anthropic 原生接入尚未实现，请使用已配置的兼容端点".into(),
+        ))
     }
 
     async fn stream(
         &self,
         _req: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        todo!("model::anthropic::stream")
+        Err(crate::errors::XaimError::Model(
+            "Anthropic 流式接入尚未实现".into(),
+        ))
     }
 
     fn name(&self) -> &str {

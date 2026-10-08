@@ -39,17 +39,19 @@ export default function ActionBar() {
 
   const handleApply = () =>
     run('apply', async () => {
-      for (const patch of unapplied) {
+      const tasks = [...new Map(unapplied.map((patch) => [patch.taskId, patch])).values()]
+      for (const patch of tasks) {
         await ipc.applyPatch(patch.id)
-        setPatchApplied(patch.id, true)
+        for (const file of unapplied.filter((file) => file.taskId === patch.taskId)) setPatchApplied(file.id, true)
       }
     })
 
   const handleReject = () =>
     run('reject', async () => {
-      for (const patch of unapplied) {
+      const tasks = [...new Map(unapplied.map((patch) => [patch.taskId, patch])).values()]
+      for (const patch of tasks) {
         await ipc.rejectPatch(patch.id)
-        removePatch(patch.id)
+        for (const file of unapplied.filter((file) => file.taskId === patch.taskId)) removePatch(file.id)
       }
     })
 

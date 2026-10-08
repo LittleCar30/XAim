@@ -97,6 +97,11 @@ pub fn save(store: &Store, config: &Config) -> Result<()> {
 
 /// 校验配置：模型提供方必须受支持。
 pub fn validate(config: &Config) -> Result<()> {
+    crate::model::capabilities::validate_output(
+        &config.model.provider,
+        &config.model.name,
+        config.model.max_tokens,
+    )?;
     if !crate::model::SUPPORTED_PROVIDERS.contains(&config.model.provider.as_str()) {
         return Err(XaimError::Config(format!(
             "未知的模型提供方 '{}'，支持: {}",
@@ -106,6 +111,11 @@ pub fn validate(config: &Config) -> Result<()> {
     }
     let mut ids = std::collections::HashSet::new();
     for profile in &config.model_profiles {
+        crate::model::capabilities::validate_output(
+            &profile.config.provider,
+            &profile.config.name,
+            profile.config.max_tokens,
+        )?;
         if profile.supports_reasoning && profile.config.provider != "openai" {
             return Err(XaimError::Config("此提供方不支持 reasoning_effort".into()));
         }

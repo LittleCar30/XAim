@@ -1,5 +1,6 @@
 //! 工具层：模型可调用的原子能力（trait 为 Rust 关键字，模块名用 r#trait）。
 
+pub mod controlled;
 pub mod exec;
 pub mod patch;
 pub mod read;

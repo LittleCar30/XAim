@@ -14,8 +14,8 @@ export const ipc = {
   readFile: (projectId: number, path: string, start?: number, end?: number) =>
     invoke<string>('read_file', { projectId, path, start, end }),
 
-  runTask: (projectId: number, prompt: string) =>
-    invoke<number>('run_task', { projectId, prompt }),
+  runTask: (projectId: number, prompt: string, allowVerification?: boolean) =>
+    invoke<number>('run_task', { projectId, prompt, ...(allowVerification !== undefined ? { allowVerification } : {}) }),
   cancelTask: (taskId: number) => invoke<void>('cancel_task', { taskId }),
   getTask: (taskId: number) => invoke<Task>('get_task', { taskId }),
   listTasks: (projectId: number) => invoke<Task[]>('list_tasks', { projectId }),

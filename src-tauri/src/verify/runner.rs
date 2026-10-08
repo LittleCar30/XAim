@@ -137,7 +137,9 @@ pub async fn run_verify(
     );
     let start = Instant::now();
 
-    let spawned = Command::new(&program)
+    let mut command = Command::new(&program);
+    super::process::configure(&mut command);
+    let spawned = command
         .args(&tokens[1..])
         .current_dir(root)
         .stdin(Stdio::null())
@@ -156,6 +158,7 @@ pub async fn run_verify(
         }
         Err(e) => return Err(e.into()),
     };
+    let process_tree = super::process::ProcessTree::attach(&child)?;
 
     // 先取走管道交给独立读取任务：缓冲归任务所有，超时杀死进程后
     // 已产出的输出仍可回收。管道由上方 Stdio::piped() 保证存在。
@@ -167,16 +170,8 @@ pub async fn run_verify(
         .stderr
         .take()
         .ok_or_else(|| XaimError::Verify("验证命令 stderr 管道缺失".into()))?;
-    let read_stdout = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf).await;
-        buf
-    });
-    let read_stderr = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr_pipe.read_to_end(&mut buf).await;
-        buf
-    });
+    let read_stdout = tokio::spawn(async move { capture(&mut stdout_pipe).await });
+    let read_stderr = tokio::spawn(async move { capture(&mut stderr_pipe).await });
 
     let waited = tokio::time::timeout(Duration::from_secs(timeout), child.wait()).await;
     let duration_ms = start.elapsed().as_millis() as i64;
@@ -185,6 +180,7 @@ pub async fn run_verify(
             // 超时：主动杀死并回收，避免残留进程。
             let _ = child.kill().await;
             let _ = child.wait().await;
+            drop(process_tree);
             let stdout = String::from_utf8_lossy(&read_stdout.await.unwrap_or_default())
                 .trim_end()
                 .to_string();
@@ -212,6 +208,7 @@ pub async fn run_verify(
         }
         Ok(Err(e)) => Err(e.into()),
         Ok(Ok(status)) => {
+            drop(process_tree);
             let stdout_bytes = read_stdout.await.unwrap_or_default();
             let stderr_bytes = read_stderr.await.unwrap_or_default();
             let stdout = String::from_utf8_lossy(&stdout_bytes);
@@ -233,6 +230,22 @@ pub async fn run_verify(
             })
         }
     }
+}
+
+async fn capture(reader: &mut (impl tokio::io::AsyncRead + Unpin)) -> Vec<u8> {
+    const LIMIT: usize = 64 * 1024;
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while let Ok(count) = reader.read(&mut buffer).await {
+        if count == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..count]);
+        if output.len() > LIMIT {
+            output.drain(LIMIT / 2..output.len() - LIMIT / 2);
+        }
+    }
+    output
 }
 
 /// 合并 stdout 与 stderr：stdout 在前、stderr 标注在后，超长截断保留头尾；

@@ -1,6 +1,7 @@
 //! 模型层：提供方抽象、各家实现、路由与工厂。
 
 pub mod anthropic;
+pub mod capabilities;
 pub mod deepseek;
 pub mod ollama;
 pub mod openai;

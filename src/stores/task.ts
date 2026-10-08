@@ -134,6 +134,15 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
           createdAt: Date.now(),
         })
         break
+      case 'toolFinished': {
+        const index = get().toolLogs.findIndex((log) => {
+          try { return JSON.parse(log.args).call_id === event.callId } catch { return false }
+        })
+        if (index >= 0) get().setToolResult(index, event.result)
+        break
+      }
+      case 'message':
+        break
       case 'patch':
         get().addPatch({
           id: get().patches.length,
@@ -151,6 +160,7 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
           kind: event.kind,
           passed: event.passed,
           output: event.output,
+          ...(event.status ? { status: event.status } : {}),
           durationMs: 0,
         })
         break

@@ -49,3 +49,11 @@ it('retains history selection when navigation remounts but clears it when the pr
   useConversationStore.getState().syncProject(2)
   expect(useConversationStore.getState().selectedId).toBeNull()
 })
+
+it('restores verification output from persisted events after session cache is cleared', async () => {
+  mocked.getTask.mockResolvedValue(task)
+  mocked.listTaskSteps.mockResolvedValue([{ id: 1, taskId: task.id, stepType: 'event', createdAt: 1,
+    content: JSON.stringify({ type: 'verify', taskId: task.id, kind: 'test', passed: false, status: 'unavailable', output: 'missing runner' }) }])
+  await useConversationStore.getState().select(task.id)
+  expect(useConversationStore.getState().record?.verifies).toEqual([{ kind: 'test', passed: false, status: 'unavailable', output: 'missing runner', durationMs: 0 }])
+})

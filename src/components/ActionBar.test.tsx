@@ -21,11 +21,14 @@ describe('ActionBar', () => {
   })
 
   it('applies all pending patches and marks them applied', async () => {
+    useTaskStore.setState({ patches: [patch(1), patch(3)] })
     mockedIpc.applyPatch.mockResolvedValue(undefined)
     render(<ActionBar />)
     fireEvent.click(screen.getByRole('button', { name: /应用/ }))
-    await waitFor(() => expect(mockedIpc.applyPatch).toHaveBeenCalledWith(1))
+    await waitFor(() => expect(mockedIpc.applyPatch).toHaveBeenCalledWith(3))
     expect(useTaskStore.getState().patches.find((p) => p.id === 1)?.applied).toBe(true)
+    expect(useTaskStore.getState().patches.find((p) => p.id === 3)?.applied).toBe(true)
+    expect(mockedIpc.applyPatch).toHaveBeenCalledTimes(1)
   })
 
   it('rejects pending patches and rolls back applied patches', async () => {

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { CircleHelp } from 'lucide-react'
 
 import type { VerifyResult } from '@/types'
 
@@ -148,14 +149,14 @@ export default function VerifyPanel({ verifies }: VerifyPanelProps) {
                 className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs hover:bg-slate-800/60"
               >
                 <ChevronIcon open={open} />
-                {v.passed ? <PassIcon /> : <FailIcon />}
+                {v.status === 'unavailable' ? <CircleHelp size={13} className="text-slate-500" /> : v.passed ? <PassIcon /> : <FailIcon />}
                 <span className={`shrink-0 rounded px-1 text-[10px] leading-4 ${meta.badgeCls}`}>
                   {meta.label}
                 </span>
                 <span
-                  className={`min-w-0 truncate text-[11px] ${v.passed ? 'text-emerald-400' : 'text-rose-400'}`}
+                  className={`min-w-0 truncate text-[11px] ${v.status === 'unavailable' ? 'text-slate-500' : v.passed ? 'text-emerald-400' : 'text-rose-400'}`}
                 >
-                  {v.passed ? '通过' : '未通过'}
+                  {v.status === 'unavailable' ? '无法验证' : v.passed ? '通过' : '未通过'}
                   {outputSummary(v.output) && (
                     <span className="text-slate-500"> · {outputSummary(v.output)}</span>
                   )}

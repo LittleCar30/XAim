@@ -1,4 +1,5 @@
-import { Check, ChevronDown, ChevronRight, Circle, Loader2, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Circle, Loader2, X, CircleHelp } from 'lucide-react'
+import type { XaimEvent } from '@/types'
 import ActionBar from '@/components/ActionBar'
 import DiffView from '@/components/DiffView'
 import { TASK_STATUS_LABELS, taskStatusBadgeCls } from '@/lib/task-format'
@@ -18,7 +19,17 @@ export default function TaskPanel() {
   const historical = selectedId !== null
   const task = historical ? record?.task : currentTask
   const patches = historical ? record?.patches ?? [] : livePatches
-  const steps = historical ? record?.steps ?? [] : liveSteps
+  const rawSteps = historical ? record?.steps ?? [] : liveSteps
+  const savedEvents = historical ? rawSteps.filter((step) => step.stepType === 'event').flatMap((step): XaimEvent[] => {
+    try { return [JSON.parse(step.content) as XaimEvent] } catch { return [] }
+  }) : events
+  const steps = historical ? rawSteps.flatMap((step) => {
+    if (step.stepType !== 'event') return [step]
+    try {
+      const event = JSON.parse(step.content) as XaimEvent
+      return event.type === 'step' ? [{ ...step, stepType: event.name, content: event.status }] : []
+    } catch { return [] }
+  }) : liveSteps
   const verifies = historical ? record?.verifies ?? [] : liveVerifies
   if (loading || error) return <div className="conversation-scroll"><div className="conversation-content"><p role={error ? 'alert' : 'status'}>{error ? `无法读取历史对话：${error}` : '正在读取历史对话…'}</p></div></div>
   if (!task) return <div className="conversation-scroll"><div className="conversation-empty"><img src="/xaim.svg" alt="XAim" width="44" height="44" /><h1>新对话</h1><p>{project?.name ?? '未打开项目'}</p></div></div>
@@ -32,7 +43,9 @@ export default function TaskPanel() {
   }))
   const latest = stages.at(-1)
   const passed = verifies.filter((verify) => verify.passed).length
-  const errorEvent = !historical ? [...events].reverse().find((event) => event.type === 'error' && event.taskId === task.id) : null
+  const errorEvent = [...savedEvents].reverse().find((event) => event.type === 'error' && event.taskId === task.id)
+  const message = [...savedEvents].reverse().find((event) => event.type === 'message' && event.taskId === task.id)
+  const unavailable = verifies.filter((verify) => verify.status === 'unavailable').length
   const summary = task.status === 'waitingConfirm' ? `已生成 ${patches.length} 个代码变更，等待你确认后应用。`
     : task.status === 'done' || task.status === 'applied' ? `任务已完成${patches.some((patch) => patch.applied) ? `，已应用 ${patches.filter((patch) => patch.applied).length} 个代码变更` : ''}。`
       : task.status === 'rolledBack' ? '本次代码变更已回滚。' : task.status === 'cancelled' ? '本次任务已取消。' : task.status === 'failed' ? '任务执行失败。' : '正在处理你的请求。'
@@ -41,6 +54,7 @@ export default function TaskPanel() {
     <article className="agent-message">
       <header className="agent-header"><img src="/xaim.svg" width="28" height="28" alt="" /><strong>XAim</strong><span className={`task-status ${taskStatusBadgeCls(task.status)}`}>{TASK_STATUS_LABELS[task.status]}</span></header>
       <p className="agent-summary">{summary}</p>
+      {message?.type === 'message' && <p className="agent-summary whitespace-pre-wrap">{message.content}</p>}
       {errorEvent?.type === 'error' && <p className="message-error">{errorEvent.message}</p>}
       {stages.length > 0 && <details className="execution-details" open={running || task.status === 'failed' || undefined}>
         <summary>{running ? <Loader2 size={15} className="animate-spin" /> : task.status === 'failed' ? <X size={15} className="text-rose-400" /> : task.status === 'cancelled' ? <Circle size={15} /> : <Check size={15} />}<span>{running ? latest?.stepType : '执行过程'}</span><span className="execution-count">{stages.length} 个步骤</span><ChevronDown size={15} /></summary>
@@ -50,7 +64,7 @@ export default function TaskPanel() {
         </li>)}</ol>
       </details>}
       {patches.length > 0 && <section className="message-changes" aria-label="代码变更"><div className="result-heading"><h2>代码变更</h2><span>{new Set(patches.map((patch) => patch.filePath)).size} 个文件</span></div><DiffView patches={patches} compact /></section>}
-      {verifies.length > 0 && <div className="verification-summary"><Check size={15} className={passed === verifies.length ? 'text-emerald-400' : 'text-rose-400'} /><span>验证 · {passed}/{verifies.length} 通过</span><button onClick={() => useUiStore.setState({ rightPanelOpen: true, previewPath: null, detailTab: 'verify' })}>查看详情<ChevronRight size={14} /></button></div>}
+      {verifies.length > 0 && <div className="verification-summary">{unavailable ? <CircleHelp size={15} className="text-slate-500" /> : <Check size={15} className={passed === verifies.length ? 'text-emerald-400' : 'text-rose-400'} />}<span>验证 · {passed}/{verifies.length} 通过{unavailable ? ` · ${unavailable} 项无法验证` : ''}</span><button onClick={() => useUiStore.setState({ rightPanelOpen: true, previewPath: null, detailTab: 'verify' })}>查看详情<ChevronRight size={14} /></button></div>}
       {!historical && patches.length > 0 && <ActionBar />}
       {historical && <p className="historical-note">历史任务 · {new Date(task.createdAt).toLocaleString('zh-CN')}{verifies.length === 0 ? ' · 未保存验证输出' : ''}</p>}
     </article>

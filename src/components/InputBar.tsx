@@ -54,6 +54,7 @@ export default function InputBar() {
   const [history, setHistory] = useState<string[]>(loadHistory)
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
   const [sending, setSending] = useState(false)
+  const [allowVerification, setAllowVerification] = useState(false)
   const [error, setError] = useState<{ message: string; taskId?: number } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
@@ -83,7 +84,9 @@ export default function InputBar() {
       useTaskStore.setState({ history: taskHistory })
       setCurrentTask({ id: -1, projectId: project.id, prompt, status: 'parsing', intent: null, plan: null,
         createdAt: Date.now(), finishedAt: null, durationMs: null, tokenInput: 0, tokenOutput: 0, cost: null })
-      const taskId = await ipc.runTask(project.id, prompt)
+      const verificationApproved = allowVerification
+      setAllowVerification(false)
+      const taskId = await ipc.runTask(project.id, prompt, verificationApproved)
       const [task, patches] = await Promise.all([ipc.getTask(taskId), ipc.listPatches(taskId)])
       // Event patches have temporary IDs; actions need the persisted database IDs.
       useTaskStore.setState({ patches })
@@ -178,7 +181,7 @@ export default function InputBar() {
           }
           className="composer-input"
         />
-        <div className="composer-bottom justify-end gap-2"><ModelPicker disabled={running || sending} /><div className="flex gap-2">
+        <div className="composer-bottom justify-end gap-2"><label className="mr-auto flex items-center gap-1.5 text-xs text-slate-500" title="授权本次任务在隔离目录运行项目的测试与构建脚本；这些脚本仍可访问本机和网络。"><input type="checkbox" checked={allowVerification} disabled={running || sending} onChange={(event) => setAllowVerification(event.target.checked)} />运行项目检查</label><ModelPicker disabled={running || sending} /><div className="flex gap-2">
         {running && !awaitingConfirmation && currentTask && currentTask.id >= 0 && <button className="icon-button" aria-label="停止任务" title="停止任务" onClick={() => void ipc.cancelTask(currentTask.id).catch((e) => setError({ message: toMessage(e) }))}><Square size={14} /></button>}
         <button
           type="button"

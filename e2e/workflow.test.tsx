@@ -149,6 +149,7 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
 
   const prompt = 'Fix add so that it returns the sum of a and b'
   fireEvent.change(screen.getByRole('textbox', { name: '任务输入' }), { target: { value: prompt } })
+  fireEvent.click(screen.getByRole('checkbox', { name: '运行项目检查' }))
   fireEvent.click(screen.getByRole('button', { name: '发送' }))
   await waitFor(() => expect(useTaskStore.getState().currentTask?.status).toBe('waitingConfirm'), { timeout: 60_000 })
   expect(screen.getByText('等待确认', { selector: 'header > span' })).toBeInTheDocument()
@@ -159,7 +160,9 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
   const patch = useTaskStore.getState().patches[0]
   expect(patch.id).toBeGreaterThan(0)
   expect(patch.applied).toBe(false)
-  expect(useTaskStore.getState().steps.some((step) => step.stepType === '评估候选' && step.content === 'done')).toBe(true)
+  expect(useTaskStore.getState().steps.some((step) => step.stepType === '执行工具循环' && step.content === 'done')).toBe(true)
+  expect(useTaskStore.getState().toolLogs).toHaveLength(3)
+  expect(useTaskStore.getState().toolLogs.every((log) => log.result?.success)).toBe(true)
 
   fireEvent.click(screen.getByRole('button', { name: '应用（1）' }))
   await waitFor(() => expect(useTaskStore.getState().patches[0].applied).toBe(true), { timeout: 30_000 })
@@ -171,7 +174,7 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
   expect(verified.passed, verified.output).toBe(true)
   expect(verified.output).toContain('1 passed')
   const final = await request<Inspection>('e2e_inspect', { projectId })
-  expect(final.gitStatus).toEqual([])
+  expect(final.gitStatus).toContain('M src/lib.rs')
   expect(final.modelCalls).toBe(4)
   expect(final.modelRequests).toHaveLength(4)
   for (const call of final.modelRequests) {

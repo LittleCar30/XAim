@@ -80,6 +80,7 @@ export interface Patch {
 export interface VerifyResult {
   kind: string
   passed: boolean
+  status?: 'passed' | 'failed' | 'unavailable'
   output: string
   durationMs: number
 }
@@ -227,6 +228,7 @@ export interface XaimVerifyEvent {
   kind: string
   passed: boolean
   output: string
+  status?: 'passed' | 'failed' | 'unavailable'
 }
 
 /** 修复回路事件。 */
@@ -260,6 +262,9 @@ export interface XaimErrorEvent {
 
 /** 后端事件流载荷的判别联合，按 `type` 字段区分。 */
 export type XaimEvent =
+  | { type: 'modelResponse'; taskId: number; round: number; finishReason: string; durationMs: number; toolCalls: number }
+  | { type: 'toolFinished'; taskId: number; callId: string; result: ToolResult }
+  | { type: 'message'; taskId: number; content: string }
   | XaimStepEvent
   | XaimToolEvent
   | XaimPatchEvent

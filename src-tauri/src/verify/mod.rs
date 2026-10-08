@@ -2,4 +2,5 @@
 
 pub mod detect;
 pub mod parser;
+mod process;
 pub mod runner;

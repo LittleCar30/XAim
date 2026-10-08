@@ -18,6 +18,16 @@ use crate::errors::XaimError;
 /// `&self`，provider 实例可安全地跨任务共享。
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
+    fn supports_tools(&self) -> bool {
+        false
+    }
+
+    async fn complete_tools(&self, _req: ToolRequest) -> Result<ToolResponse> {
+        Err(crate::errors::XaimError::Model(
+            "当前端点未实现工具调用".into(),
+        ))
+    }
+
     /// 发送补全请求，阻塞至模型输出完毕并返回全文与 token 用量。
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse>;
 
@@ -32,6 +42,65 @@ pub trait ModelProvider: Send + Sync {
 
     /// 该提供方支持的上下文窗口大小（token 数上限）。
     fn max_context(&self) -> usize;
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ToolMessage {
+    pub role: String,
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+}
+
+impl ToolMessage {
+    pub fn text(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: Some(content.into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    pub fn result(id: &str, content: String) -> Self {
+        let mut message = Self::text("tool", content);
+        message.tool_call_id = Some(id.into());
+        message
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolRequest {
+    pub model: String,
+    pub messages: Vec<ToolMessage>,
+    pub tools: Vec<serde_json::Value>,
+    pub max_tokens: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolResponse {
+    pub message: ToolMessage,
+    pub finish_reason: String,
+    pub usage: Usage,
 }
 
 /// 一次补全请求。

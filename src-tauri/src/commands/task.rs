@@ -21,8 +21,7 @@ use crate::types::{Patch, Task, TaskStep};
 /// 任务历史的单次返回上限（按创建时间倒序取最新）。
 const TASK_HISTORY_LIMIT: usize = 200;
 
-/// 运行一个编码任务：创建任务记录并执行完整流程（解析意图 → 索引 →
-/// 检索 → 计划 → 生成候选 → 评估），流程走到等待确认后返回任务 id。
+/// 运行编码任务，在隔离副本中执行工具循环与最终验证，到达等待确认后返回。
 ///
 /// 模型与路由取用户保存的配置（`set_config` / `set_model_config`）。
 /// 进度经事件通道实时推送（step/patch/error/done）；同一时间只允许
@@ -31,15 +30,14 @@ const TASK_HISTORY_LIMIT: usize = 200;
 pub async fn run_task(
     project_id: i64,
     prompt: String,
+    allow_verification: Option<bool>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<i64, String> {
-    let orchestrator = Orchestrator::new(
-        app,
-        Arc::new(state.store.clone()),
-        orchestrator_config(&state)?,
-    )
-    .map_err(String::from)?;
+    let mut config = orchestrator_config(&state)?;
+    config.tool_loop.allow_verification = allow_verification.unwrap_or(false);
+    let orchestrator =
+        Orchestrator::new(app, Arc::new(state.store.clone()), config).map_err(String::from)?;
     run(&state, orchestrator, project_id, &prompt)
         .await
         .map_err(String::from)
@@ -48,6 +46,13 @@ pub async fn run_task(
 /// 从存储中的用户配置构建编排配置（模型连接 + 路由；其余步骤参数用默认值）。
 pub(super) fn orchestrator_config(state: &AppState) -> Result<OrchestratorConfig, XaimError> {
     let app = crate::config::model::load(&state.store);
+    orchestrator_config_from(app)
+}
+
+pub(crate) fn orchestrator_config_from(
+    app: crate::types::Config,
+) -> Result<OrchestratorConfig, XaimError> {
+    crate::config::model::validate(&app)?;
     let selected = app
         .model_profiles
         .iter()
@@ -61,9 +66,32 @@ pub(super) fn orchestrator_config(state: &AppState) -> Result<OrchestratorConfig
         connection.reasoning_model = profile.supports_reasoning;
         connection.reasoning_effort = profile.reasoning_effort.clone();
     }
+    let limits = crate::model::capabilities::limits(
+        &connection.provider,
+        &app.model.name,
+        connection.reasoning_model,
+    );
+    let output = connection
+        .max_tokens
+        .unwrap_or(limits.default_output_tokens);
+    let ceiling = if limits.documented {
+        output.min(limits.max_output_tokens)
+    } else {
+        output
+    };
+    let loop_config = crate::agent::tool_loop::LoopConfig {
+        output_tokens: ceiling,
+        output_ceiling: connection
+            .max_tokens
+            .unwrap_or(limits.max_output_tokens.min(65_536)),
+        // Reserve headroom for wire metadata; tool schemas and results are counted in the loop.
+        context_tokens: limits.context_tokens.saturating_sub(4096),
+        ..Default::default()
+    };
     Ok(OrchestratorConfig {
         model: connection,
         router,
+        tool_loop: loop_config,
         ..OrchestratorConfig::default()
     })
 }
@@ -95,7 +123,7 @@ pub async fn list_task_steps(
     steps(&state, task_id).await.map_err(String::from)
 }
 
-/// 应用任务确认阶段记录的最优补丁并提交 Git，任务经 Applied 转 Done。
+/// 应用已审阅的任务变更，保留 Git 历史与其他工作区修改。
 #[tauri::command]
 pub async fn apply_patch(patch_id: i64, state: State<'_, AppState>) -> Result<(), String> {
     apply(&state, patch_id).await.map_err(String::from)
@@ -107,7 +135,7 @@ pub async fn reject_patch(patch_id: i64, state: State<'_, AppState>) -> Result<(
     reject(&state, patch_id).await.map_err(String::from)
 }
 
-/// 回滚已应用补丁的任务：工作区重置回任务提交之前，任务转入 RolledBack。
+/// 撤销任务自身的文件变更；文件已被其他操作修改时拒绝覆盖。
 #[tauri::command]
 pub async fn rollback_task(task_id: i64, state: State<'_, AppState>) -> Result<(), String> {
     rollback(&state, task_id).await.map_err(String::from)
@@ -253,6 +281,19 @@ mod tests {
     use crate::repair::r#loop::EventSink;
     use crate::types::TaskStatus;
 
+    #[test]
+    fn configured_model_limits_and_output_ceiling_reach_the_executor() {
+        let mut config = crate::types::Config::default();
+        config.model.provider = "deepseek".into();
+        config.model.name = "deepseek-flash".into();
+        config.model.max_tokens = Some(16_384);
+        let runtime = orchestrator_config_from(config).unwrap();
+        assert_eq!(runtime.tool_loop.context_tokens, 1_000_000 - 4096);
+        assert_eq!(runtime.tool_loop.output_tokens, 16_384);
+        assert_eq!(runtime.tool_loop.output_ceiling, 16_384);
+        assert!(!runtime.tool_loop.allow_verification);
+    }
+
     const BROKEN_LIB: &str = "pub fn add(a: i32, b: i32) -> i32 { a + }\n";
     const FIXED_LIB: &str = "pub fn add(a: i32, b: i32) -> i32 { a + b }\n";
     const FIX_DIFF: &str = "--- a/src/lib.rs\n\
@@ -292,6 +333,20 @@ mod tests {
         store::task::update_task_status(&conn, task_id, TaskStatus::WaitingConfirm).unwrap();
         let patch_id =
             store::patch::insert_patch(&conn, task_id, "src/lib.rs", FIX_DIFF, Some(0.9)).unwrap();
+        let changes = crate::agent::workspace::ChangeSet {
+            files: vec![crate::agent::workspace::FileChange {
+                path: "src/lib.rs".into(),
+                before: Some(BROKEN_LIB.into()),
+                after: Some(FIXED_LIB.into()),
+            }],
+        };
+        store::cache::set_cache(
+            &conn,
+            &format!("task:{task_id}:changes"),
+            &serde_json::to_string(&changes).unwrap(),
+            None,
+        )
+        .unwrap();
         (task_id, patch_id)
     }
 
@@ -598,7 +653,7 @@ mod tests {
     // -- apply / reject / rollback ------------------------------------------
 
     #[tokio::test]
-    async fn apply_applies_winner_commits_and_finishes() {
+    async fn apply_applies_reviewed_changes_without_creating_git_commits() {
         let dir = tempdir().unwrap();
         write_file(dir.path(), "src/lib.rs", BROKEN_LIB);
         let (state, store) = setup();
@@ -622,8 +677,8 @@ mod tests {
             "补丁内容应已落盘"
         );
         assert!(
-            crate::git::ops::status(dir.path()).unwrap().is_empty(),
-            "确认阶段的提交应让工作区保持干净"
+            !dir.path().join(".git").exists(),
+            "确认不应自动初始化或提交 Git"
         );
         assert!(sink.has_event("done", "done"), "应推送完成事件");
     }

@@ -1,7 +1,7 @@
-//! 任务编排器：候选 Patch 评估 + 完整任务主流程（解析意图 -> 索引 -> 检索 ->
-//! 计划 -> 候选 -> 评估 -> 等待确认），确认后的应用与提交由 [`Orchestrator::confirm_task`]
-//! 完成。TODO: 前端命令层接入与 watcher 联动。
+//! Bounded native tool execution in a private snapshot, followed by user review.
+//! Confirmation and undo affect only task files and preserve Git history.
 
+#[cfg(test)]
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,8 @@ use crate::verify::detect::detect_verify_config;
 use crate::verify::runner::{self, VerifyKind, VerifyResult, DEFAULT_TIMEOUT_SEC};
 
 use super::planner::{self, Intent, Plan};
+use super::tool_loop::{self, LoopConfig, Recorder};
+use super::workspace::{ChangeSet, TaskWorkspace};
 
 /// 编排配置：模型连接与路由、每步超时与候选策略。
 #[derive(Debug, Clone)]
@@ -40,7 +42,7 @@ pub struct OrchestratorConfig {
     pub router: RouterConfig,
     /// 单个步骤的超时秒数。
     pub step_timeout_sec: u64,
-    /// 生成的候选数量（建议 2-3）。
+    /// 兼容补丁路径的候选数量；原生工具循环不使用候选。
     pub candidate_count: usize,
     /// 进入上下文的相关文件数上限。
     pub context_top_files: usize,
@@ -50,6 +52,8 @@ pub struct OrchestratorConfig {
     pub require_confirm: bool,
     /// 工具上下文透传：exec 白名单外额外放行的命令。
     pub allowed_commands: Vec<String>,
+    pub tool_loop: LoopConfig,
+    pub task_timeout_sec: u64,
 }
 
 impl Default for OrchestratorConfig {
@@ -58,11 +62,13 @@ impl Default for OrchestratorConfig {
             model: ModelConfig::default(),
             router: RouterConfig::default(),
             step_timeout_sec: 600,
-            candidate_count: 3,
+            candidate_count: 1,
             context_top_files: 8,
             context_budget_tokens: 8192,
             require_confirm: false,
             allowed_commands: Vec::new(),
+            tool_loop: LoopConfig::default(),
+            task_timeout_sec: 1800,
         }
     }
 }
@@ -130,9 +136,8 @@ impl Orchestrator {
         (id != 0).then_some(id)
     }
 
-    /// 完整任务流程（步骤 1-8）：创建任务记录并依次解析意图、检查索引、
-    /// 检索上下文、生成计划、生成候选、评估，最终记录最优补丁并进入
-    /// WaitingConfirm，返回任务 id。应用与提交见 [`Self::confirm_task`]。
+    /// 在隔离副本中执行任务，最终差异进入 WaitingConfirm，返回任务 id。
+    /// 原生工具协议是默认路径；文本补丁路径仅用于兼容 provider。
     ///
     /// 错误不崩溃：任何步骤失败（含取消与超时）都会把任务转入终态并推送
     /// 事件，再以原错误返回。
@@ -184,7 +189,7 @@ impl Orchestrator {
         }
     }
 
-    /// 步骤 9-11：应用用户确认的最优补丁并提交 Git，任务转 Done。
+    /// Apply only the reviewed task changes. Git commits require separate authorization.
     ///
     /// 状态机严格：仅接受 WaitingConfirm（-> Applied -> Done）。
     pub async fn confirm_task(&self, task_id: i64) -> Result<()> {
@@ -201,14 +206,11 @@ impl Orchestrator {
                 task.status
             )));
         }
-        let winner = patches
-            .into_iter()
-            .max_by(|a, b| {
-                a.score
-                    .partial_cmp(&b.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .ok_or_else(|| XaimError::Config(format!("任务 #{task_id} 没有已评估的补丁")))?;
+        if patches.is_empty() {
+            return Err(XaimError::Config(format!(
+                "任务 #{task_id} 没有可应用的补丁"
+            )));
+        }
         let root = PathBuf::from({
             let conn = self.store.conn();
             store::project::get_project(&conn, task.project_id)?
@@ -216,25 +218,23 @@ impl Orchestrator {
                 .path
         });
 
-        // Preserve the workspace before the task commit, including an empty initial project.
-        crate::git::ops::create_rollback_point(&root, task_id)?;
+        let changes = {
+            let conn = self.store.conn();
+            let json = store::cache::get_cache(&conn, &format!("task:{task_id}:changes"))?
+                .ok_or_else(|| {
+                    XaimError::PatchConflict("此旧任务缺少文件基线，请重新运行后确认".into())
+                })?;
+            serde_json::from_str::<ChangeSet>(&json)?
+        };
 
         // WaitingConfirm -> Applied
         let mut status = task.status;
-        self.transition(task_id, &mut status, TaskStatus::Applied)?;
         self.emit_step(task_id, "应用补丁", "running")?;
-
-        patch::apply_diff(&winner.diff, &root)?;
-        let commit_id = crate::git::ops::commit(
-            &root,
-            &format!("XAim task #{task_id}: {}", winner.file_path),
-        )?;
-        tracing::info!(
-            task_id,
-            commit_id = %commit_id,
-            file = %winner.file_path,
-            "补丁已应用并提交"
-        );
+        if let Err(error) = changes.apply(&root, false) {
+            self.emit_step(task_id, "应用补丁", "failed")?;
+            return Err(error);
+        }
+        self.transition(task_id, &mut status, TaskStatus::Applied)?;
 
         // Applied -> Done（finish_task 同时写入 finished_at 与 duration_ms）
         if !status.can_transition_to(&TaskStatus::Done) {
@@ -244,7 +244,9 @@ impl Orchestrator {
         }
         {
             let conn = self.store.conn();
-            store::patch::mark_applied(&conn, winner.id)?;
+            for patch in &patches {
+                store::patch::mark_applied(&conn, patch.id)?;
+            }
             store::task::finish_task(&conn, task_id, TaskStatus::Done)?;
         }
         self.emit_step(task_id, "应用补丁", "done")?;
@@ -283,13 +285,8 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// 回滚任务：把工作区重置回任务补丁提交之前，任务转入 RolledBack。
-    ///
-    /// 仅接受 Applied / Done（补丁已应用并提交）；工作区恢复由
-    /// [`crate::git::ops::rollback_task_commit`] 完成（reset --hard 到任务
-    /// 提交的父提交并清理任务产出的未跟踪文件）。Done 是终态、执行期
-    /// 状态机不允许终态出边——这里的 Done → RolledBack 是用户事后撤销的
-    /// 管理动作，直接重写终态。
+    /// Undo only task files whose contents still match the applied version.
+    /// Done -> RolledBack is a user-requested administrative operation.
     pub async fn rollback_task(&self, task_id: i64) -> Result<()> {
         let (status, root) = {
             let conn = self.store.conn();
@@ -306,9 +303,21 @@ impl Orchestrator {
             )));
         }
 
-        crate::git::ops::rollback_task_commit(&root, task_id)?;
+        let changes = {
+            let conn = self.store.conn();
+            let json = store::cache::get_cache(&conn, &format!("task:{task_id}:changes"))?
+                .ok_or_else(|| {
+                    XaimError::PatchConflict("此旧任务缺少文件基线，无法安全撤销".into())
+                })?;
+            serde_json::from_str::<ChangeSet>(&json)?
+        };
+        changes.apply(&root, true)?;
         {
             let conn = self.store.conn();
+            conn.execute(
+                "UPDATE patches SET applied = 0 WHERE task_id = ?1",
+                [task_id],
+            )?;
             store::task::finish_task(&conn, task_id, TaskStatus::RolledBack)?;
         }
         tracing::info!(task_id, "任务补丁已回滚");
@@ -328,6 +337,19 @@ impl Orchestrator {
         root: &Path,
         ctx: &ToolContext,
     ) -> Result<()> {
+        if self.provider.supports_tools() {
+            return self
+                .drive_tools(task_id, project_id, prompt, root, ctx)
+                .await;
+        }
+        // Compatibility path also operates entirely in a private snapshot.
+        let workspace = TaskWorkspace::snapshot(root)?;
+        let isolated_ctx = ToolContext {
+            project_root: workspace.root().into(),
+            ..ctx.clone()
+        };
+        let root = workspace.root();
+        let ctx = &isolated_ctx;
         let mut status = TaskStatus::Idle;
         let provider = self.provider.as_ref();
 
@@ -470,6 +492,8 @@ impl Orchestrator {
                 evaluate_candidates_with_model(applicable, ctx, provider, &review_model),
             )
             .await?;
+        patch::apply_diff(&best.diff, root)?;
+        self.save_changes(task_id, &workspace.changes()?)?;
 
         // 8. 记录最优补丁并等待确认（WaitingConfirm）
         self.run_step(
@@ -503,6 +527,142 @@ impl Orchestrator {
         Ok(())
     }
 
+    fn save_changes(&self, task_id: i64, changes: &ChangeSet) -> Result<()> {
+        let conn = self.store.conn();
+        store::cache::set_cache(
+            &conn,
+            &format!("task:{task_id}:changes"),
+            &serde_json::to_string(changes)?,
+            None,
+        )
+    }
+
+    async fn drive_tools(
+        &self,
+        task_id: i64,
+        _project_id: i64,
+        prompt: &str,
+        root: &Path,
+        ctx: &ToolContext,
+    ) -> Result<()> {
+        let mut status = TaskStatus::Idle;
+        self.run_step(
+            task_id,
+            &mut status,
+            TaskStatus::Parsing,
+            "接收任务",
+            async { Ok(()) },
+        )
+        .await?;
+        let workspace = self
+            .run_step(
+                task_id,
+                &mut status,
+                TaskStatus::Indexing,
+                "保存工作区基线",
+                async { TaskWorkspace::snapshot(root) },
+            )
+            .await?;
+        self.run_step(
+            task_id,
+            &mut status,
+            TaskStatus::Retrieving,
+            "准备文件检索工具",
+            async { Ok(()) },
+        )
+        .await?;
+        self.run_step(
+            task_id,
+            &mut status,
+            TaskStatus::Planning,
+            "准备受控执行",
+            async { Ok(()) },
+        )
+        .await?;
+        let isolated_ctx = ToolContext {
+            project_root: workspace.root().into(),
+            ..ctx.clone()
+        };
+        let model = self.routed_model(TaskKind::Generate);
+        let result = self
+            .run_step(
+                task_id,
+                &mut status,
+                TaskStatus::Generating,
+                "执行工具循环",
+                tool_loop::cancellable(
+                    &self.cancel_flag,
+                    self.config.task_timeout_sec,
+                    tool_loop::run(
+                        prompt,
+                        &model,
+                        self.provider.as_ref(),
+                        &workspace,
+                        &isolated_ctx,
+                        &self.config.tool_loop,
+                        self.cancel_flag.clone(),
+                        Recorder {
+                            task_id,
+                            store: &self.store,
+                            sink: self.sink.as_ref(),
+                        },
+                    ),
+                ),
+            )
+            .await?;
+        self.run_step(
+            task_id,
+            &mut status,
+            TaskStatus::ApplyingPatch,
+            "汇总代码变更",
+            async { self.save_changes(task_id, &result.changes) },
+        )
+        .await?;
+        self.run_step(
+            task_id,
+            &mut status,
+            TaskStatus::Verifying,
+            "记录最终验证状态",
+            async { Ok(()) },
+        )
+        .await?;
+        self.run_step(
+            task_id,
+            &mut status,
+            TaskStatus::WaitingConfirm,
+            "等待确认",
+            async {
+                for file in &result.changes.files {
+                    let candidate = PatchCandidate {
+                        file_path: file.path.clone(),
+                        diff: ChangeSet {
+                            files: vec![file.clone()],
+                        }
+                        .diff(),
+                        score: None,
+                    };
+                    if candidate.diff.is_empty() {
+                        return Err(XaimError::PatchConflict("变更无法生成文本差异".into()));
+                    }
+                    {
+                        let conn = self.store.conn();
+                        store::patch::insert_patch(
+                            &conn,
+                            task_id,
+                            &candidate.file_path,
+                            &candidate.diff,
+                            None,
+                        )?;
+                    }
+                    self.emit_patch(task_id, &candidate)?;
+                }
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
     /// 统一步骤骨架：取消检查 -> 严格状态转移 -> Step 事件 -> 超时包裹 -> 完成事件。
     async fn run_step<F, T>(
         &self,
@@ -522,8 +682,16 @@ impl Orchestrator {
         self.transition(task_id, status, next)?;
         self.emit_step(task_id, name, "running")?;
 
-        let outcome =
-            tokio::time::timeout(Duration::from_secs(self.config.step_timeout_sec), step).await;
+        let timeout_sec = if next == TaskStatus::Generating && self.provider.supports_tools() {
+            self.config.task_timeout_sec
+        } else {
+            self.config.step_timeout_sec
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(timeout_sec),
+            tool_loop::cancellable(&self.cancel_flag, self.config.task_timeout_sec, step),
+        )
+        .await;
         match outcome {
             Ok(Ok(value)) => {
                 self.emit_step(task_id, name, "done")?;
@@ -545,10 +713,8 @@ impl Orchestrator {
                 Err(error)
             }
             Err(_elapsed) => {
-                let error = XaimError::Timeout(format!(
-                    "步骤「{name}」超过 {} 秒未完成",
-                    self.config.step_timeout_sec
-                ));
+                let error =
+                    XaimError::Timeout(format!("步骤「{name}」超过 {} 秒未完成", timeout_sec));
                 tracing::warn!(task_id, step = name, error = %error, "步骤超时");
                 if let Err(emit_error) = self.emit_step(task_id, name, "failed") {
                     tracing::error!(task_id, error = %emit_error, "步骤终态记录失败");
@@ -639,14 +805,24 @@ impl Orchestrator {
         }
 
         if !cancelled {
-            if let Err(emit_error) = self.sink.emit(XaimEvent::Error {
+            if let Err(emit_error) = (Recorder {
+                task_id,
+                store: &self.store,
+                sink: self.sink.as_ref(),
+            })
+            .event(XaimEvent::Error {
                 task_id,
                 message: error.to_string(),
             }) {
                 tracing::error!(task_id, error = %emit_error, "错误事件推送失败");
             }
         }
-        if let Err(emit_error) = self.sink.emit(XaimEvent::Done {
+        if let Err(emit_error) = (Recorder {
+            task_id,
+            store: &self.store,
+            sink: self.sink.as_ref(),
+        })
+        .event(XaimEvent::Done {
             task_id,
             status: status_label(&terminal).to_string(),
         }) {
@@ -805,7 +981,12 @@ async fn evaluate_one(
         diff_bytes = candidate.diff.len(),
         "开始评估候选"
     );
-    let backup = backup_file(&ctx.project_root, &candidate.file_path)?;
+    let workspace = TaskWorkspace::snapshot(&ctx.project_root)?;
+    let isolated_ctx = ToolContext {
+        project_root: workspace.root().into(),
+        ..ctx.clone()
+    };
+    let ctx = &isolated_ctx;
 
     if let Err(error) = patch::apply_diff(&candidate.diff, &ctx.project_root) {
         // apply_diff 两阶段提交：失败时未写盘，无需恢复。
@@ -813,14 +994,7 @@ async fn evaluate_one(
         return Err(error);
     }
 
-    let outcome = evaluate_applied(candidate, ctx, provider, max_diff_size, model).await;
-
-    if let Err(error) = restore_file(&ctx.project_root, &candidate.file_path, &backup) {
-        // 回滚失败意味着工作区已脏，必须让整个评估失败以暴露问题。
-        tracing::error!(file_path = %candidate.file_path, error = %error, "候选回滚失败");
-        return Err(error);
-    }
-    outcome
+    evaluate_applied(candidate, ctx, provider, max_diff_size, model).await
 }
 
 /// 对已应用的候选跑验证、置信度评审并评分。
@@ -958,6 +1132,7 @@ fn compute_score(
 
 /// 目标文件在评估前的备份。
 #[derive(Debug)]
+#[cfg(test)]
 enum FileBackup {
     /// 文件原本存在，记录原内容。
     Existing(String),
@@ -967,6 +1142,7 @@ enum FileBackup {
 
 /// 备份候选目标文件的当前内容。路径校验与 [`patch::apply_diff`] 同源
 /// （拒绝绝对路径与越界），保证备份读到的就是补丁将要覆盖的文件。
+#[cfg(test)]
 fn backup_file(root: &Path, file_path: &str) -> Result<FileBackup> {
     let target = patch::resolve_in_root(root, file_path)?;
     match fs::read_to_string(&target) {
@@ -977,6 +1153,7 @@ fn backup_file(root: &Path, file_path: &str) -> Result<FileBackup> {
 }
 
 /// 把目标文件恢复到备份时的状态。
+#[cfg(test)]
 fn restore_file(root: &Path, file_path: &str, backup: &FileBackup) -> Result<()> {
     let target = patch::resolve_in_root(root, file_path)?;
     match backup {
@@ -1250,7 +1427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirm_applies_patch_commits_and_finishes() {
+    async fn confirm_applies_patch_without_committing_and_finishes() {
         let dir = tempfile::tempdir().unwrap();
         cargo_project(dir.path(), BROKEN_LIB);
         let (store, project_id) = setup_project(dir.path());
@@ -1289,9 +1466,10 @@ mod tests {
         assert!(patches[0].applied, "补丁应标记为已应用");
         assert_eq!(lib_content(dir.path()), FIXED_LIB, "补丁应已落盘");
 
-        // Git 提交后工作区干净（target/ 已被 .gitignore 排除）
-        let status = crate::git::ops::status(dir.path()).unwrap();
-        assert!(status.is_empty(), "提交后工作区应干净: {status:?}");
+        assert!(
+            !dir.path().join(".git").exists(),
+            "确认不应自动创建 Git 仓库"
+        );
         assert!(sink.has_event("done", "done"), "应推送完成事件");
     }
 
@@ -1393,7 +1571,9 @@ mod tests {
         let task_id = task_id_of(&store);
         let conn = store.conn();
         let steps = store::task::list_steps(&conn, task_id).unwrap();
-        assert_eq!(steps.last().unwrap().content, "failed");
+        assert!(steps
+            .iter()
+            .any(|step| step.step_type == "解析意图" && step.content == "failed"));
         assert_eq!(lib_content(dir.path()), BROKEN_LIB);
     }
 
@@ -1493,24 +1673,22 @@ mod tests {
         drop(conn);
         let root = tempfile::tempdir().unwrap();
         let (store, project_id) = setup_project(root.path());
-        let runtime = OrchestratorConfig {
-            model: ModelConfig::from(config.model.clone()),
-            router: RouterConfig {
-                fast_model: config.model.name.clone(),
-                strong_model: config.model.name.clone(),
-                ..Default::default()
-            },
-            candidate_count: 1,
-            ..Default::default()
-        };
+        let runtime = crate::commands::task::orchestrator_config_from(config.clone()).unwrap();
         let provider = crate::model::create_provider(&runtime.model).unwrap();
-        let orchestrator = Orchestrator::with_sink(
-            store.clone(),
-            runtime,
-            Arc::new(CollectSink::default()),
-            Arc::from(provider),
-        );
-        let task_id = orchestrator.run_task(project_id, prompt).await.unwrap();
+        let sink = Arc::new(CollectSink::default());
+        let orchestrator =
+            Orchestrator::with_sink(store.clone(), runtime, sink.clone(), Arc::from(provider));
+        let outcome = orchestrator.run_task(project_id, prompt).await;
+        // Print protocol metadata only, never source, keys or private reasoning.
+        for event in sink.events() {
+            if event["type"] == "modelResponse" {
+                println!(
+                    "Live response: round={}, finish={}, ms={}, tools={}",
+                    event["round"], event["finishReason"], event["durationMs"], event["toolCalls"]
+                );
+            }
+        }
+        let task_id = outcome.unwrap();
         assert_eq!(task_status(&store, task_id), TaskStatus::WaitingConfirm);
         let patches = {
             let conn = store.conn();
@@ -1560,7 +1738,7 @@ mod tests {
     #[test]
     fn orchestrator_config_defaults_are_sane() {
         let config = OrchestratorConfig::default();
-        assert_eq!(config.candidate_count, 3);
+        assert_eq!(config.candidate_count, 1);
         assert_eq!(config.step_timeout_sec, 600);
         assert_eq!(config.context_top_files, 8);
         assert!(!config.require_confirm);

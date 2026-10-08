@@ -298,6 +298,7 @@ async fn run_all_verifies(
             kind: result.kind.clone(),
             passed: result.passed,
             output: result.output.clone(),
+            status: None,
         })?;
         tracing::info!(
             task_id,

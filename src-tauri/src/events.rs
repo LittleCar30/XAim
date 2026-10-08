@@ -30,6 +30,15 @@ pub enum XaimEvent {
         tool: String,
         args: String,
     },
+    ToolFinished {
+        task_id: i64,
+        call_id: String,
+        result: crate::types::ToolResult,
+    },
+    Message {
+        task_id: i64,
+        content: String,
+    },
     /// 补丁产出。
     Patch {
         task_id: i64,
@@ -42,19 +51,38 @@ pub enum XaimEvent {
         kind: String,
         passed: bool,
         output: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
     },
     /// 修复回路进入第 round 轮。
-    Repair { task_id: i64, round: u32 },
+    Repair {
+        task_id: i64,
+        round: u32,
+    },
     /// token 用量增量。
     Token {
         task_id: i64,
         input: i64,
         output: i64,
     },
+    /// Response metadata excludes raw content, credentials and private reasoning.
+    ModelResponse {
+        task_id: i64,
+        round: usize,
+        finish_reason: String,
+        duration_ms: u64,
+        tool_calls: usize,
+    },
     /// 任务进入终态。
-    Done { task_id: i64, status: String },
+    Done {
+        task_id: i64,
+        status: String,
+    },
     /// 错误。
-    Error { task_id: i64, message: String },
+    Error {
+        task_id: i64,
+        message: String,
+    },
 }
 
 /// 向所有窗口推送事件。推送失败不 panic，经统一错误类型返回。
@@ -114,6 +142,7 @@ mod tests {
                     kind: "cargo_test".to_string(),
                     passed: true,
                     output: "ok".to_string(),
+                    status: None,
                 },
                 "verify",
             ),
@@ -162,6 +191,7 @@ mod tests {
             kind: "cargo_test".to_string(),
             passed: false,
             output: "test failed".to_string(),
+            status: None,
         };
         assert_eq!(
             serde_json::to_value(&event).unwrap(),

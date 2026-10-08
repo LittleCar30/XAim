@@ -70,6 +70,7 @@ enum Intent {
     Delete,
     RenameFrom,
     RenameTo,
+    RenameUnknown,
 }
 
 /// 防抖主循环：阻塞等首批事件 → 固定 500ms 窗口收批 → 冲刷。
@@ -125,6 +126,7 @@ fn collect(batch: &mut Vec<(PathBuf, Intent)>, event: Event) {
             EventKind::Create(_) => Intent::Create,
             EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Intent::RenameFrom,
             EventKind::Modify(ModifyKind::Name(RenameMode::To)) => Intent::RenameTo,
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)) => Intent::RenameUnknown,
             EventKind::Modify(_) => Intent::Modify,
             EventKind::Remove(_) => Intent::Delete,
             // Access/Other/Any 对索引无意义。
@@ -157,6 +159,12 @@ fn flush(batch: &mut Vec<(PathBuf, Intent)>, tx: &Sender<WatchEvent>) {
                 Some(from) => out.push(WatchEvent::Renamed(from, path)),
                 // 目标路径不明（如被忽略目录吞掉）：按创建上报。
                 None => out.push(WatchEvent::Created(path)),
+            },
+            // FSEvents does not identify rename sides; reconcile each path independently.
+            Intent::RenameUnknown => match path.try_exists() {
+                Ok(true) => out.push(WatchEvent::Created(path)),
+                Ok(false) => out.push(WatchEvent::Deleted(path)),
+                Err(_) => out.push(WatchEvent::Modified(path)),
             },
         }
     }
@@ -201,8 +209,11 @@ mod tests {
         }
     }
 
-    /// 等待下一个路径以 `name` 结尾的事件（跳过无关事件）。
-    async fn next_for(rx: &mut mpsc::Receiver<WatchEvent>, name: &str) -> WatchEvent {
+    /// FSEvents can emit multiple kinds for one path; wait for the expected kind.
+    async fn next_matching(
+        rx: &mut mpsc::Receiver<WatchEvent>,
+        matches: impl Fn(&WatchEvent) -> bool,
+    ) -> WatchEvent {
         let deadline = Instant::now() + WAIT;
         loop {
             let remaining = deadline
@@ -212,7 +223,7 @@ mod tests {
                 .await
                 .expect("1 秒内应收到事件")
                 .expect("通道不应关闭");
-            if event_path(&event).ends_with(name) {
+            if matches(&event) {
                 return event;
             }
         }
@@ -244,7 +255,11 @@ mod tests {
 
         // 安静后改文件，1 秒内应收到 Modified。
         fs::write(tmp.path().join("a.txt"), b"world").unwrap();
-        let event = next_for(&mut rx, "a.txt").await;
+        let event = next_matching(
+            &mut rx,
+            |event| matches!(event, WatchEvent::Modified(path) if path.ends_with("a.txt")),
+        )
+        .await;
         assert!(
             matches!(event, WatchEvent::Modified(_)),
             "应为 Modified: {event:?}"
@@ -261,7 +276,11 @@ mod tests {
         let _ = drain_until_quiet(&mut rx).await;
 
         fs::remove_file(tmp.path().join("b.txt")).unwrap();
-        let event = next_for(&mut rx, "b.txt").await;
+        let event = next_matching(
+            &mut rx,
+            |event| matches!(event, WatchEvent::Deleted(path) if path.ends_with("b.txt")),
+        )
+        .await;
         assert!(
             matches!(event, WatchEvent::Deleted(_)),
             "应为 Deleted: {event:?}"
@@ -294,6 +313,28 @@ mod tests {
             renamed || fallback,
             "rename 应产生 Renamed 事件: {events:?}"
         );
+    }
+
+    #[test]
+    fn anonymous_rename_reconciles_paths_without_pairing_unrelated_files() {
+        let tmp = tempdir().unwrap();
+        let old = tmp.path().join("old.txt");
+        let new = tmp.path().join("new.txt");
+        fs::write(&new, b"x").unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let mut batch = Vec::new();
+        // Anonymous notifications may arrive with the destination first.
+        for path in [&new, &old] {
+            collect(
+                &mut batch,
+                Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Any)))
+                    .add_path(path.clone()),
+            );
+        }
+        flush(&mut batch, &tx);
+        assert_eq!(rx.try_recv().unwrap(), WatchEvent::Created(new));
+        assert_eq!(rx.try_recv().unwrap(), WatchEvent::Deleted(old));
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

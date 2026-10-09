@@ -43,6 +43,16 @@ it('shows unfinished stages as failed after the task fails', () => {
   expect(within(steps).queryByText('进行中')).not.toBeInTheDocument()
 })
 
+it('shows partial changes on failure without offering apply actions', () => {
+  useTaskStore.setState({ currentTask: { ...task, status: 'failed' }, patches: [
+    { id: 9, taskId: task.id, filePath: 'partial.html', diff: '', applied: false, score: null, createdAt: 0 },
+  ] })
+  render(<TaskPanel />)
+  expect(screen.getByText('partial.html')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /应用/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /拒绝/ })).not.toBeInTheDocument()
+})
+
 it('shows historical cancelled stages and hides saved plan JSON', () => {
   useConversationStore.setState({ selectedId: task.id, record: {
     task: { ...task, status: 'cancelled' }, patches: [], verifies: [], steps: [

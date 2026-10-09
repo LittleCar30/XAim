@@ -77,7 +77,7 @@ impl PackageManager {
         match self {
             PackageManager::Pnpm => "pnpm exec tsc --noEmit",
             PackageManager::Yarn => "yarn tsc --noEmit",
-            PackageManager::Npm => "npx tsc --noEmit",
+            PackageManager::Npm => "node node_modules/typescript/bin/tsc --noEmit",
         }
     }
 
@@ -85,7 +85,7 @@ impl PackageManager {
         match self {
             PackageManager::Pnpm => "pnpm exec eslint .",
             PackageManager::Yarn => "yarn eslint .",
-            PackageManager::Npm => "npx eslint .",
+            PackageManager::Npm => "node node_modules/eslint/bin/eslint.js .",
         }
     }
 
@@ -102,6 +102,14 @@ impl PackageManager {
             PackageManager::Pnpm => "pnpm build",
             PackageManager::Yarn => "yarn build",
             PackageManager::Npm => "npm run build",
+        }
+    }
+
+    fn script_command(self, script: &str) -> String {
+        match self {
+            Self::Pnpm => format!("pnpm run {script}"),
+            Self::Yarn => format!("yarn run {script}"),
+            Self::Npm => format!("npm run {script}"),
         }
     }
 }
@@ -146,6 +154,12 @@ fn detect_node(root: &Path) -> VerifyConfig {
     if root.join("tsconfig.json").is_file() || has_dependency("typescript") {
         config.type_check = Some(pm.type_check_command().into());
     }
+    if let Some(script) = ["typecheck", "type-check"]
+        .into_iter()
+        .find(|s| has_script(s))
+    {
+        config.type_check = Some(pm.script_command(script));
+    }
     if ESLINT_CONFIG_FILES
         .iter()
         .any(|name| root.join(name).is_file())
@@ -153,6 +167,9 @@ fn detect_node(root: &Path) -> VerifyConfig {
         || manifest.as_ref().is_some_and(|m| m.eslint_config.is_some())
     {
         config.lint = Some(pm.lint_command().into());
+    }
+    if has_script("lint") {
+        config.lint = Some(pm.script_command("lint"));
     }
     if has_script("test") {
         config.test = Some(pm.test_command().into());
@@ -179,11 +196,16 @@ fn detect_cargo(root: &Path) -> VerifyConfig {
     if !root.join("Cargo.toml").is_file() {
         return VerifyConfig::default();
     }
+    let locked = if root.join("Cargo.lock").is_file() {
+        " --locked"
+    } else {
+        ""
+    };
     VerifyConfig {
-        type_check: Some("cargo check".into()),
-        lint: Some("cargo clippy".into()),
-        test: Some("cargo test".into()),
-        build: Some("cargo build".into()),
+        type_check: Some(format!("cargo check{locked}")),
+        lint: Some(format!("cargo clippy{locked}")),
+        test: Some(format!("cargo test{locked}")),
+        build: Some(format!("cargo build{locked}")),
     }
 }
 
@@ -213,15 +235,36 @@ fn detect_maven(root: &Path) -> VerifyConfig {
     }
 }
 
-/// Python 项目：默认只探测 pytest；类型检查/lint 工具因项目而异。
+/// Prefer the framework declared by project configuration or test imports.
 fn detect_python(root: &Path) -> VerifyConfig {
     if !root.join("requirements.txt").is_file() && !root.join("pyproject.toml").is_file() {
         return VerifyConfig::default();
     }
+    let pytest_config = ["pytest.ini", "conftest.py"]
+        .iter()
+        .any(|p| root.join(p).is_file())
+        || fs::read_to_string(root.join("pyproject.toml"))
+            .is_ok_and(|s| s.contains("[tool.pytest."));
+    let unittest_tests = fs::read_dir(root.join("tests")).is_ok_and(|entries| {
+        entries.take(128).flatten().any(|entry| {
+            entry.path().extension().is_some_and(|e| e == "py")
+                && fs::metadata(entry.path()).is_ok_and(|m| m.len() <= 128 * 1024)
+                && fs::read_to_string(entry.path()).is_ok_and(|s| {
+                    s.contains("import unittest") || s.contains("from unittest import")
+                })
+        })
+    });
     VerifyConfig {
         type_check: None,
         lint: None,
-        test: Some("pytest".into()),
+        test: Some(
+            if unittest_tests && !pytest_config {
+                "python -m unittest discover -s tests"
+            } else {
+                "python -m pytest"
+            }
+            .into(),
+        ),
         build: None,
     }
 }
@@ -297,8 +340,14 @@ mod tests {
 
         let npm_dir = tempdir().unwrap();
         let config = node_project(npm_dir.path(), "package-lock.json");
-        assert_eq!(config.type_check.as_deref(), Some("npx tsc --noEmit"));
-        assert_eq!(config.lint.as_deref(), Some("npx eslint ."));
+        assert_eq!(
+            config.type_check.as_deref(),
+            Some("node node_modules/typescript/bin/tsc --noEmit")
+        );
+        assert_eq!(
+            config.lint.as_deref(),
+            Some("node node_modules/eslint/bin/eslint.js .")
+        );
         assert_eq!(config.test.as_deref(), Some("npm test"));
         assert_eq!(config.build.as_deref(), Some("npm run build"));
     }
@@ -337,8 +386,14 @@ mod tests {
         );
 
         let config = detect_verify_config(dir.path());
-        assert_eq!(config.type_check.as_deref(), Some("npx tsc --noEmit"));
-        assert_eq!(config.lint.as_deref(), Some("npx eslint ."));
+        assert_eq!(
+            config.type_check.as_deref(),
+            Some("node node_modules/typescript/bin/tsc --noEmit")
+        );
+        assert_eq!(
+            config.lint.as_deref(),
+            Some("node node_modules/eslint/bin/eslint.js .")
+        );
         assert_eq!(config.test, None);
         assert_eq!(config.build, None);
     }
@@ -352,11 +407,17 @@ mod tests {
             "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
         );
 
+        assert_eq!(
+            detect_verify_config(dir.path()).type_check.as_deref(),
+            Some("cargo check")
+        );
+        write_file(dir.path(), "Cargo.lock", "version = 4\n");
+
         let config = detect_verify_config(dir.path());
-        assert_eq!(config.type_check.as_deref(), Some("cargo check"));
-        assert_eq!(config.lint.as_deref(), Some("cargo clippy"));
-        assert_eq!(config.test.as_deref(), Some("cargo test"));
-        assert_eq!(config.build.as_deref(), Some("cargo build"));
+        assert_eq!(config.type_check.as_deref(), Some("cargo check --locked"));
+        assert_eq!(config.lint.as_deref(), Some("cargo clippy --locked"));
+        assert_eq!(config.test.as_deref(), Some("cargo test --locked"));
+        assert_eq!(config.build.as_deref(), Some("cargo build --locked"));
     }
 
     #[test]
@@ -390,7 +451,7 @@ mod tests {
         let config = detect_verify_config(req_dir.path());
         assert_eq!(config.type_check, None);
         assert_eq!(config.lint, None);
-        assert_eq!(config.test.as_deref(), Some("pytest"));
+        assert_eq!(config.test.as_deref(), Some("python -m pytest"));
         assert_eq!(config.build, None);
 
         let pyproject_dir = tempdir().unwrap();
@@ -400,8 +461,28 @@ mod tests {
             "[project]\nname = \"demo\"\n",
         );
         let config = detect_verify_config(pyproject_dir.path());
-        assert_eq!(config.test.as_deref(), Some("pytest"));
+        assert_eq!(config.test.as_deref(), Some("python -m pytest"));
         assert_eq!(config.type_check, None);
+    }
+
+    #[test]
+    fn unittest_imports_select_module_entry_and_pytest_config_takes_precedence() {
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "requirements.txt", "local-library\n");
+        write_file(
+            dir.path(),
+            "tests/test_app.py",
+            "import unittest\nclass TestApp(unittest.TestCase): pass\n",
+        );
+        assert_eq!(
+            detect_verify_config(dir.path()).test.as_deref(),
+            Some("python -m unittest discover -s tests")
+        );
+        write_file(dir.path(), "pytest.ini", "[pytest]\n");
+        assert_eq!(
+            detect_verify_config(dir.path()).test.as_deref(),
+            Some("python -m pytest")
+        );
     }
 
     #[test]
@@ -413,11 +494,12 @@ mod tests {
             "Cargo.toml",
             "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
         );
+        write_file(dir.path(), "Cargo.lock", "version = 4\n");
 
         let config = detect_verify_config(dir.path());
-        assert_eq!(config.type_check.as_deref(), Some("cargo check"));
-        assert_eq!(config.lint.as_deref(), Some("cargo clippy"));
+        assert_eq!(config.type_check.as_deref(), Some("cargo check --locked"));
+        assert_eq!(config.lint.as_deref(), Some("cargo clippy --locked"));
         assert_eq!(config.test.as_deref(), Some("npm test"));
-        assert_eq!(config.build.as_deref(), Some("cargo build"));
+        assert_eq!(config.build.as_deref(), Some("cargo build --locked"));
     }
 }

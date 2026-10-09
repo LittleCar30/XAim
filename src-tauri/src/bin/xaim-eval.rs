@@ -12,11 +12,15 @@ fn arguments() -> Result<(PathBuf, EvalOptions), String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
-            println!("xaim-eval [tasks-dir] [--mode agent|reference|baseline] [--config config.json] [--output reports-dir] [--bash path] [--task-timeout seconds] [--verify-timeout seconds]");
+            println!("xaim-eval [tasks-dir] [--mode agent|reference|baseline] [--config config.json] [--output reports-dir] [--bash path] [--task-timeout seconds] [--verify-timeout seconds] [--allow-verification]");
             std::process::exit(0);
         }
         if !arg.starts_with('-') {
             tasks_dir = PathBuf::from(arg);
+            continue;
+        }
+        if arg == "--allow-verification" {
+            options.allow_verification = true;
             continue;
         }
         let value = args
@@ -46,8 +50,27 @@ fn arguments() -> Result<(PathBuf, EvalOptions), String> {
     Ok((tasks_dir, options))
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // The debug-build orchestrator future includes both native and legacy
+    // execution paths. Windows executables have a smaller main-thread stack
+    // than Rust's test workers, so run it on an explicitly sized thread.
+    std::thread::Builder::new()
+        .name("xaim-eval".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(8 * 1024 * 1024)
+                .build()
+                .expect("evaluation runtime")
+                .block_on(run());
+        })
+        .expect("evaluation thread")
+        .join()
+        .expect("evaluation panicked");
+}
+
+async fn run() {
     let (tasks_dir, options) = arguments().unwrap_or_else(|error| {
         eprintln!("{error}");
         std::process::exit(2);

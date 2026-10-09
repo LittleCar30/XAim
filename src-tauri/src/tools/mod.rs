@@ -6,6 +6,7 @@ pub mod patch;
 pub mod read;
 pub mod registry;
 pub mod search;
+pub mod symbols;
 pub mod r#trait;
 pub mod write;
 

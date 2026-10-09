@@ -13,6 +13,8 @@ use crate::errors::{Result, XaimError};
 
 const MAX_FILE_SIZE: u64 = 1024 * 1024;
 const MAX_READ_CHARS: usize = 16_000;
+const MAX_OUTPUT_CHARS: usize = 24_000;
+const MAX_WRITE_CHARS: usize = 16_000;
 
 pub fn definitions() -> Vec<Value> {
     let schema = |name: &str, description: &str, properties: Value, required: Vec<&str>| {
@@ -21,8 +23,16 @@ pub fn definitions() -> Vec<Value> {
     };
     vec![
         schema(
+            "update_task_state",
+            "简短记录已完成事项、待办及摘要。全部用户要求完成时，将 pending 设为空、ready_for_review 设为 true，程序直接验证并汇总，无需额外一轮正文。无法验证不等于代码错误。",
+            json!({"completed":{"type":"array","items":{"type":"string"},"maxItems":16},
+                "pending":{"type":"array","items":{"type":"string"},"maxItems":16},
+                "ready_for_review":{"type":"boolean"},"summary":{"type":"string"}}),
+            vec!["completed", "pending", "ready_for_review", "summary"],
+        ),
+        schema(
             "run_verify",
-            "运行本项目已检测到并授权的检查；不接受自定义命令。",
+            "运行本项目已检测到并授权的检查；不接受自定义命令。status=failed 才是代码检查失败；unavailable 表示无法检查，无需为此修改代码。",
             json!({}),
             vec![],
         ),
@@ -45,10 +55,28 @@ pub fn definitions() -> Vec<Value> {
             vec!["query"],
         ),
         schema(
+            "search_symbols",
+            "按符号名检索任务副本的当前源码（TS/JS/Python/Rust/Go/Java），返回声明位置及文件 hash。path 可为文件、目录或 .；大项目请缩小目录。",
+            json!({"query":{"type":"string"},"path":{"type":"string"}}),
+            vec!["query", "path"],
+        ),
+        schema(
+            "read_symbol",
+            "读取当前符号声明的正文及完整文件 hash，可用于 edit_file。start_line 使用搜索结果；唯一同名声明可填 0。offset 是符号内字符偏移，从 0 开始，按 next_offset 分块读取。",
+            json!({"path":{"type":"string"},"name":{"type":"string"},"start_line":{"type":"integer","minimum":0},"offset":{"type":"integer","minimum":0}}),
+            vec!["path", "name", "start_line", "offset"],
+        ),
+        schema(
             "create_file",
-            "仅创建不存在的文件，content 是完整源码。",
+            "仅创建不存在的文件。长文件先创建小骨架，再用 append_file 分块追加；单次 content 最多 16000 字符。",
             json!({"path":{"type":"string"},"content":{"type":"string"}}),
             vec!["path", "content"],
+        ),
+        schema(
+            "append_file",
+            "用最新 hash 校验版本，在文件末尾追加 content，单次最多 16000 字符。返回新 hash。",
+            json!({"path":{"type":"string"},"expected_hash":{"type":"string"},"content":{"type":"string"}}),
+            vec!["path", "expected_hash", "content"],
         ),
         schema(
             "edit_file",
@@ -90,6 +118,23 @@ struct EditArgs {
     new_text: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppendArgs {
+    path: String,
+    expected_hash: String,
+    content: String,
+}
+
+fn check_write_chunk(content: &str) -> Result<()> {
+    if content.chars().count() > MAX_WRITE_CHARS {
+        return Err(XaimError::Config(
+            "单次写入超过 16000 字符，请分块创建、追加或编辑".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn read(root: &std::path::Path, path: &str) -> Result<String> {
     let target = safe_path(root, path)?;
     if fs::metadata(&target)?.len() > MAX_FILE_SIZE {
@@ -99,13 +144,25 @@ fn read(root: &std::path::Path, path: &str) -> Result<String> {
 }
 
 pub async fn call(name: &str, args: Value, ctx: &ToolContext) -> crate::types::ToolResult {
+    if matches!(name, "search_symbols" | "read_symbol") {
+        return super::symbols::SessionSymbols::default()
+            .call(name, args, &ctx.project_root)
+            .await;
+    }
     let start = Instant::now();
     let outcome = execute(name, args, ctx).await;
     let result = outcome.unwrap_or_else(|error| ToolResult::fail(error.to_string()));
     crate::types::ToolResult {
         name: name.into(),
         success: result.success,
-        output: super::exec::truncate_middle(&result.output, 24_000),
+        output: if matches!(
+            name,
+            "read_file" | "create_file" | "edit_file" | "append_file"
+        ) {
+            result.output
+        } else {
+            super::exec::truncate_middle(&result.output, MAX_OUTPUT_CHARS)
+        },
         error: result.error,
         duration_ms: Some(start.elapsed().as_millis() as i64),
     }
@@ -128,12 +185,13 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
                 if excluded(&name) {
                     continue;
                 }
-                let relative = entry
-                    .path()
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                // safe_path canonicalizes existing directories. On Windows its
+                // extended path prefix can differ from the caller's root.
+                let relative = if args.path == "." {
+                    name.clone()
+                } else {
+                    format!("{}/{}", args.path.replace('\\', "/"), name)
+                };
                 if safe_path(root, &relative).is_err() {
                     continue;
                 }
@@ -156,17 +214,34 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
             if args.offset > length {
                 return Err(XaimError::Config("读取 offset 超出文件".into()));
             }
-            let excerpt: String = content
+            let excerpt: Vec<char> = content
                 .chars()
                 .skip(args.offset)
                 .take(MAX_READ_CHARS)
                 .collect();
-            let next = args.offset + excerpt.chars().count();
-            Ok(ToolResult::ok(
-                json!({"path":args.path,"hash":hash,"content":excerpt,
-                "next_offset":next,"complete": next == length})
-                .to_string(),
-            ))
+            let serialize = |count: usize| {
+                let next = args.offset + count;
+                json!({"path":args.path,"hash":hash,"content":excerpt[..count].iter().collect::<String>(),
+                    "next_offset":next,"complete": next == length}).to_string()
+            };
+            // Bound the serialized result, including JSON escaping, without cutting its structure.
+            let mut low = 0;
+            let mut high = excerpt.len();
+            if serialize(0).chars().count() > MAX_OUTPUT_CHARS {
+                return Err(XaimError::Config("读取结果元数据超过输出上限".into()));
+            }
+            while low < high {
+                let middle = (low + high).div_ceil(2);
+                if serialize(middle).chars().count() <= MAX_OUTPUT_CHARS {
+                    low = middle;
+                } else {
+                    high = middle - 1;
+                }
+            }
+            if low == 0 && !excerpt.is_empty() {
+                return Err(XaimError::Config("读取结果无法容纳正文".into()));
+            }
+            Ok(ToolResult::ok(serialize(low)))
         }
         "search" => {
             let args: SearchArgs = serde_json::from_value(args)?;
@@ -176,6 +251,7 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
         }
         "create_file" => {
             let args: CreateArgs = serde_json::from_value(args)?;
+            check_write_chunk(&args.content)?;
             if args.content.trim().is_empty() || args.content.len() as u64 > MAX_FILE_SIZE {
                 return Err(XaimError::Config("新文件内容为空或超过 1 MB".into()));
             }
@@ -191,6 +267,7 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
         }
         "edit_file" => {
             let args: EditArgs = serde_json::from_value(args)?;
+            check_write_chunk(&args.new_text)?;
             let content = read(root, &args.path)?;
             if blake3::hash(content.as_bytes()).to_hex().as_str() != args.expected_hash {
                 return Err(XaimError::PatchConflict(
@@ -216,6 +293,32 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
             changes.apply(root, false)?;
             Ok(ToolResult::ok(json!({"path":args.path,"hash":blake3::hash(updated.as_bytes()).to_hex().to_string()}).to_string()))
         }
+        "append_file" => {
+            let args: AppendArgs = serde_json::from_value(args)?;
+            check_write_chunk(&args.content)?;
+            if args.content.is_empty() {
+                return Err(XaimError::Config("追加内容不能为空".into()));
+            }
+            let content = read(root, &args.path)?;
+            if blake3::hash(content.as_bytes()).to_hex().as_str() != args.expected_hash {
+                return Err(XaimError::PatchConflict(
+                    "文件版本已变化，请重新读取后追加".into(),
+                ));
+            }
+            let updated = format!("{content}{}", args.content);
+            if updated.len() as u64 > MAX_FILE_SIZE {
+                return Err(XaimError::Security("追加结果超过 1 MB".into()));
+            }
+            crate::agent::workspace::ChangeSet {
+                files: vec![crate::agent::workspace::FileChange {
+                    path: args.path.clone(),
+                    before: Some(content),
+                    after: Some(updated.clone()),
+                }],
+            }
+            .apply(root, false)?;
+            Ok(ToolResult::ok(json!({"path":args.path,"hash":blake3::hash(updated.as_bytes()).to_hex().to_string()}).to_string()))
+        }
         _ => Err(XaimError::Security(format!("未授权工具: {name}"))),
     }
 }
@@ -223,6 +326,81 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn list_nested_directory_with_noncanonical_root() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/lib.rs"), "pub fn login() {}\n").unwrap();
+        let ctx = ToolContext {
+            project_root: root.path().to_path_buf(),
+            store: std::sync::Arc::new(crate::store::Store::open_in_memory().unwrap()),
+            require_confirm: false,
+            allowed_commands: vec![],
+        };
+        let result = call("list_dir", json!({"path":"src"}), &ctx).await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(result.output, "lib.rs");
+    }
+
+    #[tokio::test]
+    async fn escaped_reads_remain_valid_and_chunks_reconstruct_exactly() {
+        let root = tempfile::tempdir().unwrap();
+        let original = format!("{}尾部", "\"\\\n".repeat(8000));
+        fs::write(root.path().join("a"), &original).unwrap();
+        let ctx = ToolContext {
+            project_root: root.path().into(),
+            store: std::sync::Arc::new(crate::store::Store::open_in_memory().unwrap()),
+            require_confirm: false,
+            allowed_commands: vec![],
+        };
+        let mut offset = 0;
+        let mut recovered = String::new();
+        loop {
+            let response = call("read_file", json!({"path":"a","offset":offset}), &ctx).await;
+            assert!(response.success);
+            assert!(response.output.chars().count() <= MAX_OUTPUT_CHARS);
+            let result: Value = serde_json::from_str(&response.output).unwrap();
+            let chunk = result["content"].as_str().unwrap();
+            let next = result["next_offset"].as_u64().unwrap() as usize;
+            assert_eq!(next, offset + chunk.chars().count());
+            recovered.push_str(chunk);
+            if result["complete"] == true {
+                break;
+            }
+            assert!(next > offset);
+            offset = next;
+        }
+        assert_eq!(recovered, original);
+        let created = call("create_file", json!({"path":"b","content":"start"}), &ctx).await;
+        let result: Value = serde_json::from_str(&created.output).unwrap();
+        assert!(
+            !call(
+                "append_file",
+                json!({"path":"b","expected_hash":"stale","content":"end"}),
+                &ctx
+            )
+            .await
+            .success
+        );
+        let appended = call(
+            "append_file",
+            json!({"path":"b","expected_hash":result["hash"],"content":"end"}),
+            &ctx,
+        )
+        .await;
+        assert!(appended.success);
+        assert_eq!(
+            fs::read_to_string(root.path().join("b")).unwrap(),
+            "startend"
+        );
+        let result: Value = serde_json::from_str(&appended.output).unwrap();
+        assert!(!call("append_file", json!({"path":"b","expected_hash":result["hash"],"content":"x".repeat(MAX_WRITE_CHARS + 1)}), &ctx).await.success);
+        assert_eq!(
+            fs::read_to_string(root.path().join("b")).unwrap(),
+            "startend"
+        );
+    }
 
     #[tokio::test]
     async fn edits_require_unique_nonempty_match_and_current_version() {

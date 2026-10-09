@@ -6,7 +6,7 @@
 //! Ollama 本地模型（`http://localhost:11434/v1`）等。
 
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -14,8 +14,8 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use super::provider::{
-    CompletionRequest, CompletionResponse, ModelProvider, ToolMessage, ToolRequest, ToolResponse,
-    Usage,
+    CompletionRequest, CompletionResponse, ModelProvider, RequestObserver, ToolMessage,
+    ToolRequest, ToolResponse, Usage,
 };
 use crate::errors::{Result, XaimError};
 
@@ -50,10 +50,12 @@ impl OpenAiProvider {
     pub fn new(base_url: String, api_key: String) -> Self {
         // 不设客户端级总超时：流式响应的时长由内容决定；空闲保护交给 read_timeout。
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
             .read_timeout(REQUEST_TIMEOUT)
             .build()
             .expect("构建 reqwest Client 失败");
         let tool_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(15))
             .read_timeout(TOOL_REQUEST_TIMEOUT)
             .build()
             .expect("构建工具请求 Client 失败");
@@ -220,10 +222,18 @@ impl OpenAiProvider {
         &self,
         payload: &T,
         timeout: Option<Duration>,
+        deadline: Option<Instant>,
+        observer: Option<&RequestObserver<'_>>,
     ) -> Result<reqwest::Response> {
         let url = format!("{}/chat/completions", self.base_url);
         let mut attempt = 0u32;
         loop {
+            let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            if remaining.is_some_and(|d| d.is_zero()) {
+                return Err(XaimError::Timeout("模型请求达到任务截止时间".into()));
+            }
+            let mut observation = RequestObservation::new(observer, "headers", attempt + 1);
+            observation.emit(serde_json::json!({"stage":"attemptStarted","attempt":attempt+1}));
             let client = if timeout == Some(TOOL_REQUEST_TIMEOUT) {
                 &self.tool_client
             } else {
@@ -231,22 +241,37 @@ impl OpenAiProvider {
             };
             let mut request = client.post(&url).bearer_auth(&self.api_key).json(payload);
             if let Some(timeout) = timeout {
-                request = request.timeout(timeout);
+                request = request.timeout(remaining.map_or(timeout, |r| r.min(timeout)));
             }
             let send = request.send().await;
 
             match send {
-                Ok(resp) if resp.status().is_success() => return Ok(resp),
+                Ok(resp) if resp.status().is_success() => {
+                    observation.finish(serde_json::json!({"stage":"headers","attempt":attempt+1,
+                        "status":resp.status().as_u16(),"durationMs":observation.elapsed_ms(),"requestId":request_id(&resp)}));
+                    return Ok(resp);
+                }
                 Ok(resp) => {
                     let status = resp.status();
+                    let retry_after = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(retry_after_delay);
+                    observation.emit(serde_json::json!({"stage":"headers","attempt":attempt+1,
+                        "status":status.as_u16(),"durationMs":observation.elapsed_ms(),"requestId":request_id(&resp)}));
+                    observation.stage = "error_body";
                     let body = resp
                         .text()
                         .await
                         .unwrap_or_else(|_| "(读取响应体失败)".to_string());
+                    observation.finish(serde_json::json!({"stage":"httpError","attempt":attempt+1,
+                        "status":status.as_u16(),"durationMs":observation.elapsed_ms()}));
                     if attempt < MAX_RETRIES && is_retryable_status(status) {
                         attempt += 1;
                         tracing::warn!(attempt, %status, "请求失败，稍后重试");
-                        tokio::time::sleep(backoff_delay(attempt)).await;
+                        let delay = retry_after.unwrap_or_else(|| backoff_delay(attempt));
+                        retry_wait(delay, deadline, observer, attempt).await?;
                         continue;
                     }
                     if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -257,11 +282,14 @@ impl OpenAiProvider {
                     return Err(XaimError::Model(format!("HTTP {status}: {body}")));
                 }
                 Err(err) => {
-                    let retryable = err.is_connect() || err.is_body() || err.is_request();
+                    observation.finish(serde_json::json!({"stage":"transportError","attempt":attempt+1,
+                        "durationMs":observation.elapsed_ms(),"connect":err.is_connect(),
+                        "timeout":err.is_timeout(),"body":err.is_body(),"request":err.is_request()}));
+                    let retryable = err.is_connect() || err.is_body() || err.is_timeout();
                     if attempt < MAX_RETRIES && retryable {
                         attempt += 1;
                         tracing::warn!(attempt, error = %err, "网络错误，稍后重试");
-                        tokio::time::sleep(backoff_delay(attempt)).await;
+                        retry_wait(backoff_delay(attempt), deadline, observer, attempt).await?;
                         continue;
                     }
                     return Err(XaimError::Http(err));
@@ -301,7 +329,102 @@ fn is_retryable_status(status: reqwest::StatusCode) -> bool {
 }
 
 fn backoff_delay(attempt: u32) -> Duration {
-    Duration::from_millis(BACKOFF_BASE_MS << (attempt - 1))
+    let jitter = uuid::Uuid::new_v4().as_u128() as u64 % 251;
+    Duration::from_millis((BACKOFF_BASE_MS << (attempt - 1)) + jitter)
+}
+
+fn retry_after_delay(value: &str) -> Option<Duration> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    chrono::DateTime::parse_from_rfc2822(value)
+        .ok()
+        .map(|date| {
+            Duration::from_millis(
+                (date.timestamp_millis() - chrono::Utc::now().timestamp_millis()).max(0) as u64,
+            )
+        })
+}
+
+fn request_id(response: &reqwest::Response) -> Option<String> {
+    ["x-request-id", "request-id"].iter().find_map(|name| {
+        response
+            .headers()
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| {
+                v.len() <= 128
+                    && v.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            })
+            .map(str::to_owned)
+    })
+}
+
+struct RequestObservation<'a> {
+    observer: Option<&'a RequestObserver<'a>>,
+    started: Instant,
+    stage: &'static str,
+    attempt: u32,
+    finished: bool,
+}
+
+impl<'a> RequestObservation<'a> {
+    fn new(observer: Option<&'a RequestObserver<'a>>, stage: &'static str, attempt: u32) -> Self {
+        Self {
+            observer,
+            started: Instant::now(),
+            stage,
+            attempt,
+            finished: false,
+        }
+    }
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+    fn emit(&self, data: serde_json::Value) {
+        if let Some(observer) = self.observer {
+            observer(data);
+        }
+    }
+    fn finish(&mut self, data: serde_json::Value) {
+        self.finished = true;
+        self.emit(data);
+    }
+}
+
+impl Drop for RequestObservation<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.emit(
+                serde_json::json!({"stage":self.stage,"attempt":self.attempt,
+                "cancelled":true,"durationMs":self.elapsed_ms()}),
+            );
+        }
+    }
+}
+
+async fn retry_wait(
+    delay: Duration,
+    deadline: Option<Instant>,
+    observer: Option<&RequestObserver<'_>>,
+    attempt: u32,
+) -> Result<()> {
+    if deadline.is_some_and(|d| d.saturating_duration_since(Instant::now()) <= delay) {
+        if let Some(observer) = observer {
+            observer(
+                serde_json::json!({"stage":"retrySkipped","attempt":attempt,"reason":"task_deadline"}),
+            );
+        }
+        return Err(XaimError::Timeout("剩余任务时间不足以重试模型请求".into()));
+    }
+    let mut observation = RequestObservation::new(observer, "retry_wait", attempt);
+    observation.emit(
+        serde_json::json!({"stage":"retryScheduled","attempt":attempt,"delayMs":delay.as_millis()}),
+    );
+    tokio::time::sleep(delay).await;
+    observation.finish(serde_json::json!({"stage":"retryWaitComplete","attempt":attempt,"durationMs":observation.elapsed_ms()}));
+    Ok(())
 }
 
 /// 从一条 SSE data 中提取增量文本；空增量（仅 role 的首块、
@@ -367,12 +490,39 @@ impl ModelProvider for OpenAiProvider {
     }
 
     async fn complete_tools(&self, req: ToolRequest) -> Result<ToolResponse> {
+        self.complete_tools_observed(req, None, &|_| {}).await
+    }
+
+    async fn complete_tools_observed(
+        &self,
+        req: ToolRequest,
+        deadline: Option<Instant>,
+        observer: &RequestObserver<'_>,
+    ) -> Result<ToolResponse> {
+        let mut total = RequestObservation::new(Some(observer), "request", 0);
+        let outcome = async {
         let payload = self.tool_payload(&req)?;
         tracing::info!(parameters = %self.tool_request_metadata(&req), "发送工具模型请求（脱敏参数）");
         let resp = self
-            .send_with_retries(&payload, Some(TOOL_REQUEST_TIMEOUT))
+            .send_with_retries(
+                &payload,
+                Some(TOOL_REQUEST_TIMEOUT),
+                deadline,
+                Some(observer),
+            )
             .await?;
-        let parsed: ToolWireResponse = serde_json::from_str(&resp.text().await?)
+        let mut body_observation = RequestObservation::new(Some(observer), "body", 0);
+        let body = match resp.text().await {
+            Ok(body) => {
+                body_observation.finish(serde_json::json!({"stage":"body","durationMs":body_observation.elapsed_ms(),"bytes":body.len()}));
+                body
+            }
+            Err(error) => {
+                body_observation.finish(serde_json::json!({"stage":"bodyError","durationMs":body_observation.elapsed_ms(),"timeout":error.is_timeout()}));
+                return Err(error.into());
+            }
+        };
+        let parsed: ToolWireResponse = serde_json::from_str(&body)
             .map_err(|error| XaimError::Model(format!("工具响应 JSON 无效: {error}")))?;
         let mut choice = parsed
             .choices
@@ -399,12 +549,15 @@ impl ModelProvider for OpenAiProvider {
                 .map(|u| Usage::new(u.prompt_tokens, u.completion_tokens))
                 .unwrap_or_default(),
         })
+        }.await;
+        total.finish(serde_json::json!({"stage":"total","success":outcome.is_ok(),"durationMs":total.elapsed_ms()}));
+        outcome
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
         let payload = self.payload(&req, false);
         let resp = self
-            .send_with_retries(&payload, Some(REQUEST_TIMEOUT))
+            .send_with_retries(&payload, Some(REQUEST_TIMEOUT), None, None)
             .await?;
         let body = resp.text().await?;
         let parsed: ChatCompletionResponse = serde_json::from_str(&body)
@@ -450,7 +603,7 @@ impl ModelProvider for OpenAiProvider {
         req: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let payload = self.payload(&req, true);
-        let resp = self.send_with_retries(&payload, None).await?;
+        let resp = self.send_with_retries(&payload, None, None, None).await?;
 
         let sse = Box::pin(resp.bytes_stream().eventsource());
         let chunks = futures::stream::try_unfold(sse, |mut sse| async move {
@@ -578,6 +731,108 @@ struct CompletionTokenDetails {
 
 #[cfg(test)]
 mod tests {
+    fn observed_request() -> ToolRequest {
+        ToolRequest {
+            model: "mock".into(),
+            messages: vec![ToolMessage::text("user", "ping")],
+            tools: vec![],
+            max_tokens: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_rate_limit_honors_retry_after_and_remaining_deadline() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(429)
+            .with_header("retry-after", "2")
+            .with_body("private gateway body")
+            .expect(1)
+            .create_async()
+            .await;
+        let events = std::sync::Mutex::new(Vec::<serde_json::Value>::new());
+        let observer = |data| events.lock().unwrap().push(data);
+        let error = provider_with(server.url())
+            .complete_tools_observed(
+                observed_request(),
+                Some(Instant::now() + Duration::from_millis(250)),
+                &observer,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, XaimError::Timeout(_)));
+        mock.assert_async().await;
+        let events = events.lock().unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e["stage"] == "headers" && e["status"] == 429));
+        assert!(events.iter().any(|e| e["stage"] == "retrySkipped"));
+        assert!(events
+            .iter()
+            .any(|e| e["stage"] == "total" && e["success"] == false));
+        let text = serde_json::to_string(&*events).unwrap();
+        assert!(
+            !text.contains("test-key")
+                && !text.contains("private gateway body")
+                && !text.contains("ping")
+        );
+    }
+
+    #[tokio::test]
+    async fn observed_server_failures_record_each_attempt_and_body_timing() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(503)
+            .with_body("unavailable")
+            .expect(3)
+            .create_async()
+            .await;
+        let events = std::sync::Mutex::new(Vec::<serde_json::Value>::new());
+        let observer = |data| events.lock().unwrap().push(data);
+        assert!(provider_with(server.url())
+            .complete_tools_observed(observed_request(), None, &observer)
+            .await
+            .is_err());
+        mock.assert_async().await;
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["stage"] == "attemptStarted")
+                .count(),
+            3
+        );
+        assert_eq!(
+            events.iter().filter(|e| e["stage"] == "httpError").count(),
+            3
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["stage"] == "retryScheduled")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_an_inflight_retry_records_cancellation() {
+        let events = std::sync::Mutex::new(Vec::<serde_json::Value>::new());
+        let observer = |data| events.lock().unwrap().push(data);
+        assert!(tokio::time::timeout(
+            Duration::from_millis(5),
+            retry_wait(Duration::from_secs(1), None, Some(&observer), 1)
+        )
+        .await
+        .is_err());
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e["stage"] == "retry_wait" && e["cancelled"] == true));
+    }
     #[tokio::test]
     async fn tool_wire_parameters_match_diagnostics_for_multiple_adapters() {
         for (adapter, expected) in [

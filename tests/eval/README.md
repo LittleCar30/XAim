@@ -69,7 +69,7 @@ node tests/eval/run.mjs candidate /path/to/candidates
 
 ### 自动执行 XAim
 
-Rust 运行器直接调用 XAim 的真实编排器：复制每个 `repo/` 到临时目录，执行 `task.json` 的依赖准备命令，创建独立内存数据库与 Git 基线，读取 `task.md`，解析意图、索引、规划、生成和评估补丁，自动确认应用，然后运行原始任务目录的 `verify.sh` 检查候选。初始代码不会改动。
+Rust 运行器直接调用 XAim 的真实编排器：复制每个 `repo/` 到临时目录，执行 `task.json` 的依赖准备命令，创建独立内存数据库与 Git 基线，读取 `task.md`，执行默认工具循环（不支持工具的适配器才走兼容补丁流程），自动确认应用，然后运行原始任务目录的 `verify.sh` 检查候选。初始代码不会改动。统计包装器透传工具调用与检查点能力。
 
 ```bash
 npm run eval -- --config /path/to/config.json
@@ -81,11 +81,23 @@ npm run eval -- --mode reference
 npm run eval -- --mode baseline
 ```
 
-`--config` 使用 XAim 的 `Config` JSON 格式，示例见 `config.example.json`。请填写已安装或服务支持的模型；示例不会自动下载模型。云端密钥可在配置中填写，也可通过 `XAIM_EVAL_API_KEY` 覆盖。模型请求使用 `router.fastModel` / `router.strongModel`；`model.name`、`temperature`、`maxTokens` 按现有编排器行为处理，不替代路由配置。
+`--config` 使用 XAim 的 `Config` JSON 格式，示例见 `config.example.json`。请填写已安装或服务支持的模型；示例不会自动下载模型。云端密钥可在配置中填写，也可通过 `XAIM_EVAL_API_KEY` 覆盖。运行器复用桌面配置构建函数，实际使用 `model.name`、当前模型 profile 的推理参数和输出/上下文限制；与桌面一样，fast/strong 均使用当前模型。
+
+默认只运行评测侧的最终验证。增加 `--allow-verification` 可授权工具循环中的 `run_verify` 和自动最终检查；这些脚本以当前用户权限运行，不是 OS 沙箱。比较两次实验时必须保持此开关一致。依赖准备发生在评测候选目录；Agent 源码副本仍排除依赖，内部检查在独立验证副本中执行。清单和锁文件未变化时复用已安装的 Node 依赖，变化或缺失时明确报告 unavailable；评测侧原始验收仍独立执行。
+
+任务超时先请求取消，最多给予 10 秒保存宽限时间，再从持久检查点导出诊断与阶段性差异。严格完成率仍将超时计为失败；`candidate_verify_status` 单独记录未完成候选的原始验收结果，不计入完成率。`artifacts/任务ID/` 保存 partial.diff、partial-changes.json 与候选验证日志，JSON 同时包含 checkpoint、diagnostics、事件时间戳及路径。运行报告兼容缺少这些字段的历史 JSON。
+
+评测侧最终验收在应用后的源码副本上重新准备候选依赖，不继承 Agent 基线目录的 node_modules/.venv/构建产物。这样依赖升级不会被预安装旧版本的 dist-info 元数据污染；源码、允许文件范围、测试和版本断言保持原标准。
+
+OpenAI 兼容工具请求诊断按任务/轮次记录各次尝试、HTTP 状态、响应头和正文阶段耗时、总耗时、请求 ID、重试/退避及取消。不会导出 API 地址、密钥、请求正文或私有思考。响应头等待包含网络、排队及模型处理时间，不能直接视为纯网络时延。请求和验证共享任务截止时间，重试尊重 Retry-After（秒或 HTTP 日期），剩余时间不足时停止。
+
+审查评分接受文件冒号行号、中文“第 N 行”和英文 line N；错误行号仍失败。运行 `node --test tests/eval/review-validation.test.mjs` 检查等价格式、错误位置及生成器一致性。
 
 支持 `--output <目录>`、`--bash <Bash路径>`、`--task-timeout <秒>`（默认 1800）、`--verify-timeout <秒>`（默认 600）。API `pub async fn run_eval(tasks_dir: &Path) -> EvalReport` 默认执行 agent 模式；环境变量 `XAIM_EVAL_CONFIG`、`XAIM_EVAL_MODE`、`XAIM_EVAL_OUTPUT`、`EVAL_BASH` 分别设置配置、模式、报告目录和 Bash。
 
-Rust 报告默认位于 `reports/rust/<mode>.json` 和 `reports/rust/<mode>.md`，含成功率、分类结果、每任务阶段、日志、失败原因、耗时、模型调用次数和输入/输出 token。token 从模型响应 `usage` 汇总，包含失败前已完成的模型调用；验证输出不计 token。供应方未返回 usage 时为 0，平均值分母为全部任务数。临时目录在每个任务完成后清理。
+Rust 报告默认位于 `reports/rust/<mode>.json` 和 `reports/rust/<mode>.md`，含成功率、分类结果、每任务阶段、日志、失败原因、耗时、模型调用次数和输入/输出 token。metadata 记录模型、工具协议、预算、超时、检查授权和平台，不记录密钥；可用 `--output` 为每次实验保留独立报告。token 从模型响应 `usage` 汇总，包含失败前已完成的模型调用；验证输出不计 token。供应方未返回 usage 时为 0，平均值分母为全部任务数，不能把缺失 usage 当作实际消耗为零。临时目录在每个任务完成后清理。
+
+每完成一个任务即更新报告，保留中断前已完成任务的日志。`metadata.complete=false` 表示批次尚未完成，`expected_tasks` 是本批任务总数；此时成功率只针对已记录项。完整批次结束后才标记完成。
 
 Windows 默认使用 Git Bash，验证超时时结束其进程 Job（含子进程）；Unix 使用独立进程组。保留每条命令 stdout/stderr 的最后 1 MiB，超时前的输出仍写入失败日志。实际模型候选评估使用 XAim 原有验证命令，因此除 `EVAL_GO` 外，Go 还应可在 `PATH` 中找到。
 

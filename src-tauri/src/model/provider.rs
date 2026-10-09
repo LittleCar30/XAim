@@ -8,6 +8,8 @@ use futures::Stream;
 
 use crate::errors::Result;
 
+pub type RequestObserver<'a> = dyn Fn(serde_json::Value) + Send + Sync + 'a;
+
 #[cfg(test)]
 use crate::errors::XaimError;
 
@@ -40,6 +42,16 @@ pub trait ModelProvider: Send + Sync {
         Err(crate::errors::XaimError::Model(
             "当前端点未实现工具调用".into(),
         ))
+    }
+
+    /// Per-request observation avoids shared-provider diagnostic races.
+    async fn complete_tools_observed(
+        &self,
+        req: ToolRequest,
+        _deadline: Option<std::time::Instant>,
+        _observer: &RequestObserver<'_>,
+    ) -> Result<ToolResponse> {
+        self.complete_tools(req).await
     }
 
     /// 发送补全请求，阻塞至模型输出完毕并返回全文与 token 用量。

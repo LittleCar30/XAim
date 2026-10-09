@@ -49,7 +49,7 @@ pub(super) fn orchestrator_config(state: &AppState) -> Result<OrchestratorConfig
     orchestrator_config_from(app)
 }
 
-pub(crate) fn orchestrator_config_from(
+pub fn orchestrator_config_from(
     app: crate::types::Config,
 ) -> Result<OrchestratorConfig, XaimError> {
     crate::config::model::validate(&app)?;

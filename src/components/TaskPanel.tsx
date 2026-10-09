@@ -36,7 +36,7 @@ export default function TaskPanel() {
   const running = !['waitingConfirm', 'idle', 'done', 'applied', 'failed', 'cancelled', 'rolledBack'].includes(task.status)
   // Coalesce running/done event pairs into one row per stage.
   const stages = [...new Map(steps.filter((step) =>
-    !(['intent', 'plan'].includes(step.stepType) && step.content.trim().startsWith('{')),
+    step.stepType !== 'diagnostic' && !(['intent', 'plan'].includes(step.stepType) && step.content.trim().startsWith('{')),
   ).map((step) => [step.stepType, step])).values()].map((step) => ({
     ...step,
     content: step.content === 'running' && ['failed', 'cancelled'].includes(task.status) ? task.status : step.content,
@@ -65,7 +65,7 @@ export default function TaskPanel() {
       </details>}
       {patches.length > 0 && <section className="message-changes" aria-label="代码变更"><div className="result-heading"><h2>代码变更</h2><span>{new Set(patches.map((patch) => patch.filePath)).size} 个文件</span></div><DiffView patches={patches} compact /></section>}
       {verifies.length > 0 && <div className="verification-summary">{unavailable ? <CircleHelp size={15} className="text-slate-500" /> : <Check size={15} className={passed === verifies.length ? 'text-emerald-400' : 'text-rose-400'} />}<span>验证 · {passed}/{verifies.length} 通过{unavailable ? ` · ${unavailable} 项无法验证` : ''}</span><button onClick={() => useUiStore.setState({ rightPanelOpen: true, previewPath: null, detailTab: 'verify' })}>查看详情<ChevronRight size={14} /></button></div>}
-      {!historical && patches.length > 0 && <ActionBar />}
+      {!historical && patches.length > 0 && !['failed', 'cancelled'].includes(task.status) && <ActionBar />}
       {historical && <p className="historical-note">历史任务 · {new Date(task.createdAt).toLocaleString('zh-CN')}{verifies.length === 0 ? ' · 未保存验证输出' : ''}</p>}
     </article>
   </div></div>

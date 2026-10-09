@@ -113,7 +113,18 @@ impl Harness {
                         return false;
                     };
                     let messages = body["messages"].as_array().unwrap();
-                    let last = messages.last().unwrap();
+                    // Ignore the loop's transient budget notice when matching
+                    // the last actionable message of the tool protocol.
+                    let last = messages
+                        .iter()
+                        .rev()
+                        .find(|message| {
+                            !(message["role"] == "user"
+                                && message["content"]
+                                    .as_str()
+                                    .is_some_and(|text| text.starts_with("程序预算状态：")))
+                        })
+                        .unwrap();
                     body["tools"].is_array()
                         && messages[1]["content"] == PROMPT
                         && match previous {

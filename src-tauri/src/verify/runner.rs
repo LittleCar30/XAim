@@ -125,6 +125,17 @@ pub async fn run_verify(
     if tokens.is_empty() {
         return Err(XaimError::Verify("验证命令为空".into()));
     }
+    if tokens[0] == "node"
+        && tokens
+            .get(1)
+            .is_some_and(|p| p.starts_with("node_modules/"))
+        && !root.join(&tokens[1]).is_file()
+    {
+        return Err(XaimError::Verify(format!(
+            "本地检查工具 {} 未安装，无法验证",
+            tokens[1]
+        )));
+    }
     let timeout = effective_timeout(timeout_sec);
     let program = resolve_program(&tokens[0]);
 
@@ -215,6 +226,24 @@ pub async fn run_verify(
             let stderr = String::from_utf8_lossy(&stderr_bytes);
             let passed = status.success();
             let text = combine_output(&stdout, &stderr);
+            if !passed
+                && tokens.windows(2).any(|p| p == ["-m", "pytest"])
+                && text.contains("No module named pytest")
+            {
+                return Err(XaimError::Verify(
+                    "所选 Python 解释器未安装 pytest，无法验证".into(),
+                ));
+            }
+            if !passed
+                && tokens[0] == "cargo"
+                && tokens.iter().any(|s| s == "--locked")
+                && (text.contains("lock file") || text.contains("lockfile"))
+                && (text.contains("needs to be updated") || text.contains("--locked was passed"))
+            {
+                return Err(XaimError::Verify(
+                    "Cargo.lock 与依赖清单不匹配，需更新锁文件后验证".into(),
+                ));
+            }
             tracing::info!(
                 kind = kind_label,
                 command = cmd,
@@ -381,6 +410,20 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, XaimError::Verify(_)));
         assert!(err.to_string().contains("不存在"));
+    }
+
+    #[tokio::test]
+    async fn missing_local_typescript_is_unavailable_without_launching_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = run_verify(
+            VerifyKind::TypeCheck,
+            "node node_modules/typescript/bin/tsc --noEmit",
+            dir.path(),
+            10,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("未安装"));
     }
 
     #[tokio::test]

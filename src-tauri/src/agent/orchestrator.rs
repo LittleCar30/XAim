@@ -172,7 +172,10 @@ impl Orchestrator {
             allowed_commands: self.config.allowed_commands.clone(),
         };
 
-        let outcome = self.drive(task_id, project_id, &prompt, &root, &ctx).await;
+        let deadline = started + Duration::from_secs(self.config.task_timeout_sec);
+        let outcome = self
+            .drive(task_id, project_id, &prompt, &root, &ctx, deadline)
+            .await;
         match outcome {
             Ok(()) => {
                 tracing::info!(
@@ -336,10 +339,11 @@ impl Orchestrator {
         prompt: &str,
         root: &Path,
         ctx: &ToolContext,
+        deadline: Instant,
     ) -> Result<()> {
         if self.provider.supports_tools() {
             return self
-                .drive_tools(task_id, project_id, prompt, root, ctx)
+                .drive_tools(task_id, project_id, prompt, root, ctx, deadline)
                 .await;
         }
         // Compatibility path also operates entirely in a private snapshot.
@@ -537,6 +541,82 @@ impl Orchestrator {
         )
     }
 
+    fn preserve_partial_changes(&self, task_id: i64, workspace: &TaskWorkspace) -> Result<()> {
+        let record = Recorder {
+            task_id,
+            store: &self.store,
+            sink: self.sink.as_ref(),
+        };
+        let snapshot =
+            store::cache::get_cache(&self.store.conn(), &format!("task:{task_id}:snapshot"))?;
+        if let Some(saved) = snapshot {
+            let mut snapshot: super::task_context::TaskSnapshot = serde_json::from_str(&saved)?;
+            snapshot.phase = "partial".into();
+            snapshot.ready_for_review = false;
+            snapshot.save(workspace, &record)?;
+            if store::cache::get_cache(&self.store.conn(), &format!("task:{task_id}:report"))?
+                .is_none()
+            {
+                let report =
+                    snapshot.save_report(workspace, &record, "执行中断，已保存阶段性成果")?;
+                record.event(XaimEvent::Message {
+                    task_id,
+                    content: report,
+                })?;
+            }
+        }
+        let changes = workspace.changes()?;
+        if changes.files.is_empty() {
+            return Ok(());
+        }
+        let candidates: Vec<PatchCandidate> = changes
+            .files
+            .iter()
+            .map(|file| PatchCandidate {
+                file_path: file.path.clone(),
+                diff: ChangeSet {
+                    files: vec![file.clone()],
+                }
+                .diff(),
+                score: None,
+            })
+            .collect();
+        {
+            let conn = self.store.conn();
+            let tx = conn.unchecked_transaction()?;
+            store::cache::set_cache(
+                &tx,
+                &format!("task:{task_id}:partial_changes"),
+                &serde_json::to_string(&changes)?,
+                None,
+            )?;
+            for candidate in &candidates {
+                store::patch::insert_patch(
+                    &tx,
+                    task_id,
+                    &candidate.file_path,
+                    &candidate.diff,
+                    None,
+                )?;
+            }
+            tx.commit()?;
+        }
+        let record = Recorder {
+            task_id,
+            store: &self.store,
+            sink: self.sink.as_ref(),
+        };
+        record.event(XaimEvent::Message {
+            task_id,
+            content: "已保留阶段性代码变更：任务完成情况尚未确认，检查结果见验证详情，仅供审阅，未应用到项目。"
+                .into(),
+        })?;
+        for candidate in candidates {
+            self.emit_patch(task_id, &candidate)?;
+        }
+        Ok(())
+    }
+
     async fn drive_tools(
         &self,
         task_id: i64,
@@ -544,6 +624,7 @@ impl Orchestrator {
         prompt: &str,
         root: &Path,
         ctx: &ToolContext,
+        deadline: Instant,
     ) -> Result<()> {
         let mut status = TaskStatus::Idle;
         self.run_step(
@@ -584,22 +665,25 @@ impl Orchestrator {
             ..ctx.clone()
         };
         let model = self.routed_model(TaskKind::Generate);
+        let mut loop_config = self.config.tool_loop.clone();
+        loop_config.verification_source = Some(root.into());
+        loop_config.deadline = Some(deadline);
         let result = self
             .run_step(
                 task_id,
                 &mut status,
                 TaskStatus::Generating,
                 "执行工具循环",
-                tool_loop::cancellable(
+                tool_loop::cancellable_until(
                     &self.cancel_flag,
-                    self.config.task_timeout_sec,
+                    deadline,
                     tool_loop::run(
                         prompt,
                         &model,
                         self.provider.as_ref(),
                         &workspace,
                         &isolated_ctx,
-                        &self.config.tool_loop,
+                        &loop_config,
                         self.cancel_flag.clone(),
                         Recorder {
                             task_id,
@@ -609,7 +693,30 @@ impl Orchestrator {
                     ),
                 ),
             )
-            .await?;
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = (Recorder { task_id, store: &self.store, sink: self.sink.as_ref() })
+                    .diagnostic("taskStop", serde_json::json!({"reason":match &error {
+                        XaimError::Timeout(_) => "task_deadline", XaimError::Cancelled => "cancel_requested",
+                        XaimError::Verify(_) => "verification", _ => "execution_error",
+                    }}));
+                if let Err(save_error) = self.preserve_partial_changes(task_id, &workspace) {
+                    tracing::error!(task_id, error = %save_error, "阶段性变更保存失败");
+                    let _ = (Recorder {
+                        task_id,
+                        store: &self.store,
+                        sink: self.sink.as_ref(),
+                    })
+                    .diagnostic(
+                        "partialChangesFailed",
+                        serde_json::json!({"error":save_error.to_string()}),
+                    );
+                }
+                return Err(error);
+            }
+        };
         self.run_step(
             task_id,
             &mut status,
@@ -1672,7 +1779,23 @@ mod tests {
             .unwrap();
         drop(conn);
         let root = tempfile::tempdir().unwrap();
-        let (store, project_id) = setup_project(root.path());
+        let log_database = std::env::var("XAIM_LIVE_LOG_DATABASE")
+            .expect("explicit persistent log database path, separate from desktop database");
+        assert!(
+            !Path::new(&log_database).exists(),
+            "live log database must be a new file"
+        );
+        assert_ne!(
+            std::path::Path::new(&log_database),
+            std::path::Path::new(&std::env::var("XAIM_LIVE_MODEL_DATABASE").unwrap())
+        );
+        let store = Arc::new(Store::new(Path::new(&log_database)).unwrap());
+        let project_id = store::project::insert_project(
+            &store.conn(),
+            root.path().to_str().unwrap(),
+            "live-test",
+        )
+        .unwrap();
         let runtime = crate::commands::task::orchestrator_config_from(config.clone()).unwrap();
         let provider = crate::model::create_provider(&runtime.model).unwrap();
         let sink = Arc::new(CollectSink::default());

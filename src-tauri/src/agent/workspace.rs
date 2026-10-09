@@ -179,6 +179,17 @@ impl TaskWorkspace {
         self.directory.path()
     }
 
+    /// Side-effect attribution also supports binary generated files.
+    pub fn changed_paths(&self) -> Result<Vec<String>> {
+        let current = collect(self.root())?;
+        let paths: BTreeSet<_> = self.baseline.keys().chain(current.keys()).collect();
+        Ok(paths
+            .into_iter()
+            .filter(|path| self.baseline.get(*path) != current.get(*path))
+            .cloned()
+            .collect())
+    }
+
     pub fn changes(&self) -> Result<ChangeSet> {
         let current = collect(self.root())?;
         let paths: BTreeSet<_> = self.baseline.keys().chain(current.keys()).collect();

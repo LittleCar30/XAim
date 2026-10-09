@@ -19,7 +19,9 @@ use tokio::process::Command;
 use xaim_lib::agent::orchestrator::{Orchestrator, OrchestratorConfig};
 use xaim_lib::errors::{Result as XaimResult, XaimError};
 use xaim_lib::events::XaimEvent;
-use xaim_lib::model::provider::{CompletionRequest, CompletionResponse, ModelProvider};
+use xaim_lib::model::provider::{
+    CompletionRequest, CompletionResponse, ModelProvider, ToolRequest, ToolResponse,
+};
 use xaim_lib::repair::r#loop::EventSink;
 use xaim_lib::{model, store, types};
 
@@ -64,6 +66,7 @@ pub struct EvalOptions {
     pub bash: PathBuf,
     pub task_timeout: Duration,
     pub verify_timeout: Duration,
+    pub allow_verification: bool,
 }
 
 impl Default for EvalOptions {
@@ -75,6 +78,7 @@ impl Default for EvalOptions {
             bash: default_bash(),
             task_timeout: Duration::from_secs(1800),
             verify_timeout: Duration::from_secs(600),
+            allow_verification: false,
         }
     }
 }
@@ -117,10 +121,20 @@ pub struct TaskResult {
     pub task_log: String,
     pub verify_log: String,
     pub error: Option<String>,
+    #[serde(default)]
+    pub diagnostics: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub checkpoint: serde_json::Value,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub candidate_verify_status: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EvalReport {
+    #[serde(default)]
+    pub metadata: serde_json::Value,
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
@@ -146,6 +160,7 @@ pub async fn run_eval(tasks_dir: &Path) -> EvalReport {
     match EvalOptions::from_env() {
         Ok(options) => run_eval_with_options(tasks_dir, &options).await,
         Err(error) => EvalReport {
+            metadata: serde_json::Value::Null,
             total: 0,
             passed: 0,
             failed: 0,
@@ -183,6 +198,19 @@ async fn run_with_provider(
     } else {
         Ok(None)
     };
+    let metadata = match &connection {
+        Ok(Some((config, provider))) => serde_json::json!({
+            "provider":provider.name(),"model":config.router.strong_model,
+            "max_turns":config.tool_loop.max_turns,"max_tool_calls":config.tool_loop.max_tool_calls,
+            "max_total_tokens":config.tool_loop.max_total_tokens,"context_tokens":config.tool_loop.context_tokens,
+            "output_tokens":config.tool_loop.output_tokens,"output_ceiling":config.tool_loop.output_ceiling,
+            "allow_verification":options.allow_verification,"supports_tools":provider.supports_tools(),
+            "task_timeout_sec":options.task_timeout.as_secs(),"verify_timeout_sec":options.verify_timeout.as_secs(),
+            "platform":std::env::consts::OS,"version":env!("CARGO_PKG_VERSION"),
+        }),
+        _ => serde_json::json!({"platform":std::env::consts::OS}),
+    };
+    let expected = dirs.len();
     let mut details = Vec::new();
     for dir in dirs {
         let result = run_one(&dir, options, &connection).await;
@@ -194,8 +222,21 @@ async fn run_with_provider(
             result.tokens
         );
         details.push(result);
+        // Preserve completed tasks if the process or chat is interrupted.
+        // Partial rates describe completed tasks only, never the whole suite.
+        let mut partial = summarize(details.clone(), options.mode, errors.clone());
+        partial.metadata = metadata.clone();
+        partial.metadata["expected_tasks"] = expected.into();
+        partial.metadata["complete"] = false.into();
+        if let Err(error) = write_reports(&options.report_dir(tasks_dir), &partial) {
+            errors.push(format!("Write reports: {error}"));
+            break;
+        }
     }
     let mut report = summarize(details, options.mode, errors);
+    report.metadata = metadata;
+    report.metadata["expected_tasks"] = expected.into();
+    report.metadata["complete"] = (report.total == expected && report.errors.is_empty()).into();
     if let Err(error) = write_reports(&options.report_dir(tasks_dir), &report) {
         report.errors.push(format!("Write reports: {error}"));
     }
@@ -228,11 +269,9 @@ fn load_agent(
         config.model.api_key = Some(key);
     }
     xaim_lib::config::model::validate(&config).map_err(|error| error.to_string())?;
-    let config = OrchestratorConfig {
-        model: config.model.into(),
-        router: config.router,
-        ..Default::default()
-    };
+    let mut config = xaim_lib::commands::task::orchestrator_config_from(config)
+        .map_err(|error| error.to_string())?;
+    config.tool_loop.allow_verification = options.allow_verification;
     let provider =
         Arc::from(model::create_provider(&config.model).map_err(|error| error.to_string())?);
     Ok(Some((config, provider)))
@@ -263,6 +302,10 @@ async fn run_one(
         task_log: String::new(),
         verify_log: String::new(),
         error: None,
+        diagnostics: vec![],
+        checkpoint: serde_json::Value::Null,
+        artifacts: vec![],
+        candidate_verify_status: None,
     };
     let outcome = async {
         let task_dir = task_dir.canonicalize().map_err(|error| error.to_string())?;
@@ -323,26 +366,63 @@ async fn run_one(
                     Ok(Some((config, provider))) => {
                         let counted = Arc::new(CountingProvider::new(provider.clone()));
                         let sink = Arc::new(CollectSink::default());
+                        let artifact_dir = options
+                            .report_dir(task_dir.parent().unwrap())
+                            .join("artifacts")
+                            .join(&result.id);
                         let run = run_agent(
                             &repo,
                             &prompt,
                             config.clone(),
                             counted.clone(),
                             sink.clone(),
+                            options.task_timeout,
+                            &artifact_dir,
                         );
-                        let outcome = tokio::time::timeout(options.task_timeout, run).await;
+                        let outcome = run.await;
                         result.input_tokens = counted.input.load(Ordering::Relaxed);
                         result.output_tokens = counted.output.load(Ordering::Relaxed);
                         result.tokens = result.input_tokens.saturating_add(result.output_tokens);
                         result.model_calls = counted.calls.load(Ordering::Relaxed);
                         result.task_log.push_str(&sink.0.lock().unwrap().join("\n"));
                         let error = match outcome {
-                            Ok(Ok(())) => None,
-                            Ok(Err(error)) => Some(error.to_string()),
-                            Err(_) => Some(format!(
-                                "Task timed out after {} seconds",
-                                options.task_timeout.as_secs()
-                            )),
+                            Ok(evidence) => {
+                                result.diagnostics = evidence.diagnostics;
+                                result.checkpoint = evidence.checkpoint;
+                                result.artifacts = evidence.artifacts;
+                                if let Some(changes) = evidence.partial {
+                                    // Score partial quality separately; never apply it to
+                                    // the strict completion repo or change passed=true.
+                                    let candidate = temp.path().join("partial-candidate");
+                                    copy_tree(&repo, &candidate).map_err(|e| e.to_string())?;
+                                    changes
+                                        .apply(&candidate, false)
+                                        .map_err(|e| e.to_string())?;
+                                    let mut command = Command::new(&options.bash);
+                                    command
+                                        .arg(bash_path(&task_dir.join("verify.sh")))
+                                        .arg(bash_path(&candidate));
+                                    let verified =
+                                        execute(command, &candidate, options.verify_timeout).await;
+                                    result.candidate_verify_status = Some(
+                                        if verified.success { "passed" } else { "failed" }.into(),
+                                    );
+                                    fs::write(
+                                        evidence.artifact_dir.join("candidate-verification.log"),
+                                        verified.log,
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                                    result.artifacts.push(
+                                        evidence
+                                            .artifact_dir
+                                            .join("candidate-verification.log")
+                                            .to_string_lossy()
+                                            .into(),
+                                    );
+                                }
+                                evidence.error
+                            }
+                            Err(error) => Some(error.to_string()),
                         };
                         result.task_status =
                             if error.is_none() { "passed" } else { "failed" }.into();
@@ -353,11 +433,16 @@ async fn run_one(
             }
         };
         // Verification is independent of the agent outcome, so both failures remain visible.
+        // Seed dependencies belong to the Agent's baseline environment. Do not
+        // carry v1 dist-info/venv contents into final dependency-upgrade checks;
+        // the trusted verifier prepares dependencies for the candidate itself.
+        let verification_repo = temp.path().join("verification-candidate");
+        copy_tree(&repo, &verification_repo).map_err(|e| e.to_string())?;
         let mut command = Command::new(&options.bash);
         command
             .arg(bash_path(&task_dir.join("verify.sh")))
-            .arg(bash_path(&repo));
-        let verified = execute(command, &repo, options.verify_timeout).await;
+            .arg(bash_path(&verification_repo));
+        let verified = execute(command, &verification_repo, options.verify_timeout).await;
         result.verify_status = if verified.success { "passed" } else { "failed" }.into();
         result.verify_log = verified.log;
         result.passed = task_error.is_none() && verified.success;
@@ -378,17 +463,104 @@ async fn run_one(
 async fn run_agent(
     repo: &Path,
     prompt: &str,
-    config: OrchestratorConfig,
+    mut config: OrchestratorConfig,
     provider: Arc<dyn ModelProvider>,
     sink: Arc<dyn EventSink>,
-) -> XaimResult<()> {
+    limit: Duration,
+    artifact_dir: &Path,
+) -> XaimResult<AgentEvidence> {
     let store = Arc::new(store::Store::open_in_memory()?);
     let project_id =
         store::project::insert_project(&store.conn(), &repo.to_string_lossy(), "eval")?;
     xaim_lib::git::ops::commit(repo, "Evaluation baseline")?;
-    let orchestrator = Orchestrator::with_sink(store, config, sink, provider);
-    let task_id = orchestrator.run_task(project_id, prompt.into()).await?;
-    orchestrator.confirm_task(task_id).await
+    config.task_timeout_sec = config.task_timeout_sec.min(limit.as_secs().max(1));
+    let orchestrator = Orchestrator::with_sink(store.clone(), config, sink, provider);
+    let error = {
+        let run = async {
+            let task_id = orchestrator.run_task(project_id, prompt.into()).await?;
+            orchestrator.confirm_task(task_id).await
+        };
+        tokio::pin!(run);
+        match tokio::time::timeout(limit, &mut run).await {
+            Ok(result) => result.err().map(|e| e.to_string()),
+            Err(_) => {
+                if let Some(task_id) = orchestrator.current_task_id() {
+                    store::task::insert_step(&store.conn(), task_id, "diagnostic", &serde_json::json!({
+                        "kind":"evalCancellation","data":{"reason":"task_deadline","limitMs":limit.as_millis()}
+                    }).to_string())?;
+                }
+                orchestrator.cancel().await;
+                // Let the normal error path capture workspace changes before
+                // the future/workspace is dropped. Durable per-write cache is
+                // the fallback if the grace period itself expires.
+                let _ = tokio::time::timeout(Duration::from_secs(10), &mut run).await;
+                Some(format!(
+                    "Task timed out after {} seconds",
+                    limit.as_secs_f64()
+                ))
+            }
+        }
+    };
+    let mut evidence = AgentEvidence {
+        error,
+        diagnostics: vec![],
+        checkpoint: serde_json::Value::Null,
+        partial: None,
+        artifacts: vec![],
+        artifact_dir: artifact_dir.into(),
+    };
+    if let Some(task_id) = orchestrator.current_task_id() {
+        let conn = store.conn();
+        for step in store::task::list_steps(&conn, task_id)? {
+            if step.step_type == "diagnostic" {
+                if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&step.content) {
+                    // Export timing/config only; gateway addresses aren't needed.
+                    if let Some(parameters) = value["data"]["parameters"].as_object_mut() {
+                        parameters.remove("endpoint");
+                    }
+                    value["createdAt"] = step.created_at.into();
+                    evidence.diagnostics.push(value);
+                }
+            }
+        }
+        if let Some(snapshot) = store::cache::get_cache(&conn, &format!("task:{task_id}:snapshot"))?
+        {
+            evidence.checkpoint = serde_json::from_str(&snapshot)?;
+        }
+        if evidence.error.is_some() {
+            if let Some(changes) =
+                store::cache::get_cache(&conn, &format!("task:{task_id}:partial_changes"))?
+            {
+                let changes: xaim_lib::agent::workspace::ChangeSet =
+                    serde_json::from_str(&changes)?;
+                if !changes.files.is_empty() {
+                    fs::create_dir_all(artifact_dir)?;
+                    for (name, contents) in [
+                        (
+                            "partial-changes.json",
+                            serde_json::to_string_pretty(&changes)?,
+                        ),
+                        ("partial.diff", changes.diff()),
+                    ] {
+                        let path = artifact_dir.join(name);
+                        fs::write(&path, contents)?;
+                        evidence.artifacts.push(path.to_string_lossy().into());
+                    }
+                    evidence.partial = Some(changes);
+                }
+            }
+        }
+    }
+    Ok(evidence)
+}
+
+struct AgentEvidence {
+    error: Option<String>,
+    diagnostics: Vec<serde_json::Value>,
+    checkpoint: serde_json::Value,
+    partial: Option<xaim_lib::agent::workspace::ChangeSet>,
+    artifacts: Vec<String>,
+    artifact_dir: PathBuf,
 }
 
 struct CountingProvider {
@@ -410,6 +582,41 @@ impl CountingProvider {
 
 #[async_trait]
 impl ModelProvider for CountingProvider {
+    fn supports_tools(&self) -> bool {
+        self.inner.supports_tools()
+    }
+    fn supports_checkpoint_context(&self) -> bool {
+        self.inner.supports_checkpoint_context()
+    }
+    fn tool_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
+        self.inner.tool_request_metadata(req)
+    }
+    async fn complete_tools(&self, req: ToolRequest) -> XaimResult<ToolResponse> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let response = self.inner.complete_tools(req).await?;
+        self.input
+            .fetch_add(u64::from(response.usage.input_tokens), Ordering::Relaxed);
+        self.output
+            .fetch_add(u64::from(response.usage.output_tokens), Ordering::Relaxed);
+        Ok(response)
+    }
+    async fn complete_tools_observed(
+        &self,
+        req: ToolRequest,
+        deadline: Option<Instant>,
+        observer: &xaim_lib::model::provider::RequestObserver<'_>,
+    ) -> XaimResult<ToolResponse> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let response = self
+            .inner
+            .complete_tools_observed(req, deadline, observer)
+            .await?;
+        self.input
+            .fetch_add(u64::from(response.usage.input_tokens), Ordering::Relaxed);
+        self.output
+            .fetch_add(u64::from(response.usage.output_tokens), Ordering::Relaxed);
+        Ok(response)
+    }
     async fn complete(&self, req: CompletionRequest) -> XaimResult<CompletionResponse> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let response = self.inner.complete(req).await?;
@@ -439,7 +646,9 @@ impl ModelProvider for CountingProvider {
 struct CollectSink(Mutex<Vec<String>>);
 impl EventSink for CollectSink {
     fn emit(&self, event: XaimEvent) -> XaimResult<()> {
-        self.0.lock().unwrap().push(serde_json::to_string(&event)?);
+        let mut value = serde_json::to_value(&event)?;
+        value["recordedAt"] = xaim_lib::utils::now_ms().into();
+        self.0.lock().unwrap().push(value.to_string());
         Ok(())
     }
 }
@@ -656,6 +865,7 @@ fn summarize(details: Vec<TaskResult>, mode: EvalMode, errors: Vec<String>) -> E
         }
     };
     EvalReport {
+        metadata: serde_json::Value::Null,
         total,
         passed,
         failed: total - passed,
@@ -684,6 +894,9 @@ fn cell(value: &str) -> String {
 
 fn markdown_report(report: &EvalReport) -> String {
     let mut text = format!("# XAim 评测报告\n\n模式：{}\n\n| 指标 | 值 |\n| --- | ---: |\n| 总任务 | {} |\n| 通过 | {} |\n| 失败 | {} |\n| 成功率 | {:.2}% |\n| 平均耗时（ms） | {} |\n| 平均 token | {} |\n\ntoken 为模型响应 usage 的输入与输出之和；未返回 usage 时为 0。平均值包含全部任务。reference/baseline 不调用模型，不能作为 XAim 准确率。\n", report.mode, report.total, report.passed, report.failed, report.success_rate() * 100.0, report.avg_duration_ms, report.avg_tokens);
+    if report.metadata["complete"] == false {
+        text.push_str(&format!("\n**批次未完成：已记录 {} / {} 项。上述成功率仅针对已完成项，不能作为完整评测集成功率。**\n", report.total, report.metadata["expected_tasks"]));
+    }
     if !report.errors.is_empty() {
         text.push_str("\n## 运行错误\n\n");
         for error in &report.errors {
@@ -714,6 +927,26 @@ fn markdown_report(report: &EvalReport) -> String {
             cell(task.error.as_deref().unwrap_or(""))
         ));
     }
+    let partials: Vec<_> = report
+        .details
+        .iter()
+        .filter(|t| t.candidate_verify_status.is_some())
+        .collect();
+    if !partials.is_empty() {
+        text.push_str("\n## 阶段性候选（不计入完成率）\n\n| 任务 | 候选验证 | 保存文件 |\n| --- | --- | --- |\n");
+        for task in partials {
+            text.push_str(&format!(
+                "| {} | {} | {} |\n",
+                cell(&task.id),
+                task.candidate_verify_status.as_deref().unwrap_or("not-run"),
+                cell(&task.artifacts.join(", "))
+            ));
+        }
+    }
+    text.push_str(&format!(
+        "\n## 运行参数（不含凭据）\n\n```json\n{}\n```\n",
+        serde_json::to_string_pretty(&report.metadata).unwrap_or_default()
+    ));
     text.push_str("\n## 失败日志\n");
     for task in report.details.iter().filter(|task| !task.passed) {
         text.push_str(&format!(

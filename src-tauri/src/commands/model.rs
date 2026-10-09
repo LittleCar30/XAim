@@ -41,10 +41,17 @@ pub async fn set_model_config(
 pub async fn test_model_connection(
     config: ModelConfig,
     reasoning_effort: Option<String>,
+    thinking: Option<bool>,
+    supports_reasoning: Option<bool>,
 ) -> Result<bool, String> {
-    test_connection_with_effort(config, reasoning_effort)
-        .await
-        .map_err(String::from)
+    test_connection_with_options(
+        config,
+        reasoning_effort,
+        thinking,
+        supports_reasoning.unwrap_or(false),
+    )
+    .await
+    .map_err(String::from)
 }
 
 /// 列出某 provider 的建议模型名（配置界面的候选清单，非完整枚举）。
@@ -68,7 +75,7 @@ pub async fn list_providers() -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// `set_model_config` 的实现：校验后仅替换配置中的模型部分，路由保持不变。
+/// 保存当前模型，并同步对应 profile 和任务路由。
 async fn set_model(state: &AppState, model: ModelConfig) -> Result<(), XaimError> {
     let mut app = config::model::load(&state.store);
     app.model = model;
@@ -78,11 +85,24 @@ async fn set_model(state: &AppState, model: ModelConfig) -> Result<(), XaimError
         .find(|p| Some(&p.id) == app.active_model_id.as_ref())
     {
         profile.config = app.model.clone();
-        if app.model.provider != "openai" {
+        let efforts = model::capabilities::reasoning_efforts(&app.model.provider, &app.model.name);
+        if !matches!(app.model.provider.as_str(), "openai" | "newapi") {
             profile.supports_reasoning = false;
+        }
+        if profile.reasoning_effort.as_ref().is_some_and(|v| {
+            !efforts.contains(&v.as_str())
+                || (matches!(app.model.provider.as_str(), "openai" | "newapi")
+                    && !profile.supports_reasoning)
+        }) {
             profile.reasoning_effort = None;
         }
+        if !model::capabilities::supports_thinking_toggle(&app.model.provider, &app.model.name) {
+            profile.thinking = None;
+        }
     }
+    app.router.fast_model = app.model.name.clone();
+    app.router.strong_model = app.model.name.clone();
+    app.router.overrides.clear();
     config::model::validate(&app)?;
     config::model::save(&state.store, &app)
 }
@@ -93,22 +113,54 @@ async fn test_connection(config: ModelConfig) -> Result<bool, XaimError> {
     test_connection_with_effort(config, None).await
 }
 
+#[cfg(test)]
 async fn test_connection_with_effort(
     config: ModelConfig,
     effort: Option<String>,
 ) -> Result<bool, XaimError> {
+    test_connection_with_options(config, effort, None, false).await
+}
+
+async fn test_connection_with_options(
+    config: ModelConfig,
+    effort: Option<String>,
+    thinking: Option<bool>,
+    supports_reasoning: bool,
+) -> Result<bool, XaimError> {
+    config::model::validate_sampling(&config)?;
+    if supports_reasoning && !matches!(config.provider.as_str(), "openai" | "newapi") {
+        return Err(XaimError::Config(
+            "此提供方不支持 OpenAI 思考强度配置".into(),
+        ));
+    }
     if let Some(value) = &effort {
-        if config.provider != "openai" || !["low", "medium", "high"].contains(&value.as_str()) {
+        if !model::capabilities::reasoning_efforts(&config.provider, &config.name)
+            .contains(&value.as_str())
+            || thinking == Some(false)
+        {
             return Err(XaimError::Config("无效的思考强度".into()));
         }
     }
+    if thinking.is_some()
+        && !model::capabilities::supports_thinking_toggle(&config.provider, &config.name)
+    {
+        return Err(XaimError::Config("此模型尚未适配思考开关".into()));
+    }
     let mut connection = config::model::ModelConfig::from(config.clone());
     connection.reasoning_effort = effort.clone();
-    connection.reasoning_model = effort.is_some();
+    connection.reasoning_model = supports_reasoning || effort.is_some();
+    connection.thinking = thinking;
     let provider = model::create_provider(&connection)?;
 
     let mut request = CompletionRequest::new(config.name, vec![Message::user("ping")]);
-    request.max_tokens = if effort.is_some() { 1024 } else { 8 };
+    request.max_tokens = if connection.reasoning_model
+        || thinking == Some(true)
+        || matches!(connection.provider.as_str(), "deepseek" | "qwen")
+    {
+        1024
+    } else {
+        8
+    };
     match tokio::time::timeout(TEST_TIMEOUT, provider.complete(request)).await {
         Ok(Ok(_)) => Ok(true),
         Ok(Err(err)) => {
@@ -130,6 +182,8 @@ fn catalog(provider: &str) -> Option<Vec<String>> {
         "qwen" => &["qwen-max", "qwen-plus", "qwen-turbo"],
         "ollama" => &["qwen2.5-coder", "deepseek-r1", "llama3.1", "codellama"],
         "anthropic" => &["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
+        // NewAPI model names are deployment-specific; these are only suggestions.
+        "newapi" => &["deepseek-chat", "gpt-4o", "claude-sonnet-4-5"],
         _ => return None,
     };
     Some(models.iter().map(|name| name.to_string()).collect())
@@ -157,6 +211,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn connection_probe_preserves_default_reasoning_and_saved_temperature() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server.mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::Json(json!({"model":"custom-reasoner","messages":[{"role":"user","content":"ping"}],"max_completion_tokens":1024,"stream":false})))
+            .with_status(200).with_body(r#"{"choices":[{"finish_reason":"stop","message":{"content":"pong"}}]}"#)
+            .create_async().await;
+        let mut config = mock_config(&server.url(), "test-key");
+        config.provider = "openai".into();
+        config.name = "custom-reasoner".into();
+        config.max_tokens = Some(65_536);
+        assert!(test_connection_with_options(config, None, None, true)
+            .await
+            .unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_model_save_preserves_gateway_reasoning_and_updates_profile() {
+        let state = test_state();
+        let gateway = ModelConfig {
+            provider: "newapi".into(),
+            name: "reasoner".into(),
+            base_url: Some("https://example.test/v1".into()),
+            ..ModelConfig::default()
+        };
+        let mut app = crate::types::Config {
+            model: gateway.clone(),
+            active_model_id: Some("gateway".into()),
+            ..Default::default()
+        };
+        app.model_profiles.push(crate::types::ModelProfile {
+            id: "gateway".into(),
+            label: "Gateway".into(),
+            config: gateway.clone(),
+            supports_reasoning: true,
+            reasoning_effort: Some("high".into()),
+            thinking: None,
+        });
+        config::model::save(&state.store, &app).unwrap();
+        let edited = ModelConfig {
+            temperature: 0.25,
+            ..gateway
+        };
+        set_model(&state, edited.clone()).await.unwrap();
+        let saved = config::model::load(&state.store);
+        assert_eq!(saved.model, edited);
+        assert_eq!(saved.model_profiles[0].config, edited);
+        assert!(saved.model_profiles[0].supports_reasoning);
+        assert_eq!(
+            saved.model_profiles[0].reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(saved.router.fast_model, "reasoner");
+    }
+
     /// 直接读存储（绕过命令包装便于断言）。
     async fn current_model(state: &AppState) -> ModelConfig {
         config::model::load(&state.store).model
@@ -177,9 +287,10 @@ mod tests {
         set_model(&state, model.clone()).await.unwrap();
         assert_eq!(current_model(&state).await, model);
 
-        // 路由部分保持默认不变。
+        // 所有执行阶段都使用当前所选模型。
         let app = config::model::load(&state.store);
-        assert_eq!(app.router, crate::model::router::RouterConfig::default());
+        assert_eq!(app.router.fast_model, "gpt-4o");
+        assert_eq!(app.router.strong_model, "gpt-4o");
     }
 
     #[tokio::test]

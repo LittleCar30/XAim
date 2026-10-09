@@ -15,7 +15,14 @@ use crate::config::model::ModelConfig;
 use crate::errors::{Result, XaimError};
 
 /// 工厂支持的 provider 标识，同时用于错误提示。
-pub const SUPPORTED_PROVIDERS: [&str; 5] = ["openai", "deepseek", "qwen", "ollama", "anthropic"];
+pub const SUPPORTED_PROVIDERS: [&str; 6] = [
+    "openai",
+    "deepseek",
+    "qwen",
+    "ollama",
+    "anthropic",
+    "newapi",
+];
 
 /// 各 provider 的默认 API 地址。
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -40,21 +47,39 @@ pub fn create_provider(config: &ModelConfig) -> Result<Box<dyn ModelProvider>> {
             OpenAiProvider::new(base_url, require_api_key(config)?)
                 .with_reasoning_effort(config.reasoning_effort.clone())
                 .with_reasoning_model(config.reasoning_model)
-                .with_output_limit(config.max_tokens),
+                .with_output_limit(config.max_tokens)
+                .with_temperature(config.temperature),
         )),
         "deepseek" => Ok(Box::new(
             OpenAiProvider::new(base_url, require_api_key(config)?)
                 .with_deepseek_defaults()
-                .with_output_limit(config.max_tokens),
+                .with_reasoning_effort(config.reasoning_effort.clone())
+                .with_thinking(config.thinking)
+                .with_output_limit(config.max_tokens)
+                .with_temperature(config.temperature),
         )),
-        "qwen" => Ok(Box::new(OpenAiProvider::new(
-            base_url,
-            require_api_key(config)?,
-        ))),
-        "ollama" => Ok(Box::new(OpenAiProvider::new(
-            base_url,
-            ollama_api_key(config),
-        ))),
+        "qwen" => Ok(Box::new(
+            OpenAiProvider::new(base_url, require_api_key(config)?)
+                .with_qwen_defaults()
+                .with_thinking(config.thinking)
+                .with_output_limit(config.max_tokens)
+                .with_temperature(config.temperature),
+        )),
+        "ollama" => Ok(Box::new(
+            OpenAiProvider::new(base_url, ollama_api_key(config))
+                .with_provider_name("ollama")
+                .with_output_limit(config.max_tokens)
+                .with_temperature(config.temperature),
+        )),
+        // NewAPI is a user-hosted OpenAI-compatible gateway.
+        "newapi" => Ok(Box::new(
+            OpenAiProvider::new(base_url, require_api_key(config)?)
+                .with_provider_name("newapi")
+                .with_reasoning_effort(config.reasoning_effort.clone())
+                .with_reasoning_model(config.reasoning_model)
+                .with_output_limit(config.max_tokens)
+                .with_temperature(config.temperature),
+        )),
         "anthropic" => Ok(Box::new(AnthropicProvider::new(
             base_url,
             require_api_key(config)?,
@@ -67,6 +92,11 @@ pub fn create_provider(config: &ModelConfig) -> Result<Box<dyn ModelProvider>> {
 fn resolve_base_url(config: &ModelConfig) -> Result<String> {
     if let Some(url) = &config.base_url {
         return Ok(url.clone());
+    }
+    if config.provider == "newapi" {
+        return Err(XaimError::Config(
+            "provider 'newapi' 必须配置 Base URL，例如 https://your-host/v1".into(),
+        ));
     }
     default_base_url(&config.provider)
         .map(str::to_string)
@@ -81,6 +111,8 @@ fn default_base_url(provider: &str) -> Option<&'static str> {
         "qwen" => Some(QWEN_BASE_URL),
         "ollama" => Some(OLLAMA_BASE_URL),
         "anthropic" => Some(ANTHROPIC_BASE_URL),
+        // NewAPI deployments are user-hosted; a base URL is required.
+        "newapi" => None,
         _ => None,
     }
 }
@@ -123,7 +155,9 @@ mod tests {
             base_url: None,
             reasoning_effort: None,
             reasoning_model: false,
+            thinking: None,
             max_tokens: None,
+            temperature: None,
         }
     }
 
@@ -166,12 +200,11 @@ mod tests {
     fn creates_each_supported_provider() {
         for name in ["openai", "deepseek", "qwen", "anthropic"] {
             let provider = create_provider(&model_config(name, "sk-test")).unwrap();
-            let expected = if name == "anthropic" { name } else { "openai" };
-            assert_eq!(provider.name(), expected, "{name} 创建后标识不符");
+            assert_eq!(provider.name(), name, "{name} 创建后标识不符");
         }
         // Ollama 无需 api key
         let provider = create_provider(&model_config("ollama", "")).unwrap();
-        assert_eq!(provider.name(), "openai");
+        assert_eq!(provider.name(), "ollama");
     }
 
     #[test]
@@ -186,6 +219,45 @@ mod tests {
                 "{name} 的错误信息不清晰: {msg}"
             );
         }
+        let mut config = model_config("newapi", "   ");
+        config.base_url = Some("https://example.test/v1".into());
+        let msg = create_provider(&config)
+            .err()
+            .expect("NewAPI 缺少 api key 应返回错误")
+            .to_string();
+        assert!(msg.contains("api key") && msg.contains("newapi"), "{msg}");
+    }
+
+    #[test]
+    fn newapi_requires_a_custom_base_url() {
+        let err = create_provider(&model_config("newapi", "sk-test"))
+            .err()
+            .expect("NewAPI 没有地址时不能创建 provider");
+        assert!(err.to_string().contains("Base URL"));
+        let mut config = model_config("newapi", "Bearer sk-test");
+        config.base_url = Some("https://example.test/newapi/v1".into());
+        assert_eq!(create_provider(&config).unwrap().name(), "newapi");
+    }
+
+    #[test]
+    fn newapi_passes_explicit_reasoning_options_and_dynamic_output_budget() {
+        let mut config = model_config("newapi", "test-key");
+        config.base_url = Some("https://example.test/v1".into());
+        config.max_tokens = Some(128_000);
+        config.reasoning_model = true;
+        config.reasoning_effort = Some("low".into());
+        let provider = create_provider(&config).unwrap();
+        let request = provider::ToolRequest {
+            model: "custom-model-id".into(),
+            messages: vec![provider::ToolMessage::text("user", "Create HTML")],
+            tools: vec![],
+            max_tokens: 8192,
+        };
+        let metadata = provider.tool_request_metadata(&request);
+        assert_eq!(metadata["reasoningEffort"], "low");
+        assert_eq!(metadata["maxCompletionTokens"], 8192);
+        assert!(metadata["maxTokens"].is_null());
+        assert!(metadata["temperature"].is_null());
     }
 
     #[test]

@@ -7,6 +7,7 @@ import type { Project, Task, TaskStep, Patch, FileNode, ModelConfig, Config } fr
  * 的 #[tauri::command] 一一对应。
  */
 export const ipc = {
+  pickProjectFolder: () => invoke<string | null>('pick_project_folder'),
   openProject: (path: string) => invoke<Project>('open_project', { path }),
   closeProject: () => invoke<void>('close_project'),
   listProjects: () => invoke<Project[]>('list_projects'),
@@ -27,8 +28,8 @@ export const ipc = {
 
   getModelConfig: () => invoke<ModelConfig>('get_model_config'),
   setModelConfig: (config: ModelConfig) => invoke<void>('set_model_config', { config }),
-  testModelConnection: (config: ModelConfig, reasoningEffort?: string) =>
-    invoke<boolean>('test_model_connection', { config, ...(reasoningEffort ? { reasoningEffort } : {}) }),
+  testModelConnection: (config: ModelConfig, reasoningEffort?: string, thinking?: boolean, supportsReasoning?: boolean) =>
+    invoke<boolean>('test_model_connection', { config, ...(reasoningEffort ? { reasoningEffort } : {}), ...(thinking !== undefined ? { thinking } : {}), ...(supportsReasoning !== undefined ? { supportsReasoning } : {}) }),
   listModels: (provider: string) => invoke<string[]>('list_models', { provider }),
   /** 列出受支持的模型提供方标识（后端 list_providers）。 */
   listProviders: () => invoke<string[]>('list_providers'),

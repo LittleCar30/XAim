@@ -117,6 +117,16 @@ describe('useConfigStore', () => {
   })
 
   describe('loadModelConfig', () => {
+    it('does not let an old model-only read overwrite a saved model', async () => {
+      let finishRead!: (value: ModelConfig) => void
+      mockedIpc.getModelConfig.mockImplementation(() => new Promise((resolve) => { finishRead = resolve }))
+      const pending = useConfigStore.getState().loadModelConfig()
+      mockedIpc.setModelConfig.mockResolvedValue(undefined)
+      await useConfigStore.getState().saveModelConfig(strongModel)
+      finishRead(modelConfig)
+      await pending
+      expect(useConfigStore.getState().modelConfig).toEqual(strongModel)
+    })
     it('does not overwrite a newer selected model when an older read finishes', async () => {
       let finishRead!: (value: ModelConfig) => void
       mockedIpc.getModelConfig.mockImplementation(() => new Promise((resolve) => { finishRead = resolve }))
@@ -141,11 +151,12 @@ describe('useConfigStore', () => {
   describe('saveModelConfig', () => {
     it('persists and syncs modelConfig plus loaded config.model', async () => {
       useConfigStore.setState({ config })
-      mockedIpc.setModelConfig.mockResolvedValue(undefined)
+      mockedIpc.setConfig.mockResolvedValue(undefined)
 
       await useConfigStore.getState().saveModelConfig(strongModel)
 
-      expect(mockedIpc.setModelConfig).toHaveBeenCalledWith(strongModel)
+      expect(mockedIpc.setConfig).toHaveBeenCalledWith(expect.objectContaining({ model: strongModel,
+        activeModelId: 'legacy-model', router: { fastModel: strongModel.name, strongModel: strongModel.name } }))
       const state = useConfigStore.getState()
       expect(state.modelConfig).toEqual(strongModel)
       expect(state.config?.model).toEqual(strongModel)
@@ -226,4 +237,46 @@ describe('useConfigStore', () => {
     expect(useConfigStore.getState().config?.modelProfiles).toHaveLength(1)
     expect(useConfigStore.getState().config?.activeModelId).toBe('legacy-model')
   })
+  it('preserves NewAPI reasoning and synchronizes the active profile after a Settings save', async () => {
+    const gateway = { ...profiles[1], config: { ...profiles[1].config, provider: 'newapi' } }
+    const previous = { ...config, model: gateway.config, modelProfiles: [profiles[0], gateway], activeModelId: gateway.id }
+    useConfigStore.setState({ config: previous })
+    mockedIpc.setConfig.mockResolvedValue(undefined)
+    const edited = { ...gateway.config, temperature: 0.3, maxTokens: null }
+    await useConfigStore.getState().saveModelConfig(edited)
+    const saved = useConfigStore.getState().config!
+    expect(saved.modelProfiles![1]).toEqual({ ...gateway, config: edited, thinking: null })
+    expect(saved.model).toEqual(edited)
+    expect(useConfigStore.getState().modelConfig).toEqual(edited)
+    mockedIpc.getConfig.mockResolvedValue(saved)
+    await useConfigStore.getState().loadConfig()
+    expect(useConfigStore.getState().config).toEqual(saved)
+    await useConfigStore.getState().testConnection(edited, undefined, null, true)
+    expect(mockedIpc.testModelConnection).toHaveBeenCalledWith(edited, undefined, undefined, true)
+  })
+
+  it('preserves supported DeepSeek effort and clears options on an incompatible model switch', async () => {
+    const deepseek = { ...profiles[0], config: { ...modelConfig, provider: 'deepseek', name: 'deepseek-flash' }, thinking: true, reasoningEffort: 'high' as const }
+    useConfigStore.setState({ config: { ...config, model: deepseek.config, modelProfiles: [deepseek], activeModelId: deepseek.id } })
+    mockedIpc.setConfig.mockResolvedValue(undefined)
+    await useConfigStore.getState().saveModelConfig({ ...deepseek.config, temperature: 0.6 })
+    expect(useConfigStore.getState().config?.modelProfiles![0]).toMatchObject({ thinking: true, reasoningEffort: 'high' })
+    await useConfigStore.getState().saveModelConfig({ ...deepseek.config, name: 'deepseek-chat' })
+    expect(useConfigStore.getState().config?.modelProfiles![0]).toMatchObject({ thinking: null, reasoningEffort: null })
+  })
+
+  it('does not let an old full-config read overwrite a saved selection', async () => {
+    let finishRead!: (value: Config) => void
+    mockedIpc.getConfig.mockImplementation(() => new Promise((resolve) => { finishRead = resolve }))
+    useConfigStore.setState({ config })
+    const pending = useConfigStore.getState().loadConfig()
+    mockedIpc.setConfig.mockResolvedValue(undefined)
+    await useConfigStore.getState().saveModelConfig(strongModel)
+    expect(useConfigStore.getState().loading).toBe(true)
+    finishRead(config)
+    await pending
+    expect(useConfigStore.getState().config?.model).toEqual(strongModel)
+    expect(useConfigStore.getState().loading).toBe(false)
+  })
+
 })

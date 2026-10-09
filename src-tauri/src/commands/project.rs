@@ -9,7 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::mpsc;
 
 use crate::errors::XaimError;
@@ -18,6 +19,29 @@ use crate::index::{scanner, watcher};
 use crate::state::AppState;
 use crate::store::{project, Store};
 use crate::types::{FileNode, Project};
+
+/// 选择单个本地项目文件夹；取消返回 None，不改变当前项目。
+#[tauri::command]
+pub async fn pick_project_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("选择项目文件夹")
+        .pick_folder(move |folder| {
+            let _ = sender.send(folder);
+        });
+    let folder = receiver
+        .await
+        .map_err(|_| "文件夹选择器已关闭".to_string())?;
+    folder
+        .map(|folder| {
+            let path = folder.into_path().map_err(|error| error.to_string())?;
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "文件夹路径包含无法识别的字符".to_string())
+        })
+        .transpose()
+}
 
 /// 打开（或初始化）项目，返回项目元信息。
 ///

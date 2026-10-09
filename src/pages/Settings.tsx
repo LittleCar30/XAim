@@ -5,8 +5,11 @@ import { toMessage } from '@/lib/task-format'
 import { ipc } from '@/services/ipc'
 import { useConfigStore } from '@/stores/config'
 import { useThemeStore } from '@/stores/theme'
-import type { ModelConfig } from '@/types'
+import { activeProfile, DEFAULT_MODEL_CONFIG, updateModelProfile } from '@/lib/model-profiles'
+import type { ModelOptions } from '@/lib/model-profiles'
+import type { ModelConfig, ModelProfile } from '@/types'
 import ModelManager from '@/components/ModelManager'
+import ModelParameters from '@/components/ModelParameters'
 
 export interface SettingsProps {
   /** 返回工作区（由路由层提供）。 */
@@ -34,9 +37,9 @@ interface SettingsForm {
 }
 
 const DEFAULT_FORM: SettingsForm = {
-  model: { provider: 'deepseek', name: 'deepseek-chat', apiKey: '', baseUrl: '', temperature: '0.7', maxTokens: '' },
+  model: { provider: DEFAULT_MODEL_CONFIG.provider, name: DEFAULT_MODEL_CONFIG.name, apiKey: '', baseUrl: '', temperature: String(DEFAULT_MODEL_CONFIG.temperature), maxTokens: '' },
   index: { ignoreDirs: 'node_modules\ntarget\ndist', maxFiles: '50000' },
-  verify: { enabled: true, command: '' },
+  verify: { enabled: false, command: '' },
   repair: { maxRounds: '2', timeoutSec: '60' },
   safety: { whitelist: '', confirmPolicy: 'always' },
   ui: { theme: 'light', language: 'zh-CN' },
@@ -78,11 +81,14 @@ function validate(form: SettingsForm): Record<string, string> {
   if (form.model.provider !== 'ollama' && !form.model.apiKey.trim()) {
     errors['model.apiKey'] = '云端提供方需要填写 API Key（Ollama 可留空）'
   }
+  if (form.model.provider === 'newapi' && !form.model.baseUrl.trim()) {
+    errors['model.baseUrl'] = 'NewAPI 必须填写 Base URL，例如 https://你的域名/v1'
+  }
   if (form.model.baseUrl.trim() !== '' && !/^https?:\/\/\S+$/.test(form.model.baseUrl.trim())) {
     errors['model.baseUrl'] = '必须是 http(s) 地址'
   }
   const temperature = Number(form.model.temperature)
-  if (form.model.temperature.trim() === '' || Number.isNaN(temperature) || temperature < 0 || temperature > 2) {
+  if (form.model.temperature.trim() === '' || !Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
     errors['model.temperature'] = '取值范围 0 ~ 2'
   }
   if (form.model.maxTokens.trim() !== '') {
@@ -176,7 +182,7 @@ function textCls(error?: string): string {
 }
 
 /** 后端 list_providers 不可用时的兜底清单（与 SUPPORTED_PROVIDERS 一致）。 */
-const FALLBACK_PROVIDERS = ['openai', 'deepseek', 'qwen', 'ollama', 'anthropic']
+const FALLBACK_PROVIDERS = ['openai', 'deepseek', 'qwen', 'ollama', 'anthropic', 'newapi']
 
 // ---------------------------------------------------------------------------
 // 页面
@@ -184,6 +190,9 @@ const FALLBACK_PROVIDERS = ['openai', 'deepseek', 'qwen', 'ollama', 'anthropic']
 
 export default function Settings({ onBack }: SettingsProps) {
   const [modelManager, setModelManager] = useState(false)
+  const config = useConfigStore((s) => s.config)
+  const configBusy = useConfigStore((s) => s.loading)
+  const [modelOptionsDraft, setModelOptionsDraft] = useState<ModelOptions>({ supportsReasoning: false, reasoningEffort: null, thinking: null })
   const loadConfig = useConfigStore((s) => s.loadConfig)
   const saveModelConfig = useConfigStore((s) => s.saveModelConfig)
   const testConnection = useConfigStore((s) => s.testConnection)
@@ -203,6 +212,12 @@ export default function Settings({ onBack }: SettingsProps) {
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
 
   const set = <K extends keyof SettingsForm>(group: K, patch: Partial<SettingsForm[K]>) => {
+    if (group === 'model') {
+      const nextForm = { ...form, model: { ...form.model, ...patch } }
+      const next = updateModelProfile(modelDraft, toModelConfig(nextForm))
+      setModelOptionsDraft({ supportsReasoning: next.supportsReasoning, reasoningEffort: next.reasoningEffort, thinking: next.thinking })
+      setTestResult(null)
+    }
     setForm((prev) => ({ ...prev, [group]: { ...prev[group], ...patch } }))
     // 字段修改即清除该组校验错误，避免过期提示。
     setErrors((prev) => {
@@ -220,7 +235,6 @@ export default function Settings({ onBack }: SettingsProps) {
     ;(async () => {
       try {
         await loadConfig()
-        if (!cancelled) setForm((prev) => ({ ...prev, model: fromModelConfig(useConfigStore.getState().config?.model) }))
       } catch (e) {
         if (!cancelled) setLoadError(toMessage(e))
       } finally {
@@ -237,6 +251,20 @@ export default function Settings({ onBack }: SettingsProps) {
       cancelled = true
     }
   }, [loadConfig])
+
+  useEffect(() => {
+    if (!config) return
+    const selected = activeProfile(config)!
+    setForm((prev) => ({ ...prev, model: fromModelConfig(selected.config) }))
+    setModelOptionsDraft({ supportsReasoning: selected.supportsReasoning, reasoningEffort: selected.reasoningEffort, thinking: selected.thinking })
+    setTestResult(null)
+    setErrors({})
+  }, [config])
+
+  const modelDraft: ModelProfile = updateModelProfile({
+    id: activeProfile(config)?.id ?? 'legacy-model', label: activeProfile(config)?.label ?? '当前模型',
+    config: toModelConfig(form), ...modelOptionsDraft,
+  }, toModelConfig(form))
 
   const fetchModelOptions = useMemo(
     () => (provider: string) => {
@@ -260,7 +288,7 @@ export default function Settings({ onBack }: SettingsProps) {
     // 本地偏好先落盘（必定成功），模型配置再走后端；后者失败单独报错。
     savePrefs(form)
     try {
-      await saveModelConfig(toModelConfig(form))
+      await saveModelConfig(modelDraft.config, { supportsReasoning: modelDraft.supportsReasoning, reasoningEffort: modelDraft.reasoningEffort, thinking: modelDraft.thinking })
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (e) {
@@ -278,7 +306,7 @@ export default function Settings({ onBack }: SettingsProps) {
     setTesting(true)
     setTestResult(null)
     try {
-      const ok = await testConnection(toModelConfig(form))
+      const ok = await testConnection(modelDraft.config, modelDraft.reasoningEffort ?? undefined, modelDraft.thinking, modelDraft.supportsReasoning)
       setTestResult(
         ok
           ? { ok: true, text: '连接成功' }
@@ -320,6 +348,7 @@ export default function Settings({ onBack }: SettingsProps) {
           )}
           <button
             type="button"
+            disabled={loadingConfig || configBusy || !!loadError}
             onClick={() => void handleSave()}
             className="rounded-md bg-sky-500 px-3 py-1.5 text-xs font-medium text-slate-950 hover:bg-sky-400"
           >
@@ -339,93 +368,78 @@ export default function Settings({ onBack }: SettingsProps) {
 
           {/* 1. 模型 */}
           <Section title="模型">
-            <button type="button" onClick={() => setModelManager(true)} disabled={loadingConfig || !!loadError} className="rounded-md border border-slate-700 px-3 py-1.5 text-xs disabled:opacity-50">管理模型</button>
-            <Field label="提供方" error={mErr('model.provider')}>
-              <input
-                list="provider-options"
-                value={m.provider}
-                onChange={(e) => {
-                  set('model', { provider: e.target.value })
-                }}
-                onBlur={() => fetchModelOptions(m.provider)}
-                className={textCls(mErr('model.provider'))}
-              />
-              <datalist id="provider-options">
-                {providers.map((p) => (
-                  <option key={p} value={p} />
-                ))}
-              </datalist>
-            </Field>
-            <Field label="模型名称" error={mErr('model.name')} title="可选建议来自后端 list_models">
-              <input
-                list="model-options"
-                value={m.name}
-                onChange={(e) => set('model', { name: e.target.value })}
-                className={textCls(mErr('model.name'))}
-              />
-              <datalist id="model-options">
-                {modelOptions.map((n) => (
-                  <option key={n} value={n} />
-                ))}
-              </datalist>
-            </Field>
-            <Field
-              label="API Key"
-              error={mErr('model.apiKey')}
-              title={m.provider === 'ollama' ? 'Ollama 等本地服务可留空' : undefined}
-            >
-              <input
-                type="password"
-                value={m.apiKey}
-                onChange={(e) => set('model', { apiKey: e.target.value })}
-                className={textCls(mErr('model.apiKey'))}
-              />
-            </Field>
-            <Field label="Base URL" error={mErr('model.baseUrl')} title="留空使用提供方默认地址">
-              <input
-                value={m.baseUrl}
-                onChange={(e) => set('model', { baseUrl: e.target.value })}
-                placeholder="https://api.example.com/v1"
-                className={textCls(mErr('model.baseUrl'))}
-              />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Temperature" error={mErr('model.temperature')}>
+            <fieldset className="min-w-0 space-y-3" disabled={loadingConfig || configBusy || !!loadError}>
+              <button type="button" onClick={() => setModelManager(true)} disabled={loadingConfig || !!loadError} className="rounded-md border border-slate-700 px-3 py-1.5 text-xs disabled:opacity-50">管理模型</button>
+              <Field label="提供方" error={mErr('model.provider')}>
                 <input
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  max="2"
-                  value={m.temperature}
-                  onChange={(e) => set('model', { temperature: e.target.value })}
-                  className={textCls(mErr('model.temperature'))}
+                  list="provider-options"
+                  value={m.provider}
+                  onChange={(e) => {
+                    set('model', { provider: e.target.value })
+                  }}
+                  onBlur={() => fetchModelOptions(m.provider)}
+                  className={textCls(mErr('model.provider'))}
                 />
+                <datalist id="provider-options">
+                  {providers.map((p) => (
+                    <option key={p} value={p} />
+                  ))}
+                </datalist>
               </Field>
-              <Field label="Max Tokens" error={mErr('model.maxTokens')} title="留空使用默认值">
+              <Field label="模型名称" error={mErr('model.name')} title="可选建议来自后端 list_models">
                 <input
-                  type="number"
-                  min="1"
-                  value={m.maxTokens}
-                  onChange={(e) => set('model', { maxTokens: e.target.value })}
-                  className={textCls(mErr('model.maxTokens'))}
+                  list="model-options"
+                  value={m.name}
+                  onChange={(e) => set('model', { name: e.target.value })}
+                  className={textCls(mErr('model.name'))}
                 />
+                <datalist id="model-options">
+                  {modelOptions.map((n) => (
+                    <option key={n} value={n} />
+                  ))}
+                </datalist>
               </Field>
-            </div>
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => void handleTestConnection()}
-                disabled={testing}
-                className="rounded-md border border-slate-700 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+              <Field
+                label="API Key"
+                error={mErr('model.apiKey')}
+                title={m.provider === 'ollama' ? 'Ollama 等本地服务可留空' : undefined}
               >
-                {testing ? '测试中…' : '测试连接'}
-              </button>
-              {testResult && (
-                <span className={`text-xs ${testResult.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {testResult.text}
-                </span>
-              )}
-            </div>
+                <input
+                  type="password"
+                  value={m.apiKey}
+                  onChange={(e) => set('model', { apiKey: e.target.value })}
+                  className={textCls(mErr('model.apiKey'))}
+                />
+              </Field>
+              <Field label="Base URL" error={mErr('model.baseUrl')} title="留空使用提供方默认地址">
+                <input
+                  value={m.baseUrl}
+                  onChange={(e) => set('model', { baseUrl: e.target.value })}
+                  placeholder="https://api.example.com/v1"
+                  className={textCls(mErr('model.baseUrl'))}
+                />
+              </Field>
+              <ModelParameters profile={modelDraft} temperature={m.temperature} maxTokens={m.maxTokens}
+                onTemperature={(value) => set('model', { temperature: value })} onMaxTokens={(value) => set('model', { maxTokens: value })}
+                onOptions={(patch) => setModelOptionsDraft((prev) => ({ ...prev, ...patch }))} />
+              {mErr('model.temperature') && <p role="alert">{mErr('model.temperature')}</p>}
+              {mErr('model.maxTokens') && <p role="alert">{mErr('model.maxTokens')}</p>}
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => void handleTestConnection()}
+                  disabled={testing}
+                  className="rounded-md border border-slate-700 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+                >
+                  {testing ? '测试中…' : '测试连接'}
+                </button>
+                {testResult && (
+                  <span className={`text-xs ${testResult.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {testResult.text}
+                  </span>
+                )}
+              </div>
+            </fieldset>
           </Section>
 
           {/* 2. 索引 */}
@@ -565,7 +579,7 @@ export default function Settings({ onBack }: SettingsProps) {
           </p>
         </div>
       </div>
-      {modelManager && <ModelManager onClose={() => { setModelManager(false); setForm((prev) => ({ ...prev, model: fromModelConfig(useConfigStore.getState().modelConfig ?? undefined) })) }} />}
+      {modelManager && <ModelManager onClose={() => setModelManager(false)} />}
     </div>
   )
 }

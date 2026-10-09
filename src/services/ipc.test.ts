@@ -11,12 +11,14 @@ describe('ipc service', () => {
 
   it('maps project and file commands to Tauri IPC', async () => {
     mockedInvoke.mockResolvedValue(undefined)
+    await ipc.pickProjectFolder()
     await ipc.openProject('D:/repo')
     await ipc.closeProject()
     await ipc.listProjects()
     await ipc.getFileTree(3)
     await ipc.readFile(3, 'src/main.ts', 2, 8)
     expect(mockedInvoke.mock.calls).toEqual([
+      ['pick_project_folder'],
       ['open_project', { path: 'D:/repo' }],
       ['close_project'],
       ['list_projects'],

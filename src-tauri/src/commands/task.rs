@@ -65,25 +65,25 @@ pub(crate) fn orchestrator_config_from(
     if let Some(profile) = selected {
         connection.reasoning_model = profile.supports_reasoning;
         connection.reasoning_effort = profile.reasoning_effort.clone();
+        connection.thinking = profile.thinking;
     }
     let limits = crate::model::capabilities::limits(
         &connection.provider,
         &app.model.name,
         connection.reasoning_model,
     );
-    let output = connection
+    let ceiling = connection
         .max_tokens
-        .unwrap_or(limits.default_output_tokens);
+        .unwrap_or(limits.max_output_tokens.min(65_536));
     let ceiling = if limits.documented {
-        output.min(limits.max_output_tokens)
+        ceiling.min(limits.max_output_tokens)
     } else {
-        output
+        ceiling
     };
     let loop_config = crate::agent::tool_loop::LoopConfig {
-        output_tokens: ceiling,
-        output_ceiling: connection
-            .max_tokens
-            .unwrap_or(limits.max_output_tokens.min(65_536)),
+        // The saved limit is a ceiling, not the output reservation for every turn.
+        output_tokens: limits.default_output_tokens.min(ceiling),
+        output_ceiling: ceiling,
         // Reserve headroom for wire metadata; tool schemas and results are counted in the loop.
         context_tokens: limits.context_tokens.saturating_sub(4096),
         ..Default::default()
@@ -282,6 +282,52 @@ mod tests {
     use crate::types::TaskStatus;
 
     #[test]
+    fn selected_profile_parameters_reach_the_actual_tool_payload() {
+        let model = crate::types::ModelConfig {
+            provider: "newapi".into(),
+            name: "custom-model".into(),
+            api_key: Some("test-only".into()),
+            base_url: Some("https://example.test/v1".into()),
+            temperature: 0.25,
+            max_tokens: None,
+        };
+        for reasoning in [false, true] {
+            let app = crate::types::Config {
+                model: model.clone(),
+                active_model_id: Some("selected".into()),
+                model_profiles: vec![crate::types::ModelProfile {
+                    id: "selected".into(),
+                    label: "Selected".into(),
+                    config: model.clone(),
+                    supports_reasoning: reasoning,
+                    reasoning_effort: None,
+                    thinking: None,
+                }],
+                ..Default::default()
+            };
+            let runtime = orchestrator_config_from(app).unwrap();
+            let provider = crate::model::create_provider(&runtime.model).unwrap();
+            let metadata = provider.tool_request_metadata(&crate::model::provider::ToolRequest {
+                model: model.name.clone(),
+                messages: vec![],
+                tools: vec![],
+                max_tokens: runtime.tool_loop.output_tokens,
+            });
+            assert_eq!(metadata["reasoningEffortSource"], "provider_default");
+            assert!(metadata["reasoningEffort"].is_null());
+            if reasoning {
+                assert_eq!(metadata["maxCompletionTokens"], 32_768);
+                assert!(metadata["temperature"].is_null());
+                assert!(metadata["maxTokens"].is_null());
+            } else {
+                assert_eq!(metadata["maxTokens"], 8192);
+                assert_eq!(metadata["temperature"], 0.25);
+                assert!(metadata["maxCompletionTokens"].is_null());
+            }
+        }
+    }
+
+    #[test]
     fn configured_model_limits_and_output_ceiling_reach_the_executor() {
         let mut config = crate::types::Config::default();
         config.model.provider = "deepseek".into();
@@ -292,6 +338,19 @@ mod tests {
         assert_eq!(runtime.tool_loop.output_tokens, 16_384);
         assert_eq!(runtime.tool_loop.output_ceiling, 16_384);
         assert!(!runtime.tool_loop.allow_verification);
+    }
+
+    #[test]
+    fn high_gateway_output_limit_is_a_ceiling_not_a_per_turn_reservation() {
+        let mut config = crate::types::Config::default();
+        config.model.provider = "newapi".into();
+        config.model.name = "gpt-6.1-sol".into();
+        config.model.base_url = Some("https://example.test/v1".into());
+        config.model.max_tokens = Some(128_000);
+        let runtime = orchestrator_config_from(config).unwrap();
+        assert_eq!(runtime.tool_loop.output_tokens, 8192);
+        assert_eq!(runtime.tool_loop.output_ceiling, 128_000);
+        assert_eq!(runtime.tool_loop.context_tokens, 123_904);
     }
 
     const BROKEN_LIB: &str = "pub fn add(a: i32, b: i32) -> i32 { a + }\n";

@@ -18,6 +18,20 @@ use crate::errors::XaimError;
 /// `&self`，provider 实例可安全地跨任务共享。
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
+    /// Only stateless adapters that accept a fresh checkpoint opt in. Unknown
+    /// protocols retain their history rather than dropping required state.
+    fn supports_checkpoint_context(&self) -> bool {
+        false
+    }
+
+    /// Metadata from the same payload builder used to send the request. Never
+    /// include credentials, messages, tool arguments or private reasoning.
+    fn tool_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
+        serde_json::json!({"provider":self.name(),"model":req.model,
+            "outputLimit":req.max_tokens,"thinking":"provider_default",
+            "reasoningEffort":null,"parameterSource":"adapter_unspecified"})
+    }
+
     fn supports_tools(&self) -> bool {
         false
     }
@@ -101,6 +115,8 @@ pub struct ToolResponse {
     pub message: ToolMessage,
     pub finish_reason: String,
     pub usage: Usage,
+    pub usage_reported: bool,
+    pub reasoning_tokens: Option<u32>,
 }
 
 /// 一次补全请求。

@@ -18,6 +18,7 @@ fn main() {
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::project::open_project,
+            commands::project::pick_project_folder,
             commands::project::close_project,
             commands::project::list_projects,
             commands::project::get_file_tree,

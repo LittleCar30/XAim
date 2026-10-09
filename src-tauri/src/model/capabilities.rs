@@ -8,6 +8,35 @@ pub struct ModelLimits {
     pub documented: bool,
 }
 
+pub fn reasoning_efforts(provider: &str, model: &str) -> &'static [&'static str] {
+    match provider {
+        // Custom compatible OpenAI endpoints remain an explicit profile opt-in.
+        "openai" | "newapi" => &["low", "medium", "high"],
+        "deepseek" if matches!(model, "deepseek-flash" | "deepseek-v4-pro") => {
+            &["low", "high", "max"]
+        }
+        _ => &[],
+    }
+}
+
+pub fn supports_thinking_toggle(provider: &str, model: &str) -> bool {
+    match provider {
+        "deepseek" => matches!(model, "deepseek-flash" | "deepseek-v4-pro"),
+        "qwen" => matches!(
+            model,
+            "qwen3-235b-a22b"
+                | "qwen3-30b-a3b"
+                | "qwen3-32b"
+                | "qwen3-14b"
+                | "qwen3-8b"
+                | "qwen3-4b"
+                | "qwen3-1.7b"
+                | "qwen3-0.6b"
+        ),
+        _ => false,
+    }
+}
+
 pub fn limits(provider: &str, model: &str, reasoning: bool) -> ModelLimits {
     match (provider, model) {
         ("deepseek", "deepseek-flash" | "deepseek-v4-pro") => ModelLimits {

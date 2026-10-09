@@ -16,10 +16,10 @@ use crate::types::Config;
 pub const CONFIG_KEY: &str = "app:config";
 
 /// 模型提供方连接配置，供 [`crate::model::create_provider`] 使用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// 提供方标识：`openai` / `deepseek` / `qwen` / `ollama` / `anthropic`。
+    /// 提供方标识：官方 provider、Ollama，以及通用 OpenAI-compatible 网关 `newapi`。
     pub provider: String,
     /// API key；Ollama 等本地服务可留空。
     pub api_key: String,
@@ -27,8 +27,10 @@ pub struct ModelConfig {
     pub base_url: Option<String>,
     pub reasoning_effort: Option<String>,
     pub reasoning_model: bool,
+    pub thinking: Option<bool>,
     /// Explicit output budget from the saved model settings.
     pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
 }
 
 impl Default for ModelConfig {
@@ -40,14 +42,15 @@ impl Default for ModelConfig {
             base_url: None,
             reasoning_effort: None,
             reasoning_model: false,
+            thinking: None,
             max_tokens: None,
+            temperature: None,
         }
     }
 }
 
 impl From<crate::types::ModelConfig> for ModelConfig {
-    /// 从 IPC 契约的模型配置提取连接参数（provider/key/地址）；
-    /// 模型名、采样参数等不参与连接建立。
+    /// 从 IPC 模型配置提取连接、采样和输出上限；模型名由请求携带。
     fn from(config: crate::types::ModelConfig) -> Self {
         Self {
             provider: config.provider,
@@ -55,7 +58,9 @@ impl From<crate::types::ModelConfig> for ModelConfig {
             base_url: config.base_url,
             reasoning_effort: None,
             reasoning_model: false,
+            thinking: None,
             max_tokens: config.max_tokens,
+            temperature: Some(config.temperature),
         }
     }
 }
@@ -97,6 +102,7 @@ pub fn save(store: &Store, config: &Config) -> Result<()> {
 
 /// 校验配置：模型提供方必须受支持。
 pub fn validate(config: &Config) -> Result<()> {
+    validate_sampling(&config.model)?;
     crate::model::capabilities::validate_output(
         &config.model.provider,
         &config.model.name,
@@ -109,15 +115,39 @@ pub fn validate(config: &Config) -> Result<()> {
             crate::model::SUPPORTED_PROVIDERS.join(", ")
         )));
     }
+    if config.model.provider == "newapi"
+        && config
+            .model
+            .base_url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
+    {
+        return Err(XaimError::Config(
+            "provider 'newapi' 必须配置 Base URL，例如 https://your-host/v1".into(),
+        ));
+    }
     let mut ids = std::collections::HashSet::new();
     for profile in &config.model_profiles {
+        validate_sampling(&profile.config)?;
         crate::model::capabilities::validate_output(
             &profile.config.provider,
             &profile.config.name,
             profile.config.max_tokens,
         )?;
-        if profile.supports_reasoning && profile.config.provider != "openai" {
-            return Err(XaimError::Config("此提供方不支持 reasoning_effort".into()));
+        let efforts = crate::model::capabilities::reasoning_efforts(
+            &profile.config.provider,
+            &profile.config.name,
+        );
+        if profile.supports_reasoning && efforts.is_empty() {
+            return Err(XaimError::Config("此模型尚未适配思考强度参数".into()));
+        }
+        if profile.thinking.is_some()
+            && !crate::model::capabilities::supports_thinking_toggle(
+                &profile.config.provider,
+                &profile.config.name,
+            )
+        {
+            return Err(XaimError::Config("此模型尚未适配思考开关".into()));
         }
         if profile.id.trim().is_empty()
             || !ids.insert(&profile.id)
@@ -131,10 +161,22 @@ pub fn validate(config: &Config) -> Result<()> {
         if !crate::model::SUPPORTED_PROVIDERS.contains(&profile.config.provider.as_str()) {
             return Err(XaimError::Config("模型提供方不受支持".into()));
         }
+        if profile.config.provider == "newapi"
+            && profile
+                .config
+                .base_url
+                .as_deref()
+                .is_none_or(|url| url.trim().is_empty())
+        {
+            return Err(XaimError::Config(
+                "provider 'newapi' 必须配置 Base URL，例如 https://your-host/v1".into(),
+            ));
+        }
         if let Some(effort) = &profile.reasoning_effort {
-            if !profile.supports_reasoning
-                || profile.config.provider != "openai"
-                || !["low", "medium", "high"].contains(&effort.as_str())
+            if (!profile.supports_reasoning
+                && matches!(profile.config.provider.as_str(), "openai" | "newapi"))
+                || !efforts.contains(&effort.as_str())
+                || profile.thinking == Some(false)
             {
                 return Err(XaimError::Config("此模型不支持指定的思考强度".into()));
             }
@@ -151,6 +193,15 @@ pub fn validate(config: &Config) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn validate_sampling(model: &crate::types::ModelConfig) -> Result<()> {
+    if !model.temperature.is_finite() || !(0.0..=2.0).contains(&model.temperature) {
+        return Err(XaimError::Config(
+            "Temperature 必须是 0 到 2 的有限数值".into(),
+        ));
+    }
+    crate::model::capabilities::validate_output(&model.provider, &model.name, model.max_tokens)
 }
 
 #[cfg(test)]
@@ -171,6 +222,7 @@ mod tests {
             },
             supports_reasoning: true,
             reasoning_effort: Some("high".into()),
+            thinking: None,
         };
         config.model = profile.config.clone();
         config.active_model_id = Some(profile.id.clone());
@@ -186,6 +238,44 @@ mod tests {
     }
 
     #[test]
+    fn provider_specific_reasoning_options_are_validated_without_changing_legacy_defaults() {
+        let mut config = Config::default();
+        let profile = crate::types::ModelProfile {
+            id: "page".into(),
+            label: "Page".into(),
+            config: crate::types::ModelConfig {
+                provider: "deepseek".into(),
+                name: "deepseek-flash".into(),
+                ..Default::default()
+            },
+            supports_reasoning: false,
+            reasoning_effort: Some("low".into()),
+            thinking: Some(true),
+        };
+        config.model = profile.config.clone();
+        config.active_model_id = Some(profile.id.clone());
+        config.model_profiles = vec![profile];
+        validate(&config).unwrap();
+        config.model_profiles[0].thinking = Some(false);
+        assert!(validate(&config).is_err());
+        config.model_profiles[0].reasoning_effort = None;
+        validate(&config).unwrap();
+        config.model_profiles[0].config.provider = "qwen".into();
+        config.model_profiles[0].config.name = "qwen3-32b".into();
+        config.model = config.model_profiles[0].config.clone();
+        validate(&config).unwrap();
+        config.model_profiles[0].config.name = "unknown-model".into();
+        config.model = config.model_profiles[0].config.clone();
+        assert!(validate(&config).is_err());
+        let legacy: crate::types::ModelProfile = serde_json::from_value(serde_json::json!({
+            "id":"legacy","label":"Legacy","config":crate::types::ModelConfig::default(),
+            "supportsReasoning":false,"reasoningEffort":null
+        }))
+        .unwrap();
+        assert_eq!(legacy.thinking, None);
+    }
+
+    #[test]
     fn model_config_roundtrips_through_json() {
         let config = ModelConfig {
             provider: "qwen".to_string(),
@@ -193,7 +283,9 @@ mod tests {
             base_url: Some("http://127.0.0.1:9000/v1".to_string()),
             reasoning_effort: None,
             reasoning_model: false,
+            thinking: None,
             max_tokens: Some(1024),
+            temperature: Some(0.3),
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: ModelConfig = serde_json::from_str(&json).unwrap();
@@ -225,6 +317,7 @@ mod tests {
         };
         let connection = ModelConfig::from(ipc);
         assert_eq!(connection.max_tokens, Some(1024));
+        assert_eq!(connection.temperature, Some(0.3));
         assert_eq!(connection.provider, "openai");
         assert_eq!(connection.api_key, "sk-test");
         assert_eq!(
@@ -281,10 +374,34 @@ mod tests {
     }
 
     #[test]
+    fn invalid_temperature_is_rejected_for_active_and_inactive_profiles() {
+        for temperature in [f32::NAN, f32::INFINITY, -0.1, 2.1] {
+            let mut app = Config::default();
+            app.model.temperature = temperature;
+            assert!(validate(&app).is_err());
+            app.model = crate::types::ModelConfig::default();
+            app.model_profiles.push(crate::types::ModelProfile {
+                id: "bad".into(),
+                label: "bad".into(),
+                config: crate::types::ModelConfig {
+                    temperature,
+                    ..Default::default()
+                },
+                supports_reasoning: false,
+                reasoning_effort: None,
+                thinking: None,
+            });
+            assert!(validate(&app).is_err());
+        }
+    }
+
+    #[test]
     fn validate_accepts_supported_and_rejects_unknown_providers() {
         let mut config = Config::default();
         for provider in crate::model::SUPPORTED_PROVIDERS {
             config.model.provider = provider.to_string();
+            config.model.base_url =
+                (provider == "newapi").then(|| "https://example.test/v1".into());
             validate(&config).unwrap();
         }
 

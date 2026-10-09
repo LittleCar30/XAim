@@ -155,6 +155,8 @@ pub struct ModelProfile {
     #[serde(default)]
     pub supports_reasoning: bool,
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<bool>,
 }
 
 /// 文件树节点，`children` 仅目录非空；文件节点 `size` 为字节数，目录为 `null`。

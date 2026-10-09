@@ -507,6 +507,8 @@ mod tests {
             message,
             finish_reason: "tool_calls".into(),
             usage: Usage::new(10, 20),
+            usage_reported: true,
+            reasoning_tokens: None,
         }
     }
     fn done() -> ToolResponse {
@@ -514,6 +516,8 @@ mod tests {
             message: ToolMessage::text("assistant", "Completed"),
             finish_reason: "stop".into(),
             usage: Usage::new(10, 5),
+            usage_reported: true,
+            reasoning_tokens: None,
         }
     }
     fn setup(

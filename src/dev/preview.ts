@@ -155,6 +155,7 @@ export function setupPreview(): void {
   }
 
   const previewIpc: typeof ipc = {
+    pickProjectFolder: async () => { throw new Error('浏览器预览无法打开系统文件夹选择器，请在桌面应用中使用') },
     openProject: async () => project,
     closeProject: async () => { generation++; useTaskStore.getState().reset() },
     listProjects: async () => [project],
@@ -196,7 +197,7 @@ export function setupPreview(): void {
     setModelConfig: async (model) => { config = { ...config, model } },
     testModelConnection: async () => true,
     listModels: async () => ['deepseek-chat', 'deepseek-reasoner'],
-    listProviders: async () => ['deepseek', 'openai', 'ollama'],
+    listProviders: async () => ['deepseek', 'openai', 'ollama', 'newapi'],
   }
   Object.assign(ipc, previewIpc)
   // Preview state and IPC replacements only exist in this browser session.

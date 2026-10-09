@@ -205,10 +205,10 @@
   .model-manager-body small { @apply block w-full truncate text-[11px] text-slate-500; }
   .model-manager-body > form { @apply min-w-0 p-5; }
   .model-manager fieldset { @apply min-w-0 space-y-4; }
-  .model-manager label { @apply block text-xs text-slate-400; }
-  .model-manager input:not([type=checkbox]), .model-manager select { @apply mt-2 block w-full min-w-0 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-400; }
+  .model-manager label, .model-parameters label { @apply block text-xs text-slate-400; }
+  .model-manager input:not([type=checkbox]), .model-manager select, .model-parameters input:not([type=checkbox]), .model-parameters select { @apply mt-2 block w-full min-w-0 rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-400 disabled:opacity-50; }
   .model-form-grid { @apply grid grid-cols-2 gap-3; }
-  .model-manager label.model-checkbox { @apply flex items-center gap-2 leading-5; }
+  .model-manager label.model-checkbox, .model-parameters label.model-checkbox { @apply flex items-center gap-2 leading-5; }
   .model-checkbox input { @apply h-4 w-4 shrink-0; }
   .model-manager footer { @apply mt-5 flex items-center gap-2; }
   .model-manager footer > button:not(.icon-button) { @apply rounded-md border border-slate-700 px-3 py-2 text-xs disabled:opacity-40; }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { fullVersion } from '@/lib/version'
+import { ipc } from '@/services/ipc'
 import { useConfigStore } from '@/stores/config'
 import { useProjectStore } from '@/stores/project'
 
@@ -62,7 +63,7 @@ interface MenuShellProps {
   onOpenChange: (open: boolean) => void
 }
 
-/** 打开项目弹层：路径输入 + 最近项目列表 + 关闭当前项目。 */
+/** 打开项目弹层：系统文件夹选择 + 路径输入 + 最近项目列表。 */
 function ProjectMenu({ open, onOpenChange }: MenuShellProps) {
   const currentProject = useProjectStore((s) => s.currentProject)
   const recentProjects = useProjectStore((s) => s.recentProjects)
@@ -72,6 +73,9 @@ function ProjectMenu({ open, onOpenChange }: MenuShellProps) {
   const loadRecentProjects = useProjectStore((s) => s.loadRecentProjects)
   const [path, setPath] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [pickingFolder, setPickingFolder] = useState(false)
+  const pickerActive = useRef(false)
+  const busy = projectLoading || pickingFolder
 
   // 打开时刷新最近项目；失败（非 Tauri 环境）静默降级。
   useEffect(() => {
@@ -101,6 +105,24 @@ function ProjectMenu({ open, onOpenChange }: MenuShellProps) {
     }
   }
 
+  const handlePickFolder = async () => {
+    if (pickerActive.current || projectLoading) return
+    pickerActive.current = true
+    setPickingFolder(true)
+    setError(null)
+    try {
+      const selected = await ipc.pickProjectFolder()
+      if (selected === null) return
+      setPath(selected)
+      await handleOpen(selected)
+    } catch (e) {
+      setError(toMessage(e))
+    } finally {
+      pickerActive.current = false
+      setPickingFolder(false)
+    }
+  }
+
   return (
     <div className="relative">
       <button
@@ -120,10 +142,19 @@ function ProjectMenu({ open, onOpenChange }: MenuShellProps) {
           aria-label="打开项目"
           className="absolute right-0 top-full z-50 mt-1 w-80 rounded-lg border border-slate-700 bg-slate-900 p-3 shadow-xl"
         >
+          <button
+            type="button"
+            onClick={() => void handlePickFolder()}
+            disabled={busy}
+            className="mb-3 flex w-full items-center justify-center gap-2 rounded-md border border-slate-700 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+          >
+            <FolderIcon />
+            {pickingFolder ? '正在选择文件夹…' : '选择文件夹'}
+          </button>
           <form
             onSubmit={(e) => {
               e.preventDefault()
-              handleOpen(path)
+              if (!busy) void handleOpen(path)
             }}
             className="flex gap-2"
           >
@@ -132,18 +163,19 @@ function ProjectMenu({ open, onOpenChange }: MenuShellProps) {
               onChange={(e) => setPath(e.target.value)}
               placeholder="输入项目路径，如 D:\code\demo"
               aria-label="项目路径"
+              disabled={busy}
               className="min-w-0 flex-1 rounded-md bg-slate-950 px-2.5 py-1.5 text-xs text-slate-100 outline-none ring-1 ring-slate-700 placeholder:text-slate-600 focus:ring-sky-500"
             />
             <button
               type="submit"
-              disabled={!path.trim() || projectLoading}
+              disabled={!path.trim() || busy}
               className="shrink-0 rounded-md bg-sky-500 px-3 py-1.5 text-xs font-medium text-slate-950 hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               打开
             </button>
           </form>
 
-          {error && <p className="mt-2 break-all text-xs text-rose-400">{error}</p>}
+          {error && <p role="alert" className="mt-2 break-all text-xs text-rose-400">{error}</p>}
 
           {recentProjects.length > 0 && (
             <div className="mt-3">
@@ -153,7 +185,7 @@ function ProjectMenu({ open, onOpenChange }: MenuShellProps) {
                   <li key={p.id}>
                     <button
                       type="button"
-                      disabled={projectLoading}
+                      disabled={busy}
                       onClick={() => handleOpen(p.path)}
                       title={p.path}
                       className="flex w-full flex-col rounded px-2 py-1.5 text-left hover:bg-slate-800 disabled:opacity-50"
@@ -171,7 +203,7 @@ function ProjectMenu({ open, onOpenChange }: MenuShellProps) {
             <button
               type="button"
               onClick={handleClose}
-              disabled={projectLoading}
+              disabled={busy}
               className="mt-3 w-full rounded-md border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 disabled:opacity-50"
             >
               关闭当前项目

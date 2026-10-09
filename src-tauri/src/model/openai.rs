@@ -32,6 +32,7 @@ const DONE_SENTINEL: &str = "[DONE]";
 
 /// OpenAI 兼容提供方。
 pub struct OpenAiProvider {
+    provider_name: &'static str,
     base_url: String,
     api_key: String,
     client: reqwest::Client,
@@ -39,7 +40,10 @@ pub struct OpenAiProvider {
     reasoning_effort: Option<String>,
     reasoning_model: bool,
     deepseek: bool,
+    qwen: bool,
+    thinking: Option<bool>,
     output_limit: Option<u32>,
+    temperature: Option<f32>,
 }
 
 impl OpenAiProvider {
@@ -54,14 +58,18 @@ impl OpenAiProvider {
             .build()
             .expect("构建工具请求 Client 失败");
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            api_key,
+            provider_name: "openai",
+            base_url: normalize_base_url(&base_url),
+            api_key: normalize_api_key(&api_key),
             client,
             tool_client,
             reasoning_effort: None,
             reasoning_model: false,
             deepseek: false,
+            qwen: false,
+            thinking: None,
             output_limit: None,
+            temperature: None,
         }
     }
 
@@ -77,6 +85,7 @@ impl OpenAiProvider {
 
     pub fn with_deepseek_defaults(mut self) -> Self {
         self.deepseek = true;
+        self.provider_name = "deepseek";
         self
     }
 
@@ -85,31 +94,114 @@ impl OpenAiProvider {
         self
     }
 
+    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
+    }
+
+    pub fn with_thinking(mut self, thinking: Option<bool>) -> Self {
+        self.thinking = thinking;
+        self
+    }
+
+    pub fn with_qwen_defaults(mut self) -> Self {
+        self.qwen = true;
+        self.provider_name = "qwen";
+        self
+    }
+
+    pub fn with_provider_name(mut self, name: &'static str) -> Self {
+        self.provider_name = name;
+        self
+    }
+
+    fn tool_payload(&self, req: &ToolRequest) -> Result<serde_json::Value> {
+        let plain = CompletionRequest::new(&req.model, vec![]);
+        let mut payload = serde_json::to_value(self.payload(&plain, false))?;
+        payload["messages"] = serde_json::to_value(&req.messages)?;
+        payload["tools"] = serde_json::to_value(&req.tools)?;
+        let limit = self
+            .output_limit
+            .map_or(req.max_tokens, |saved| saved.min(req.max_tokens));
+        let key = if !self.deepseek
+            && !self.qwen
+            && (self.reasoning_model || self.reasoning_effort.is_some())
+        {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        let object = payload.as_object_mut().unwrap();
+        object.remove("max_tokens");
+        object.remove("max_completion_tokens");
+        object.insert(key.into(), serde_json::json!(limit));
+        let effort = self.reasoning_effort.as_deref();
+        if !self.deepseek && !self.qwen {
+            if let Some(effort) = effort {
+                object.insert("reasoning_effort".into(), serde_json::json!(effort));
+            }
+        }
+        if self.deepseek || self.qwen {
+            object.remove("reasoning_effort");
+            if let Some(thinking) = self.thinking {
+                if self.deepseek {
+                    object.insert(
+                        "thinking".into(),
+                        serde_json::json!({"type":if thinking { "enabled" } else { "disabled" }}),
+                    );
+                } else {
+                    object.insert("enable_thinking".into(), serde_json::json!(thinking));
+                }
+            }
+            if self.deepseek && self.thinking != Some(false) {
+                if let Some(effort) = effort {
+                    object.insert("reasoning_effort".into(), serde_json::json!(effort));
+                }
+            }
+        }
+        Ok(payload)
+    }
+
     fn payload<'a>(&'a self, req: &'a CompletionRequest, stream: bool) -> WireRequest<'a> {
         let mut payload = wire_request(req, stream);
+        payload.temperature = Some(self.temperature.unwrap_or(req.temperature));
         let deepseek_thinking = self.deepseek
             && matches!(
                 req.model.as_str(),
                 "deepseek-flash" | "deepseek-v4-pro" | "deepseek-reasoner"
             );
-        let budget = self.output_limit.unwrap_or_else(|| {
-            if deepseek_thinking {
-                req.max_tokens.max(32_768)
-            } else {
-                req.max_tokens
-            }
-        });
-        if self.reasoning_model || self.reasoning_effort.is_some() {
+        let budget = self.output_limit.map_or_else(
+            || {
+                if deepseek_thinking && self.thinking != Some(false) {
+                    req.max_tokens.max(32_768)
+                } else {
+                    req.max_tokens
+                }
+            },
+            |limit| limit.min(req.max_tokens),
+        );
+        if !self.deepseek && !self.qwen && (self.reasoning_model || self.reasoning_effort.is_some())
+        {
             payload.reasoning_effort = self.reasoning_effort.as_deref();
             payload.temperature = None;
             payload.max_tokens = None;
             payload.max_completion_tokens = Some(budget);
         } else {
             payload.max_tokens = Some(budget);
-            if deepseek_thinking {
+            if deepseek_thinking && self.thinking != Some(false) {
                 // DeepSeek uses max_tokens for thinking + answer; temperature is ignored.
                 payload.temperature = None;
             }
+        }
+        if self.deepseek {
+            payload.thinking = self.thinking.map(
+                |enabled| serde_json::json!({"type":if enabled { "enabled" } else { "disabled" }}),
+            );
+            if self.thinking != Some(false) {
+                payload.reasoning_effort = self.reasoning_effort.as_deref();
+            }
+        } else if self.qwen {
+            payload.enable_thinking = self.thinking;
         }
         payload
     }
@@ -157,6 +249,11 @@ impl OpenAiProvider {
                         tokio::time::sleep(backoff_delay(attempt)).await;
                         continue;
                     }
+                    if status == reqwest::StatusCode::UNAUTHORIZED {
+                        return Err(XaimError::Model(format!(
+                            "HTTP 401 Unauthorized: {body}; 请检查 API Key 是否为裸 token（不要填写 Bearer 前缀）、Base URL 是否为 OpenAI 兼容根地址（通常以 /v1 结尾），以及该 token 是否有权访问模型"
+                        )));
+                    }
                     return Err(XaimError::Model(format!("HTTP {status}: {body}")));
                 }
                 Err(err) => {
@@ -172,6 +269,30 @@ impl OpenAiProvider {
             }
         }
     }
+}
+
+/// Accept either an OpenAI-compatible root (`.../v1`) or a copied endpoint URL.
+/// Gateway prefixes such as `/newapi/v1` are preserved.
+fn normalize_base_url(value: &str) -> String {
+    let mut url = value.trim().trim_end_matches('/').to_string();
+    for suffix in ["/chat/completions", "/completions"] {
+        if url.ends_with(suffix) {
+            url.truncate(url.len() - suffix.len());
+            break;
+        }
+    }
+    url.trim_end_matches('/').to_string()
+}
+
+/// The request builder owns the `Bearer` scheme, so stored keys are bare tokens.
+fn normalize_api_key(value: &str) -> String {
+    let trimmed = value.trim();
+    trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
 }
 
 /// 可重试的状态码：请求超时、限流与服务端临时故障。
@@ -211,41 +332,43 @@ fn wire_request(req: &CompletionRequest, stream: bool) -> WireRequest<'_> {
         max_tokens: Some(req.max_tokens),
         max_completion_tokens: None,
         reasoning_effort: None,
+        thinking: None,
+        enable_thinking: None,
         stream,
     }
 }
 
 #[async_trait]
 impl ModelProvider for OpenAiProvider {
+    fn supports_checkpoint_context(&self) -> bool {
+        true
+    }
+
+    fn tool_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
+        match self.tool_payload(req) {
+            Ok(payload) => serde_json::json!({
+                "provider":self.name(),"protocol":"chat_completions","model":payload["model"],
+                "endpoint":format!("{}/chat/completions", self.base_url),
+                "auth":"bearer",
+                "thinking":payload.get("thinking").cloned().or_else(|| payload.get("enable_thinking").cloned()),
+                "thinkingSource":if self.thinking.is_some() { "explicit" } else { "provider_default" },
+                "reasoningEffort":payload["reasoning_effort"],
+                "reasoningEffortSource":if self.reasoning_effort.is_some() { "configured" } else { "provider_default" },
+                "maxTokens":payload["max_tokens"],"maxCompletionTokens":payload["max_completion_tokens"],
+                "temperature":payload["temperature"],"parameterSource":"wire_payload",
+            }),
+            Err(error) => {
+                serde_json::json!({"provider":self.name(),"model":req.model,"payloadError":error.to_string()})
+            }
+        }
+    }
     fn supports_tools(&self) -> bool {
         true
     }
 
     async fn complete_tools(&self, req: ToolRequest) -> Result<ToolResponse> {
-        let plain = CompletionRequest::new(&req.model, vec![]);
-        let mut payload = serde_json::to_value(self.payload(&plain, false))?;
-        payload["messages"] = serde_json::to_value(&req.messages)?;
-        payload["tools"] = serde_json::to_value(&req.tools)?;
-        // The loop owns this budget; a saved limit is its hard ceiling.
-        let limit = self
-            .output_limit
-            .map_or(req.max_tokens, |saved| saved.min(req.max_tokens));
-        let key = if self.reasoning_model && !self.deepseek
-            || self.reasoning_effort.is_some() && !self.deepseek
-        {
-            "max_completion_tokens"
-        } else {
-            "max_tokens"
-        };
-        payload.as_object_mut().unwrap().remove("max_tokens");
-        payload
-            .as_object_mut()
-            .unwrap()
-            .remove("max_completion_tokens");
-        payload[key] = serde_json::json!(limit);
-        if self.deepseek {
-            payload.as_object_mut().unwrap().remove("reasoning_effort");
-        }
+        let payload = self.tool_payload(&req)?;
+        tracing::info!(parameters = %self.tool_request_metadata(&req), "发送工具模型请求（脱敏参数）");
         let resp = self
             .send_with_retries(&payload, Some(TOOL_REQUEST_TIMEOUT))
             .await?;
@@ -265,6 +388,12 @@ impl ModelProvider for OpenAiProvider {
         Ok(ToolResponse {
             message: choice.message,
             finish_reason: choice.finish_reason.unwrap_or_default(),
+            usage_reported: parsed.usage.is_some(),
+            reasoning_tokens: parsed
+                .usage
+                .as_ref()
+                .and_then(|u| u.completion_tokens_details.as_ref())
+                .and_then(|details| details.reasoning_tokens),
             usage: parsed
                 .usage
                 .map(|u| Usage::new(u.prompt_tokens, u.completion_tokens))
@@ -352,7 +481,7 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn name(&self) -> &str {
-        "openai"
+        self.provider_name
     }
 
     // TODO: 按实际所选模型调整上下文窗口。
@@ -374,6 +503,10 @@ struct WireRequest<'a> {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
     stream: bool,
 }
 
@@ -445,7 +578,134 @@ struct CompletionTokenDetails {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn tool_wire_parameters_match_diagnostics_for_multiple_adapters() {
+        for (adapter, expected) in [
+            (
+                "openai",
+                serde_json::json!({"model":"o3-mini","max_completion_tokens":700}),
+            ),
+            (
+                "deepseek",
+                serde_json::json!({"model":"deepseek-flash","max_tokens":700,"thinking":{"type":"disabled"}}),
+            ),
+            (
+                "qwen",
+                serde_json::json!({"model":"qwen3-32b","max_tokens":700,"enable_thinking":false}),
+            ),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let mock = server.mock("POST", "/chat/completions")
+                .match_body(mockito::Matcher::PartialJson(expected.clone()))
+                .with_status(200).with_header("content-type", "application/json")
+                .with_body(serde_json::json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"done"}}],"usage":{"prompt_tokens":10,"completion_tokens":1}}).to_string())
+                .create_async().await;
+            let mut provider = provider_with(server.url());
+            provider = match adapter {
+                "deepseek" => provider.with_deepseek_defaults().with_thinking(Some(false)),
+                "qwen" => provider.with_qwen_defaults().with_thinking(Some(false)),
+                _ => provider.with_reasoning_model(true),
+            };
+            let req = ToolRequest {
+                model: expected["model"].as_str().unwrap().into(),
+                messages: vec![ToolMessage::text("user", "Create HTML page")],
+                tools: vec![],
+                max_tokens: 700,
+            };
+            let metadata = provider.tool_request_metadata(&req);
+            assert_eq!(metadata["provider"], adapter);
+            if adapter == "openai" {
+                assert!(metadata["reasoningEffort"].is_null());
+                assert_eq!(metadata["reasoningEffortSource"], "provider_default");
+                assert_eq!(metadata["maxCompletionTokens"], 700);
+                assert!(metadata["maxTokens"].is_null());
+            } else {
+                assert_eq!(metadata["maxTokens"], 700);
+                assert!(metadata["reasoningEffort"].is_null());
+                assert!(metadata["maxCompletionTokens"].is_null());
+            }
+            assert!(!metadata.to_string().contains("test-key"));
+            assert!(!metadata.to_string().contains("Create HTML"));
+            provider.complete_tools(req).await.unwrap();
+            mock.assert_async().await;
+        }
+    }
+
     use super::*;
+
+    #[tokio::test]
+    async fn saved_sampling_and_caps_reach_completion_tool_and_stream_requests() {
+        let mut server = Server::new_async().await;
+        let provider = provider_with(server.url())
+            .with_temperature(Some(0.25))
+            .with_output_limit(Some(2048));
+        let body = json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"pong"}}]});
+        let complete = server
+            .mock("POST", "/chat/completions")
+            .match_body(Matcher::PartialJson(
+                json!({"temperature":0.25,"max_tokens":8,"stream":false}),
+            ))
+            .with_status(200)
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+        let mut request = CompletionRequest::new("custom", vec![Message::user("ping")]);
+        request.max_tokens = 8;
+        provider.complete(request.clone()).await.unwrap();
+        complete.assert_async().await;
+        let tools = server
+            .mock("POST", "/chat/completions")
+            .match_body(Matcher::PartialJson(
+                json!({"temperature":0.25,"max_tokens":700,"tools":[],"stream":false}),
+            ))
+            .with_status(200)
+            .with_body(body.to_string())
+            .create_async()
+            .await;
+        provider
+            .complete_tools(ToolRequest {
+                model: "custom".into(),
+                messages: vec![ToolMessage::text("user", "ping")],
+                tools: vec![],
+                max_tokens: 700,
+            })
+            .await
+            .unwrap();
+        tools.assert_async().await;
+        let streaming = server
+            .mock("POST", "/chat/completions")
+            .match_body(Matcher::PartialJson(
+                json!({"temperature":0.25,"max_tokens":8,"stream":true}),
+            ))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body("data: [DONE]\n\n")
+            .create_async()
+            .await;
+        let mut stream = provider.stream(request).await.unwrap();
+        assert!(stream.next().await.is_none());
+        streaming.assert_async().await;
+    }
+
+    #[test]
+    fn thinking_disabled_restores_sampling_and_never_injects_default_effort() {
+        let provider = provider_with("http://localhost".into())
+            .with_deepseek_defaults()
+            .with_thinking(Some(false))
+            .with_temperature(Some(0.5));
+        let payload = provider
+            .tool_payload(&ToolRequest {
+                model: "deepseek-flash".into(),
+                messages: vec![ToolMessage::text("user", "Create HTML")],
+                tools: vec![],
+                max_tokens: 700,
+            })
+            .unwrap();
+        assert_eq!(payload["temperature"], json!(0.5));
+        assert_eq!(payload["thinking"], json!({"type":"disabled"}));
+        assert!(payload.get("reasoning_effort").is_none());
+        assert!(payload.get("max_completion_tokens").is_none());
+    }
 
     #[tokio::test]
     async fn native_tool_calls_keep_deepseek_reasoning_only_in_wire_conversation() {
@@ -455,7 +715,7 @@ mod tests {
             .with_status(200).with_body(json!({"choices":[{"finish_reason":"tool_calls","message":{
                 "role":"assistant","content":null,"reasoning_content":"private reasoning",
                 "tool_calls":[{"id":"call-a","type":"function","function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}}]}}],
-                "usage":{"prompt_tokens":17,"completion_tokens":23}}).to_string()).create_async().await;
+                "usage":{"prompt_tokens":17,"completion_tokens":23,"completion_tokens_details":{"reasoning_tokens":11}}}).to_string()).create_async().await;
         let provider = provider_with(server.url()).with_deepseek_defaults();
         let response=provider.complete_tools(ToolRequest {model:"deepseek-flash".into(),messages:vec![ToolMessage::text("user","List files")],
             tools:vec![json!({"type":"function","function":{"name":"list_dir","parameters":{"type":"object"}}})],max_tokens:8192}).await.unwrap();
@@ -465,6 +725,8 @@ mod tests {
         );
         assert_eq!(response.message.tool_calls[0].id, "call-a");
         assert_eq!(response.usage, Usage::new(17, 23));
+        assert!(response.usage_reported);
+        assert_eq!(response.reasoning_tokens, Some(11));
         mock.assert_async().await;
         let replay=server.mock("POST","/chat/completions")
             .match_body(Matcher::PartialJson(json!({"messages":[
@@ -490,6 +752,16 @@ mod tests {
 
     fn provider_with(server_url: String) -> OpenAiProvider {
         OpenAiProvider::new(server_url, "test-key".to_string())
+    }
+
+    #[test]
+    fn normalizes_gateway_endpoint_and_bearer_prefix() {
+        assert_eq!(
+            normalize_base_url(" https://example.test/newapi/v1/chat/completions/// "),
+            "https://example.test/newapi/v1"
+        );
+        assert_eq!(normalize_api_key("  Bearer sk-test  "), "sk-test");
+        assert_eq!(normalize_api_key("sk-test"), "sk-test");
     }
 
     fn sample_request() -> CompletionRequest {
@@ -614,7 +886,7 @@ mod tests {
             ("deepseek-flash", None, 32768),
             ("deepseek-v4-pro", None, 32768),
             ("deepseek-chat", None, 4096),
-            ("deepseek-flash", Some(8192), 8192),
+            ("deepseek-flash", Some(8192), 4096),
         ] {
             let mut server = Server::new_async().await;
             let mock = server

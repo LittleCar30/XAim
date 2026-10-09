@@ -117,13 +117,14 @@ export interface Config {
   activeModelId?: string | null
 }
 
-export type ReasoningEffort = 'low' | 'medium' | 'high'
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'max'
 export interface ModelProfile {
   id: string
   label: string
   config: ModelConfig
   supportsReasoning: boolean
   reasoningEffort: ReasoningEffort | null
+  thinking?: boolean | null
 }
 
 /**
@@ -323,4 +324,4 @@ export interface VerifyIssue {
 }
 
 /** 模型提供方。TODO: 与 model 模块对齐。 */
-export type ProviderName = 'openai' | 'anthropic' | 'deepseek' | 'ollama'
+export type ProviderName = 'openai' | 'anthropic' | 'deepseek' | 'qwen' | 'ollama' | 'newapi'

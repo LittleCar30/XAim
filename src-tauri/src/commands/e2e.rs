@@ -125,7 +125,8 @@ impl Harness {
                                     .is_some_and(|text| text.starts_with("程序预算状态：")))
                         })
                         .unwrap();
-                    body["tools"].is_array()
+                    body["stream"] == true
+                        && body["tools"].is_array()
                         && messages[1]["content"] == PROMPT
                         && match previous {
                             None => last["role"] == "user",
@@ -133,15 +134,23 @@ impl Harness {
                         }
                 })
                 .with_status(200)
-                .with_header("content-type", "application/json")
+                .with_header("content-type", "text/event-stream")
                 .with_body_from_request(move |request| {
                     captured
                         .lock()
                         .unwrap()
                         .push(serde_json::from_slice(request.body().unwrap()).unwrap());
-                    json!({ "choices": [{ "message": response, "finish_reason":finish }],
-                        "usage": { "prompt_tokens": 20, "completion_tokens": 10 } })
-                    .to_string()
+                    let mut delta = response.clone();
+                    if let Some(calls) = delta.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                        for (index, call) in calls.iter_mut().enumerate() {
+                            call["index"] = json!(index);
+                        }
+                    }
+                    format!(
+                        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                        json!({"choices":[{"index":0,"delta":delta,"finish_reason":finish}]}),
+                        json!({"choices":[],"usage":{"prompt_tokens":20,"completion_tokens":10}})
+                    )
                     .into_bytes()
                 })
                 .expect(1)
@@ -354,6 +363,15 @@ async fn complete_project_to_index_task_diff_apply_and_verify_flow() {
         .iter()
         .any(|event| event["type"] == "done" && event["status"] == "done"));
     assert!(!events.iter().any(|event| event["type"] == "error"));
+    assert!(events
+        .iter()
+        .any(|event| event["type"] == "modelText" && event["status"] == "complete"));
+    assert!(harness
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request["stream"] == true));
     for mock in &harness.mocks {
         mock.assert_async().await;
     }

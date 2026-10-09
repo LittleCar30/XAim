@@ -7,6 +7,7 @@ pub mod ollama;
 pub mod openai;
 pub mod provider;
 pub mod router;
+mod tool_stream;
 
 use self::anthropic::AnthropicProvider;
 use self::openai::OpenAiProvider;

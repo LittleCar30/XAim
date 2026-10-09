@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -104,6 +104,85 @@ impl Recorder<'_> {
             rusqlite::params![input as i64, output as i64, self.task_id],
         )?;
         Ok(())
+    }
+}
+
+struct TextBuffer {
+    pending: String,
+    last_emit: Instant,
+    emitted: bool,
+}
+
+/// Batch small deltas to roughly ten updates a second; flush large/terminal chunks.
+/// Dropping the whole task future still saves pending public text as interrupted.
+struct StreamingOutput<'r, 'a> {
+    record: &'r Recorder<'a>,
+    round: usize,
+    buffer: Mutex<TextBuffer>,
+    finished: AtomicBool,
+}
+
+impl<'r, 'a> StreamingOutput<'r, 'a> {
+    fn new(record: &'r Recorder<'a>, round: usize) -> Result<Self> {
+        record.event(XaimEvent::ModelText {
+            task_id: record.task_id,
+            round,
+            delta: String::new(),
+            status: "started".into(),
+        })?;
+        Ok(Self {
+            record,
+            round,
+            buffer: Mutex::new(TextBuffer {
+                pending: String::new(),
+                last_emit: Instant::now(),
+                emitted: false,
+            }),
+            finished: AtomicBool::new(false),
+        })
+    }
+
+    fn push(&self, text: &str) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let mut buffer = self.buffer.lock().unwrap();
+        buffer.pending.push_str(text);
+        if !buffer.emitted
+            || buffer.last_emit.elapsed() >= Duration::from_millis(100)
+            || buffer.pending.len() >= 8192
+        {
+            self.emit(&mut buffer, "streaming")?;
+        }
+        Ok(())
+    }
+
+    fn emit(&self, buffer: &mut TextBuffer, status: &str) -> Result<()> {
+        self.record.event(XaimEvent::ModelText {
+            task_id: self.record.task_id,
+            round: self.round,
+            delta: buffer.pending.clone(),
+            status: status.into(),
+        })?;
+        buffer.pending.clear();
+        buffer.last_emit = Instant::now();
+        buffer.emitted = true;
+        Ok(())
+    }
+
+    fn finish(&self, status: &str) -> Result<()> {
+        if !self.finished.swap(true, Ordering::SeqCst) {
+            self.emit(&mut self.buffer.lock().unwrap(), status)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StreamingOutput<'_, '_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.finish("interrupted") {
+            tracing::warn!(%error, "中断回复保存失败");
+        }
     }
 }
 
@@ -615,7 +694,7 @@ pub async fn run(
         };
         record.diagnostic(
             "modelParameters",
-            json!({"round":turn + 1,"parameters":provider.tool_request_metadata(&request)}),
+            json!({"round":turn + 1,"parameters":provider.interaction_request_metadata(&request)}),
         )?;
         if finishing {
             finishing_requests += 1;
@@ -632,6 +711,8 @@ pub async fn run(
                 tracing::warn!(%error, "API 诊断保存失败");
             }
         };
+        let streamed_text = StreamingOutput::new(&record, turn + 1)?;
+        let text_observer = |text: &str| streamed_text.push(text);
         let response = cancellable_until(
             &cancel,
             config
@@ -639,12 +720,20 @@ pub async fn run(
                 .map_or(Instant::now() + Duration::from_secs(600), |d| {
                     d.min(Instant::now() + Duration::from_secs(600))
                 }),
-            provider.complete_tools_observed(request, config.deadline, &observer),
+            provider.interact_tools_observed(request, config.deadline, &observer, &text_observer),
         )
         .await;
         let response = match response {
-            Ok(response) => response,
+            Ok(response) => {
+                streamed_text.finish(if response.finish_reason == "length" {
+                    "interrupted"
+                } else {
+                    "complete"
+                })?;
+                response
+            }
             Err(error) => {
+                streamed_text.finish("interrupted")?;
                 record.diagnostic(
                     "modelRequestFailed",
                     json!({
@@ -1023,6 +1112,39 @@ mod tests {
         responses: Mutex<VecDeque<ToolResponse>>,
         requests: Mutex<Vec<ToolRequest>>,
         delay: Duration,
+    }
+
+    #[test]
+    fn dropping_streamed_output_persists_pending_text_as_interrupted_once() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, store, project, _, sink) = setup(root.path(), vec![], LoopConfig::default());
+        let task_id = store::task::insert_task(&store.conn(), project, "stream").unwrap();
+        let record = Recorder {
+            task_id,
+            store: &store,
+            sink: sink.as_ref(),
+        };
+        {
+            let output = StreamingOutput::new(&record, 1).unwrap();
+            output.push("第一段").unwrap();
+            output.push("未完成的第二段").unwrap();
+        }
+        let steps = store::task::list_steps(&store.conn(), task_id).unwrap();
+        let events: Vec<Value> = steps
+            .iter()
+            .filter(|s| s.step_type == "event")
+            .map(|s| serde_json::from_str(&s.content).unwrap())
+            .collect();
+        let text: String = events.iter().filter_map(|e| e["delta"].as_str()).collect();
+        assert_eq!(text, "第一段未完成的第二段");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["status"] == "interrupted")
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|e| e["status"] == "complete"));
     }
 
     #[tokio::test]

@@ -142,3 +142,27 @@
 下一轮优先：发送错误观测与有界恢复、审查定位契约 → 环境准备出口、完整耗时与指纹 → 依据测量决定缓存和隔离投入。没有证据支持优先换 API、扩大预算或引入多代理，不能宣称整体可靠性达标。本次仅完成评测、离线诊断与报告，没有实施上述新方案。
 
 临时配置已删除，当前配置 API 密钥精确匹配扫描未发现泄露；原始错误日志仍可能含网关 URL，公开摘要已脱敏，扫描不是完整秘密审计。[完整分析与改进清单](reports/2026-10-09-frozen-full/analysis.md)、[正式可读报告](reports/2026-10-09-frozen-full/formal/agent.md)、[正式指标](reports/2026-10-09-frozen-full/formal/metrics.json)、[独立串行/并发诊断](reports/2026-10-09-frozen-full/diagnostic-analysis.md)、[冻结运行清单](reports/2026-10-09-frozen-full/run-manifest.json)、[完成复核](reports/2026-10-09-frozen-full/completion-audit.json)。
+
+### 流式交互第一阶段迁移（2026-10-09）
+
+原生工具交互改为流式优先。OpenAI 兼容 SSE 按工具 index 拼接 ID、名称、参数和正文，正常结束后才向工具循环交付整轮；支持收尾 usage、缺失 usage、DeepSeek 协议所需的 reasoning 回传，推理正文不进入历史或界面。UTF-8 与 SSE 事件均允许跨网络块切分。残缺 JSON、工具参数、缺少 finish/DONE、超限响应或断流均不执行本轮工具，length 交给原有有界截断恢复。
+
+非流式 complete/complete_tools 接口保留。HTTP 400/405/415/422 明确表示 stream 不支持时才回退，并在当前 provider 实例中记住兼容结果；只拒绝 stream_options 时去掉 usage 选项继续流式，用量缺失保留未知标记。若网关忽略 stream=true 返回 JSON，则接受同一响应，不重发。网络发送错误、401、普通参数错误及已开始输出的断流均不触发非流式重放；兼容探测与回退共享任务截止时间。无原生工具支持的旧补丁路径和规划/连接检查仍非流式。
+
+正文通过 modelText started/streaming/complete/interrupted 事件分批推送并持久化；小增量约每 100ms 合并，大块与终态立即保存。取消或整个执行 future 被丢弃时，未推送的尾部仍标为 interrupted 保存。界面按 task/round 拼接，历史可回放中断内容。参数仅在完整响应后进入工具执行，正文显示不表示代码已经应用或任务已经完成。
+
+记录每个传输分支实际 stream/stream_options 参数、首个 SSE 事件/首段公开文本时延、流结束/错误/取消和接收字节数；首段时延包含响应头前的等待，不标为纯网络延迟。评测包装器透传流式交互及返回 usage，逻辑调用与实际 HTTP 尝试分开，未返回 usage 的消费未知。
+
+| 本地验收 | 结果 |
+| --- | ---: |
+| Rust 库测试 | 605 通过，2 按原设置忽略 |
+| 评测运行器 | 14 通过 |
+| 前端单元测试 | 117 通过 |
+| React → Rust → SSE 工具 → Diff → 应用 → 原始验收 E2E | 1 通过 |
+| TypeScript / ESLint / rustfmt / 差异空白检查 | 通过 |
+| Clippy lib + xaim-eval | 通过，保留已有 watcher while-let 建议 |
+| 审查评分器 | 2 通过 |
+
+新增测试覆盖交错工具参数、Unicode 分片、usage 缺失、私有推理不导出、残缺响应拒绝、明确不支持时回退/记忆、仅 usage 选项兼容、忽略 stream 的 JSON、401/无关错误不回退、持续流的共享截止时间、首段在完成前可见、取消诊断、无分隔符大事件限额，以及掉落任务 future 时中断正文保存。真实本地 HTTP SSE 经评测包装器和编排器生成正确候选并独立验收；下一轮流断开时已有候选通过，新增调用不执行。E2E 的实际模型端点为本地协议 fixture，不是在线提供方。
+
+本轮未重跑在线完整 30 项；已有非流式冻结成绩 **25/30** 保持不变。不能据协议/回归测试宣称流式已经提高在线成功率或修复底层网络。OS 隔离、环境准备、依赖复制成本/完整验证指纹、兼容文本补丁路径限制继续保留。

@@ -6,6 +6,8 @@
 //! Ollama 本地模型（`http://localhost:11434/v1`）等。
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -14,8 +16,8 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use super::provider::{
-    CompletionRequest, CompletionResponse, ModelProvider, RequestObserver, ToolMessage,
-    ToolRequest, ToolResponse, Usage,
+    CompletionRequest, CompletionResponse, ModelProvider, RequestObserver, TextObserver,
+    ToolMessage, ToolRequest, ToolResponse, Usage,
 };
 use crate::errors::{Result, XaimError};
 
@@ -44,6 +46,8 @@ pub struct OpenAiProvider {
     thinking: Option<bool>,
     output_limit: Option<u32>,
     temperature: Option<f32>,
+    streaming_disabled: AtomicBool,
+    stream_usage_disabled: AtomicBool,
 }
 
 impl OpenAiProvider {
@@ -72,6 +76,8 @@ impl OpenAiProvider {
             thinking: None,
             output_limit: None,
             temperature: None,
+            streaming_disabled: AtomicBool::new(false),
+            stream_usage_disabled: AtomicBool::new(false),
         }
     }
 
@@ -242,6 +248,8 @@ impl OpenAiProvider {
             let mut request = client.post(&url).bearer_auth(&self.api_key).json(payload);
             if let Some(timeout) = timeout {
                 request = request.timeout(remaining.map_or(timeout, |r| r.min(timeout)));
+            } else if let Some(remaining) = remaining {
+                request = request.timeout(remaining);
             }
             let send = request.send().await;
 
@@ -297,6 +305,135 @@ impl OpenAiProvider {
             }
         }
     }
+}
+
+impl OpenAiProvider {
+    async fn read_tool_stream(
+        &self,
+        response: reqwest::Response,
+        max_tokens: u32,
+        request_started: Instant,
+        observer: &RequestObserver<'_>,
+        text: &TextObserver<'_>,
+    ) -> Result<ToolResponse> {
+        let json_response = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|s| s.starts_with("application/json"));
+        let limit = (max_tokens as usize)
+            .saturating_mul(64)
+            .clamp(65_536, 16 * 1024 * 1024);
+        let size = Arc::new(AtomicUsize::new(0));
+        let counted = size.clone();
+        let bytes = response.bytes_stream().map(move |chunk| {
+            let chunk = chunk.map_err(XaimError::from)?;
+            if counted
+                .fetch_add(chunk.len(), Ordering::Relaxed)
+                .saturating_add(chunk.len())
+                > limit
+            {
+                return Err(XaimError::Model(
+                    "工具响应超过接收上限，未执行本轮工具".into(),
+                ));
+            }
+            Ok(chunk)
+        });
+        let mut observation = RequestObservation::new(Some(observer), "stream", 0);
+        let outcome = async {
+            if json_response {
+                // Some compatible gateways ignore stream=true and return JSON.
+                // Accept that response without issuing the same request again.
+                futures::pin_mut!(bytes);
+                let mut body = Vec::new();
+                while let Some(chunk) = bytes.next().await { body.extend_from_slice(&chunk?); }
+                let response = parse_tool_response(&body, self.deepseek)?;
+                self.streaming_disabled.store(true, Ordering::Relaxed);
+                observer(serde_json::json!({"stage":"streamCompatibility","reason":"json_response","stream":false}));
+                if let Some(content) = &response.message.content { text(content)?; }
+                return Ok(response);
+            }
+            let sse = bytes.eventsource();
+            futures::pin_mut!(sse);
+            let mut assembled = super::tool_stream::ToolStream::default();
+            let mut first = true;
+            let mut first_text = true;
+            while let Some(event) = sse.next().await {
+                let event = event.map_err(|_| XaimError::Model("工具 SSE 读取失败，未执行本轮工具".into()))?;
+                let data = event.data.trim();
+                if data.is_empty() { continue; }
+                if first {
+                    first = false;
+                    observer(serde_json::json!({"stage":"firstChunk","durationMs":request_started.elapsed().as_millis() as u64}));
+                }
+                if let Some(delta) = assembled.push(data)? {
+                    if first_text {
+                        first_text = false;
+                        observer(serde_json::json!({"stage":"firstText","durationMs":request_started.elapsed().as_millis() as u64}));
+                    }
+                    text(&delta)?;
+                }
+                if assembled.is_done() { break; }
+            }
+            assembled.finish(self.deepseek)
+        }.await;
+        observation.finish(serde_json::json!({"stage":if outcome.is_ok() {"streamEnd"} else {"streamError"},
+            "durationMs":observation.elapsed_ms(),"bytes":size.load(Ordering::Relaxed),"success":outcome.is_ok()}));
+        outcome
+    }
+}
+
+fn parse_tool_response(body: &[u8], keep_reasoning: bool) -> Result<ToolResponse> {
+    let parsed: ToolWireResponse =
+        serde_json::from_slice(body).map_err(|_| XaimError::Model("工具响应 JSON 无效".into()))?;
+    let mut choice = parsed
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| XaimError::Model("模型响应缺少 choices".into()))?;
+    if choice.message.role != "assistant" {
+        return Err(XaimError::Model("工具响应角色不是 assistant".into()));
+    }
+    if !keep_reasoning {
+        choice.message.reasoning_content = None;
+    }
+    Ok(ToolResponse {
+        message: choice.message,
+        finish_reason: choice.finish_reason.unwrap_or_default(),
+        usage_reported: parsed.usage.is_some(),
+        reasoning_tokens: parsed
+            .usage
+            .as_ref()
+            .and_then(|u| u.completion_tokens_details.as_ref())
+            .and_then(|d| d.reasoning_tokens),
+        usage: parsed
+            .usage
+            .map(|u| Usage::new(u.prompt_tokens, u.completion_tokens))
+            .unwrap_or_default(),
+    })
+}
+
+fn unsupported_stream_parameter(error: &XaimError, parameter: &str) -> bool {
+    let XaimError::Model(message) = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    let client_rejection = ["http 400 ", "http 405 ", "http 415 ", "http 422 "]
+        .iter()
+        .any(|prefix| message.starts_with(prefix));
+    let unsupported = [
+        "not supported",
+        "unsupported",
+        "unknown parameter",
+        "unrecognized",
+        "not allowed",
+    ]
+    .iter()
+    .any(|phrase| message.contains(phrase));
+    client_rejection
+        && unsupported
+        && message.contains(parameter)
+        && (parameter != "stream" || !message.contains("stream_options"))
 }
 
 /// Accept either an OpenAI-compatible root (`.../v1`) or a copied endpoint URL.
@@ -479,6 +616,7 @@ impl ModelProvider for OpenAiProvider {
                 "reasoningEffortSource":if self.reasoning_effort.is_some() { "configured" } else { "provider_default" },
                 "maxTokens":payload["max_tokens"],"maxCompletionTokens":payload["max_completion_tokens"],
                 "temperature":payload["temperature"],"parameterSource":"wire_payload",
+                "stream":false,
             }),
             Err(error) => {
                 serde_json::json!({"provider":self.name(),"model":req.model,"payloadError":error.to_string()})
@@ -487,6 +625,74 @@ impl ModelProvider for OpenAiProvider {
     }
     fn supports_tools(&self) -> bool {
         true
+    }
+
+    fn interaction_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
+        let mut metadata = self.tool_request_metadata(req);
+        let streaming = !self.streaming_disabled.load(Ordering::Relaxed);
+        metadata["stream"] = serde_json::json!(streaming);
+        metadata["streamOptions"] =
+            if streaming && !self.stream_usage_disabled.load(Ordering::Relaxed) {
+                serde_json::json!({"include_usage":true})
+            } else {
+                serde_json::Value::Null
+            };
+        metadata["parameterSource"] = serde_json::json!("preferred_wire_payload");
+        metadata
+    }
+
+    async fn interact_tools_observed(
+        &self,
+        req: ToolRequest,
+        deadline: Option<Instant>,
+        observer: &RequestObserver<'_>,
+        text: &TextObserver<'_>,
+    ) -> Result<ToolResponse> {
+        if self.streaming_disabled.load(Ordering::Relaxed) {
+            let response = self
+                .complete_tools_observed(req, deadline, observer)
+                .await?;
+            if let Some(content) = &response.message.content {
+                text(content)?;
+            }
+            return Ok(response);
+        }
+        let mut total = RequestObservation::new(Some(observer), "request", 0);
+        let outcome = async {
+            let mut payload = self.tool_payload(&req)?;
+            payload["stream"] = serde_json::json!(true);
+            if !self.stream_usage_disabled.load(Ordering::Relaxed) {
+                payload["stream_options"] = serde_json::json!({"include_usage":true});
+            }
+            loop {
+                let mut parameters = self.tool_request_metadata(&req);
+                parameters["stream"] = payload["stream"].clone();
+                parameters["streamOptions"] = payload["stream_options"].clone();
+                observer(serde_json::json!({"stage":"requestParameters","parameters":parameters}));
+                let sent = self.send_with_retries(&payload, None, deadline, Some(observer)).await;
+                match sent {
+                    Err(error) if unsupported_stream_parameter(&error, "stream_options")
+                        && payload.get("stream_options").is_some() => {
+                        self.stream_usage_disabled.store(true, Ordering::Relaxed);
+                        payload.as_object_mut().unwrap().remove("stream_options");
+                        observer(serde_json::json!({"stage":"streamCompatibility","reason":"usage_option_unsupported","stream":true}));
+                    }
+                    Err(error) if unsupported_stream_parameter(&error, "stream") => {
+                        // Only an explicit rejection before any response delta permits
+                        // replay. Network errors and partial streams never fall back.
+                        self.streaming_disabled.store(true, Ordering::Relaxed);
+                        observer(serde_json::json!({"stage":"streamFallback","reason":"stream_unsupported","stream":false}));
+                        let response = self.complete_tools_observed(req, deadline, observer).await?;
+                        if let Some(content) = &response.message.content { text(content)?; }
+                        return Ok(response);
+                    }
+                    Err(error) => return Err(error),
+                    Ok(response) => return self.read_tool_stream(response, req.max_tokens, total.started, observer, text).await,
+                }
+            }
+        }.await;
+        total.finish(serde_json::json!({"stage":"total","durationMs":total.elapsed_ms(),"success":outcome.is_ok()}));
+        outcome
     }
 
     async fn complete_tools(&self, req: ToolRequest) -> Result<ToolResponse> {
@@ -502,6 +708,7 @@ impl ModelProvider for OpenAiProvider {
         let mut total = RequestObservation::new(Some(observer), "request", 0);
         let outcome = async {
         let payload = self.tool_payload(&req)?;
+        observer(serde_json::json!({"stage":"requestParameters","parameters":self.tool_request_metadata(&req)}));
         tracing::info!(parameters = %self.tool_request_metadata(&req), "发送工具模型请求（脱敏参数）");
         let resp = self
             .send_with_retries(
@@ -522,33 +729,7 @@ impl ModelProvider for OpenAiProvider {
                 return Err(error.into());
             }
         };
-        let parsed: ToolWireResponse = serde_json::from_str(&body)
-            .map_err(|error| XaimError::Model(format!("工具响应 JSON 无效: {error}")))?;
-        let mut choice = parsed
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| XaimError::Model("模型响应缺少 choices".into()))?;
-        if choice.message.role != "assistant" {
-            return Err(XaimError::Model("工具响应角色不是 assistant".into()));
-        }
-        if !self.deepseek {
-            choice.message.reasoning_content = None;
-        }
-        Ok(ToolResponse {
-            message: choice.message,
-            finish_reason: choice.finish_reason.unwrap_or_default(),
-            usage_reported: parsed.usage.is_some(),
-            reasoning_tokens: parsed
-                .usage
-                .as_ref()
-                .and_then(|u| u.completion_tokens_details.as_ref())
-                .and_then(|details| details.reasoning_tokens),
-            usage: parsed
-                .usage
-                .map(|u| Usage::new(u.prompt_tokens, u.completion_tokens))
-                .unwrap_or_default(),
-        })
+        parse_tool_response(body.as_bytes(), self.deepseek)
         }.await;
         total.finish(serde_json::json!({"stage":"total","success":outcome.is_ok(),"durationMs":total.elapsed_ms()}));
         outcome
@@ -728,6 +909,10 @@ struct ApiUsage {
 struct CompletionTokenDetails {
     reasoning_tokens: Option<u32>,
 }
+
+#[cfg(test)]
+#[path = "openai_stream_tests.rs"]
+mod streaming_tests;
 
 #[cfg(test)]
 mod tests {

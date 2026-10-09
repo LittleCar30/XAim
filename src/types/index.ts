@@ -263,6 +263,7 @@ export interface XaimErrorEvent {
 
 /** 后端事件流载荷的判别联合，按 `type` 字段区分。 */
 export type XaimEvent =
+  | { type: 'modelText'; taskId: number; round: number; delta: string; status: 'started' | 'streaming' | 'complete' | 'interrupted' }
   | { type: 'modelResponse'; taskId: number; round: number; finishReason: string; durationMs: number; toolCalls: number }
   | { type: 'toolFinished'; taskId: number; callId: string; result: ToolResult }
   | { type: 'message'; taskId: number; content: string }

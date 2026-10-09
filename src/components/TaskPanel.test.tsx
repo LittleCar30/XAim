@@ -8,6 +8,39 @@ import { useConversationStore } from '@/stores/conversation'
 
 beforeEach(resetStores)
 
+it('shows incremental text for the current round and retains interrupted output', () => {
+  useTaskStore.setState({ currentTask: { ...task, status: 'generating' } })
+  render(<TaskPanel />)
+  act(() => {
+    useTaskStore.getState().handleEvent({ type: 'modelText', taskId: task.id, round: 1, delta: '正在', status: 'streaming' })
+  })
+  expect(within(screen.getByLabelText('模型回复')).getByText('正在')).toBeInTheDocument()
+  act(() => {
+    useTaskStore.getState().handleEvent({ type: 'modelText', taskId: task.id, round: 1, delta: '修复。', status: 'interrupted' })
+    useTaskStore.getState().handleEvent({ type: 'done', taskId: task.id, status: 'cancelled' })
+  })
+  expect(screen.getByText('正在修复。')).toBeInTheDocument()
+  expect(screen.getByText('回复已中断，内容尚未完成。')).toBeInTheDocument()
+})
+
+it('replays persisted deltas without mixing tasks or earlier rounds', () => {
+  const events = [
+    { type: 'modelText', taskId: 99, round: 2, delta: 'other task', status: 'complete' },
+    { type: 'modelText', taskId: task.id, round: 1, delta: 'earlier round', status: 'complete' },
+    { type: 'modelText', taskId: task.id, round: 2, delta: '保存的', status: 'streaming' },
+    { type: 'modelText', taskId: task.id, round: 2, delta: '回复', status: 'interrupted' },
+  ]
+  useConversationStore.setState({ selectedId: task.id, record: { task: { ...task, status: 'cancelled' },
+    patches: [], verifies: [], steps: events.map((event, id) => ({
+      id, taskId: task.id, stepType: 'event', content: JSON.stringify(event), createdAt: id,
+    })),
+  } })
+  render(<TaskPanel />)
+  expect(screen.getByText('保存的回复')).toBeInTheDocument()
+  expect(screen.queryByText('other task')).not.toBeInTheDocument()
+  expect(screen.queryByText('earlier round')).not.toBeInTheDocument()
+})
+
 it('renders empty state then responds to task events', () => {
   render(<TaskPanel />)
   expect(screen.getByText('新对话')).toBeInTheDocument()

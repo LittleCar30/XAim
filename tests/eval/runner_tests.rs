@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 use std::collections::VecDeque;
 
 fn options(mode: EvalMode, output: &Path) -> EvalOptions {
@@ -16,6 +17,89 @@ fn fixture(root: &Path, id: &str, verify: &str) -> PathBuf {
     fs::write(task.join("task.md"), "# Task\nFix the fixture\n").unwrap();
     fs::write(task.join("verify.sh"), verify).unwrap();
     task
+}
+
+async fn streamed_fixture(interrupted: bool) -> EvalReport {
+    let suite = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    fixture(
+        suite.path(),
+        "001-stream",
+        "set -eu\ngrep -Fq ready \"$1/result.txt\"\ntest ! -e \"$1/incomplete.txt\"\n",
+    );
+    let mut server = mockito::Server::new_async().await;
+    let mock = server.mock("POST", "/chat/completions")
+        .match_body(mockito::Matcher::PartialJson(json!({"stream":true})))
+        .with_header("content-type", "text/event-stream")
+        .with_body_from_request(move |request| {
+            let body: serde_json::Value = serde_json::from_slice(request.body().unwrap()).unwrap();
+            let second = body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool");
+            let (name, args, content) = if !second {
+                ("create_file", json!({"path":"result.txt","content":"ready"}), "Creating file")
+            } else if interrupted {
+                ("create_file", json!({"path":"incomplete.txt","content":"must not execute"}), "Partial reply")
+            } else {
+                ("update_task_state", json!({"completed":["Created file"],"pending":[],"ready_for_review":true,"summary":"Completed"}), "Completed")
+            };
+            let packet = json!({"choices":[{"index":0,"delta":{"role":"assistant","content":content,
+                "tool_calls":[{"index":0,"id":if second {"finish"} else {"write"},"type":"function",
+                    "function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":"tool_calls"}]});
+            let mut response = format!("data: {packet}\n\n");
+            if !second || !interrupted {
+                response += &format!("data: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}}));
+            }
+            response.into_bytes()
+        }).expect(2).create_async().await;
+    let provider = Arc::new(xaim_lib::model::openai::OpenAiProvider::new(
+        server.url(),
+        "test-key".into(),
+    ));
+    let report = Box::pin(run_with_provider(
+        suite.path(),
+        &options(EvalMode::Agent, out.path()),
+        Some(provider),
+    ))
+    .await;
+    mock.assert_async().await;
+    assert!(!suite.path().join("001-stream/repo/result.txt").exists());
+    report
+}
+
+#[tokio::test]
+async fn real_streamed_tools_flow_through_counting_provider_and_independent_acceptance() {
+    let report = Box::pin(streamed_fixture(false)).await;
+    let task = &report.details[0];
+    assert!(task.passed, "{}", task.error.as_deref().unwrap_or("failed"));
+    assert_eq!(task.model_calls, 2);
+    assert_eq!((task.input_tokens, task.output_tokens), (22, 14));
+    assert!(task.task_log.contains("modelText") && task.task_log.contains("Creating file"));
+    assert!(task
+        .diagnostics
+        .iter()
+        .any(|e| e["kind"] == "apiAttempt" && e["data"]["data"]["stage"] == "streamEnd"));
+}
+
+#[tokio::test]
+async fn broken_stream_saves_completed_candidate_and_text_without_executing_new_tools() {
+    let report = Box::pin(streamed_fixture(true)).await;
+    let task = &report.details[0];
+    assert!(!task.passed);
+    assert_eq!(task.candidate_verify_status.as_deref(), Some("passed"));
+    assert_eq!(
+        (task.model_calls, task.input_tokens, task.output_tokens),
+        (2, 11, 7)
+    );
+    assert!(task.checkpoint["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["path"] == "result.txt"));
+    assert!(task.task_log.contains("Partial reply") && task.task_log.contains("interrupted"));
+    assert!(!task
+        .diagnostics
+        .iter()
+        .any(|e| e["kind"] == "apiAttempt" && e["data"]["data"]["stage"] == "streamFallback"));
 }
 
 #[tokio::test]

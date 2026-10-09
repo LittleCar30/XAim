@@ -38,7 +38,7 @@ interface Inspection {
   files: { path: string; language: string; hash: string }[]
   gitStatus: string[]
   modelCalls: number
-  modelRequests: { model: string; reasoning_effort?: string; max_tokens?: number; max_completion_tokens?: number; temperature?: number }[]
+  modelRequests: { model: string; stream: boolean; reasoning_effort?: string; max_tokens?: number; max_completion_tokens?: number; temperature?: number }[]
 }
 interface Verification { command: string; passed: boolean; output: string }
 interface Response { id: number; result: unknown; error?: string; events: XaimEvent[] }
@@ -178,6 +178,7 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
   expect(final.modelCalls).toBe(4)
   expect(final.modelRequests).toHaveLength(4)
   for (const call of final.modelRequests) {
+    expect(call.stream).toBe(true)
     expect(call.model).toBe('selected-reasoner')
     expect(call.reasoning_effort).toBe('high')
     expect(call.max_completion_tokens).toBeGreaterThan(0)
@@ -188,6 +189,7 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
   const persisted = await ipc.listPatches(useTaskStore.getState().currentTask!.id)
   expect(persisted[0]).toMatchObject({ id: patch.id, applied: true })
   expect(useTaskStore.getState().events.some((event) => event.type === 'error')).toBe(false)
+  expect(useTaskStore.getState().events.some((event) => event.type === 'modelText' && event.status === 'complete')).toBe(true)
   const taskId = useTaskStore.getState().currentTask!.id
   fireEvent.click(screen.getByRole('button', { name: '新对话' }))
   fireEvent.click(await screen.findByRole('button', { name: new RegExp(prompt) }))

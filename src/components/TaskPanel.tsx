@@ -45,6 +45,12 @@ export default function TaskPanel() {
   const passed = verifies.filter((verify) => verify.passed).length
   const errorEvent = [...savedEvents].reverse().find((event) => event.type === 'error' && event.taskId === task.id)
   const message = [...savedEvents].reverse().find((event) => event.type === 'message' && event.taskId === task.id)
+  const textEvents = savedEvents.filter((event): event is Extract<XaimEvent, { type: 'modelText' }> =>
+    event.type === 'modelText' && event.taskId === task.id,
+  )
+  const latestText = textEvents.at(-1)
+  const responseText = latestText ? textEvents.filter((event) => event.round === latestText.round).map((event) => event.delta).join('') : ''
+  const interruptedText = latestText?.status === 'interrupted' || latestText && ['failed', 'cancelled'].includes(task.status) && latestText.status !== 'complete'
   const unavailable = verifies.filter((verify) => verify.status === 'unavailable').length
   const summary = task.status === 'waitingConfirm' ? `已生成 ${patches.length} 个代码变更，等待你确认后应用。`
     : task.status === 'done' || task.status === 'applied' ? `任务已完成${patches.some((patch) => patch.applied) ? `，已应用 ${patches.filter((patch) => patch.applied).length} 个代码变更` : ''}。`
@@ -55,6 +61,10 @@ export default function TaskPanel() {
       <header className="agent-header"><img src="/xaim.svg" width="28" height="28" alt="" /><strong>XAim</strong><span className={`task-status ${taskStatusBadgeCls(task.status)}`}>{TASK_STATUS_LABELS[task.status]}</span></header>
       <p className="agent-summary">{summary}</p>
       {message?.type === 'message' && <p className="agent-summary whitespace-pre-wrap">{message.content}</p>}
+      {responseText && (running || interruptedText || historical && !message) && <div aria-label="模型回复">
+        <p className="agent-summary whitespace-pre-wrap">{responseText}</p>
+        {interruptedText && <p className="historical-note">回复已中断，内容尚未完成。</p>}
+      </div>}
       {errorEvent?.type === 'error' && <p className="message-error">{errorEvent.message}</p>}
       {stages.length > 0 && <details className="execution-details" open={running || task.status === 'failed' || undefined}>
         <summary>{running ? <Loader2 size={15} className="animate-spin" /> : task.status === 'failed' ? <X size={15} className="text-rose-400" /> : task.status === 'cancelled' ? <Circle size={15} /> : <Check size={15} />}<span>{running ? latest?.stepType : '执行过程'}</span><span className="execution-count">{stages.length} 个步骤</span><ChevronDown size={15} /></summary>

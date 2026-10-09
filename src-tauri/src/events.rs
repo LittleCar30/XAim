@@ -39,6 +39,13 @@ pub enum XaimEvent {
         task_id: i64,
         content: String,
     },
+    /// Persisted public text, batched independently of executable tool calls.
+    ModelText {
+        task_id: i64,
+        round: usize,
+        delta: String,
+        status: String,
+    },
     /// 补丁产出。
     Patch {
         task_id: i64,
@@ -106,6 +113,20 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
             json!({"type": "step", "taskId": 1, "name": "生成补丁", "status": "running"})
+        );
+    }
+
+    #[test]
+    fn streamed_text_serializes_to_frontend_shape() {
+        let event = XaimEvent::ModelText {
+            task_id: 3,
+            round: 2,
+            delta: "部分回复".into(),
+            status: "interrupted".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({"type":"modelText","taskId":3,"round":2,"delta":"部分回复","status":"interrupted"})
         );
     }
 

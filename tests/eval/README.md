@@ -71,6 +71,10 @@ node tests/eval/run.mjs candidate /path/to/candidates
 
 Rust 运行器直接调用 XAim 的真实编排器：复制每个 `repo/` 到临时目录，执行 `task.json` 的依赖准备命令，创建独立内存数据库与 Git 基线，读取 `task.md`，执行默认工具循环（不支持工具的适配器才走兼容补丁流程），自动确认应用，然后运行原始任务目录的 `verify.sh` 检查候选。初始代码不会改动。统计包装器透传工具调用与检查点能力。
 
+原生工具循环与桌面共用流式优先交互，统计包装器透传正文增量、请求诊断与最终 usage。逻辑调用包含流式兼容探测/回退，实际 HTTP 尝试另由诊断统计；`requestParameters` 记录每个传输分支的有效参数，不能只凭首轮偏好元数据判断是否回退。正文增量持久化为 `modelText` 事件；推理正文和未完成工具参数不展示。缺少流式 usage 时运行预算采用保守预留，评测 token 只统计返回 usage，不能当作完整账单。
+
+已冻结的非流式 30 项成绩保持原样，不能用流式协议回归测试声称在线成功率提高；新的在线评测需单独冻结源码与传输参数。
+
 ```bash
 npm run eval -- --config /path/to/config.json
 # 等价的 Cargo 命令

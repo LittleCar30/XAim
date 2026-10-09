@@ -591,6 +591,27 @@ impl ModelProvider for CountingProvider {
     fn tool_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
         self.inner.tool_request_metadata(req)
     }
+    fn interaction_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
+        self.inner.interaction_request_metadata(req)
+    }
+    async fn interact_tools_observed(
+        &self,
+        req: ToolRequest,
+        deadline: Option<Instant>,
+        observer: &xaim_lib::model::provider::RequestObserver<'_>,
+        text: &xaim_lib::model::provider::TextObserver<'_>,
+    ) -> XaimResult<ToolResponse> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        let response = self
+            .inner
+            .interact_tools_observed(req, deadline, observer, text)
+            .await?;
+        self.input
+            .fetch_add(u64::from(response.usage.input_tokens), Ordering::Relaxed);
+        self.output
+            .fetch_add(u64::from(response.usage.output_tokens), Ordering::Relaxed);
+        Ok(response)
+    }
     async fn complete_tools(&self, req: ToolRequest) -> XaimResult<ToolResponse> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         let response = self.inner.complete_tools(req).await?;

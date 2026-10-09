@@ -9,6 +9,8 @@ use futures::Stream;
 use crate::errors::Result;
 
 pub type RequestObserver<'a> = dyn Fn(serde_json::Value) + Send + Sync + 'a;
+/// Public assistant text only; never reasoning or incomplete tool arguments.
+pub type TextObserver<'a> = dyn Fn(&str) -> Result<()> + Send + Sync + 'a;
 
 #[cfg(test)]
 use crate::errors::XaimError;
@@ -52,6 +54,30 @@ pub trait ModelProvider: Send + Sync {
         _observer: &RequestObserver<'_>,
     ) -> Result<ToolResponse> {
         self.complete_tools(req).await
+    }
+
+    /// Interaction prefers streaming where implemented. Older providers keep
+    /// their complete-response path, including usage and cancellation semantics.
+    fn interaction_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
+        let mut metadata = self.tool_request_metadata(req);
+        metadata["stream"] = serde_json::json!(false);
+        metadata
+    }
+
+    async fn interact_tools_observed(
+        &self,
+        req: ToolRequest,
+        deadline: Option<std::time::Instant>,
+        observer: &RequestObserver<'_>,
+        text: &TextObserver<'_>,
+    ) -> Result<ToolResponse> {
+        let response = self
+            .complete_tools_observed(req, deadline, observer)
+            .await?;
+        if let Some(content) = &response.message.content {
+            text(content)?;
+        }
+        Ok(response)
     }
 
     /// 发送补全请求，阻塞至模型输出完毕并返回全文与 token 用量。

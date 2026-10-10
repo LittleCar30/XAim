@@ -136,6 +136,27 @@ it('shows historical messages without offering live patch actions', () => {
   expect(screen.queryByRole('button', { name: '回滚' })).not.toBeInTheDocument()
 })
 
+it.each([false, true])('shows completion without file changes (historical=%s)', (historical) => {
+  const content = '现有文件已满足要求。\n任务已完成，本次无需修改文件';
+  const event = { type: 'message' as const, taskId: task.id, content };
+  if (historical) {
+    useConversationStore.setState({ selectedId: task.id, record: {
+      task, patches: [], verifies: [], steps: [{
+        id: 1, taskId: task.id, stepType: 'event', content: JSON.stringify(event), createdAt: 2500,
+      }],
+    } });
+  } else {
+    useTaskStore.setState({ currentTask: task });
+    useTaskStore.getState().handleEvent(event);
+  }
+  render(<TaskPanel />);
+  expect(screen.getByText('任务已完成，本次无需修改文件。')).toBeInTheDocument();
+  expect(screen.getByText(/现有文件已满足要求/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^应用/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /撤销|回滚/ })).not.toBeInTheDocument();
+  expect(screen.queryByText('任务执行失败。')).not.toBeInTheDocument();
+})
+
 it('shows unfinished stages as failed after the task fails', () => {
   useTaskStore.setState({ currentTask: { ...task, status: 'failed' } })
   useTaskStore.getState().handleEvent({ type: 'step', taskId: task.id, name: '生成候选', status: 'running' })

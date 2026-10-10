@@ -7,6 +7,7 @@
 //! Idle → Parsing → Indexing → Retrieving → Planning → Generating
 //!      → ApplyingPatch → Verifying → WaitingConfirm → Applied → Done
 //!                          ↕ Repairing（验证失败时进入修复循环）
+//! 无文件变更的完成任务：Verifying → Done（无需应用补丁）
 //! 任意非终态 → Failed | Cancelled | RolledBack
 //! 终态：Done、Failed、RolledBack、Cancelled（无出边）
 //! ```
@@ -49,7 +50,11 @@ impl TaskStatus {
             TaskStatus::Planning => &[TaskStatus::Generating],
             TaskStatus::Generating => &[TaskStatus::ApplyingPatch],
             TaskStatus::ApplyingPatch => &[TaskStatus::Verifying],
-            TaskStatus::Verifying => &[TaskStatus::Repairing, TaskStatus::WaitingConfirm],
+            TaskStatus::Verifying => &[
+                TaskStatus::Repairing,
+                TaskStatus::WaitingConfirm,
+                TaskStatus::Done,
+            ],
             TaskStatus::Repairing => &[TaskStatus::Verifying, TaskStatus::WaitingConfirm],
             TaskStatus::WaitingConfirm => &[TaskStatus::Applied],
             TaskStatus::Applied => &[TaskStatus::Done],
@@ -158,6 +163,7 @@ mod tests {
                 | (S::ApplyingPatch, S::Verifying)
                 | (S::Verifying, S::Repairing)
                 | (S::Verifying, S::WaitingConfirm)
+                | (S::Verifying, S::Done)
                 | (S::Repairing, S::Verifying)
                 | (S::Repairing, S::WaitingConfirm)
                 | (S::WaitingConfirm, S::Applied)

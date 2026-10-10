@@ -162,7 +162,7 @@ impl Orchestrator {
         (id != 0).then_some(id)
     }
 
-    /// 在隔离副本中执行任务，最终差异进入 WaitingConfirm，返回任务 id。
+    /// 在隔离副本中执行任务，有差异进入 WaitingConfirm，无需修改时进入 Done。
     /// 原生工具协议是默认路径；文本补丁路径仅用于兼容 provider。
     ///
     /// 错误不崩溃：任何步骤失败（含取消与超时）都会把任务转入终态并推送
@@ -212,7 +212,7 @@ impl Orchestrator {
                 tracing::info!(
                     task_id,
                     elapsed_ms = started.elapsed().as_millis() as i64,
-                    "任务流程到达等待确认"
+                    "任务执行流程结束"
                 );
                 Ok(task_id)
             }
@@ -587,8 +587,12 @@ impl Orchestrator {
             if store::cache::get_cache(&self.store.conn(), &format!("task:{task_id}:report"))?
                 .is_none()
             {
-                let report =
-                    snapshot.save_report(workspace, &record, "执行中断，已保存阶段性成果")?;
+                let reason = if workspace.changes()?.files.is_empty() {
+                    "执行中断，本次没有文件变更，已保存任务记录"
+                } else {
+                    "执行中断，已保存阶段性成果"
+                };
+                let report = snapshot.save_report(workspace, &record, reason)?;
                 record.event(XaimEvent::Message {
                     task_id,
                     content: report,
@@ -752,7 +756,12 @@ impl Orchestrator {
             &mut status,
             TaskStatus::ApplyingPatch,
             "汇总代码变更",
-            async { self.save_changes(task_id, &result.changes) },
+            async {
+                if !result.changes.files.is_empty() {
+                    self.save_changes(task_id, &result.changes)?;
+                }
+                Ok(())
+            },
         )
         .await?;
         self.run_step(
@@ -763,6 +772,21 @@ impl Orchestrator {
             async { Ok(()) },
         )
         .await?;
+        if result.changes.files.is_empty() {
+            self.run_step(
+                task_id,
+                &mut status,
+                TaskStatus::Done,
+                "完成任务（无需修改文件）",
+                async { store::task::finish_task(&self.store.conn(), task_id, TaskStatus::Done) },
+            )
+            .await?;
+            self.sink.emit(XaimEvent::Done {
+                task_id,
+                status: status_label(&TaskStatus::Done).to_string(),
+            })?;
+            return Ok(());
+        }
         self.run_step(
             task_id,
             &mut status,

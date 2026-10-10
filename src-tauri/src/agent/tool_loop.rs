@@ -23,7 +23,7 @@ use crate::verify::{
 
 const SYSTEM: &str = r#"你是 XAim 编程 Agent。根据用户任务使用工具读取、搜索和编辑项目。
 文件工具只操作隔离副本，最终差异由程序计算。不要输出 unified diff。
-先 list_dir / search / search_symbols，再 read_file / read_symbol。符号工具读取当前任务副本，优先按声明定位需要的代码。edit_file 必须使用最新 hash 和唯一的非空 old_text。
+按需要先 list_dir / search，再 read_file；仅在支持的源码语言中定位声明时使用 search_symbols / read_symbol，HTML/SVG 直接读取文件。edit_file 必须使用最新 hash 和唯一的非空 old_text。
 长文件必须分块生成：先 create_file 创建小骨架，再 append_file 追加或 edit_file 编辑。
 单次写入建议不超过 4000 字符，使用写入工具返回的新 hash，不要反复读取整个文件。
 根据剩余 token 预算及时收尾，避免无必要的搜索、重复读取和装饰性大输出。
@@ -32,6 +32,7 @@ const SYSTEM: &str = r#"你是 XAim 编程 Agent。根据用户任务使用工�
 不访问凭据，不修改 .git，不执行任意命令，不为使验证通过而删除测试或削弱检查。
 遵循用户的原始要求和现有项目约定。完成后用简短正文总结变更与限制。
 可用 update_task_state 简短记录完成事项和待办；全部要求完成后声明 ready_for_review=true，程序直接验证和汇总，不需要额外一轮正文。
+已有文件可能满足原始要求：必须先读取并核对内容，再说明为何无需修改，允许以零变更完成。文件存在或搜索命中本身不代表任务已完成；仍有缺失时必须实际写入。
 程序进入收尾状态后，禁止美化、扩展功能和反复编辑，只能执行提供的检查工具；真实验证失败时才能针对性修复。
 你提出完成后程序还会执行最终验证；只有 status=failed 才需要继续修复，unavailable 不代表代码错误。
 无法运行验证时必须明确说明，不能声称验证通过。"#;
@@ -382,6 +383,7 @@ async fn verify(
 
 async fn verify_current(
     snapshot: &mut TaskSnapshot,
+    workspace: &TaskWorkspace,
     ctx: &ToolContext,
     config: &LoopConfig,
     cancel: &AtomicBool,
@@ -390,6 +392,8 @@ async fn verify_current(
     if snapshot.verified_revision != Some(snapshot.revision) {
         snapshot.verification = verify(ctx, config, cancel, record).await?;
         snapshot.verified_revision = Some(snapshot.revision);
+        // Error recovery reloads the durable snapshot, not this local state.
+        snapshot.save(workspace, record)?;
     }
     Ok(snapshot.verification.clone())
 }
@@ -438,7 +442,7 @@ async fn stop_locally(
     }
     let changes = snapshot.save(workspace, record)?;
     if !changes.files.is_empty() {
-        verify_current(snapshot, ctx, config, cancel, record).await?;
+        verify_current(snapshot, workspace, ctx, config, cancel, record).await?;
     }
     let report = snapshot.save_report(workspace, record, reason)?;
     record.event(XaimEvent::Message {
@@ -508,6 +512,7 @@ pub async fn run(
     let mut output_budget = normal_output;
     let mut repair_rounds = 0;
     let mut last_failed_revision = None;
+    let mut unsupported_completion_warned = false;
     let mut recent_request_ms = 10_000_u64;
     let mut truncation_retried = false;
     let mut measured_prompt: Option<(usize, usize)> = None;
@@ -578,13 +583,13 @@ pub async fn run(
             })?;
             let changes = snapshot.save(workspace, &record)?;
             if !changes.files.is_empty() {
-                verify_current(&mut snapshot, ctx, config, &cancel, &record).await?;
+                verify_current(&mut snapshot, workspace, ctx, config, &cancel, &record).await?;
             }
         }
         if finishing && !snapshot.files.is_empty() {
             // A repair invalidates the previous checks. Recheck before deciding
             // which tools the next finishing request is allowed to use.
-            verify_current(&mut snapshot, ctx, config, &cancel, &record).await?;
+            verify_current(&mut snapshot, workspace, ctx, config, &cancel, &record).await?;
         }
         snapshot.round = turn + 1;
         snapshot.input_used = input;
@@ -922,7 +927,7 @@ pub async fn run(
                             && args.as_object().is_some_and(|o| o.is_empty()) =>
                     {
                         let checks =
-                            verify_current(&mut snapshot, ctx, config, &cancel, &record).await?;
+                            verify_current(&mut snapshot, workspace, ctx, config, &cancel, &record).await?;
                         crate::types::ToolResult {
                             name: "run_verify".into(),
                             // The tool ran correctly even when checks are unavailable.
@@ -1035,7 +1040,28 @@ pub async fn run(
             snapshot.pending.clear();
             snapshot.model_summary = summary.clone();
         }
-        let results = verify_current(&mut snapshot, ctx, config, &cancel, &record).await?;
+        let changes = workspace.changes()?;
+        if changes.files.is_empty()
+            && !snapshot
+                .completed_operations
+                .keys()
+                .any(|key| key.starts_with("read_file:") || key.starts_with("read_symbol:"))
+        {
+            snapshot.ready_for_review = false;
+            snapshot.pending = vec!["需读取现有文件核对要求，或实际完成必要写入".into()];
+            snapshot.save(workspace, &record)?;
+            if unsupported_completion_warned {
+                return Err(XaimError::Model(
+                    "模型重复声明完成，但未产生文件变更，也未成功读取文件核对原始要求".into(),
+                ));
+            }
+            unsupported_completion_warned = true;
+            messages.push(ToolMessage::text("user",
+                "程序未发现文件变更，也没有成功读取文件的记录，无法确认完成。请读取现有文件并核对原始要求；若全部满足，说明无需修改的依据后提交完成；否则必须实际写入。"));
+            continue;
+        }
+        let results =
+            verify_current(&mut snapshot, workspace, ctx, config, &cancel, &record).await?;
         if results.iter().any(|r| r["status"] == "failed") {
             snapshot.ready_for_review = false;
             snapshot.pending = vec!["真实检查失败，需要针对性修复".into()];
@@ -1069,17 +1095,33 @@ pub async fn run(
             ));
             continue;
         }
-        let changes = workspace.changes()?;
-        if changes.files.is_empty() {
-            return Err(XaimError::PatchConflict("任务未产生代码变更".into()));
+        let unchanged = changes.files.is_empty();
+        snapshot.phase = if unchanged {
+            "completed"
+        } else {
+            "ready_for_review"
         }
-        snapshot.phase = "ready_for_review".into();
-        let program_summary =
-            snapshot.save_report(workspace, &record, "任务变更已汇总，等待审阅")?;
+        .into();
+        let program_summary = snapshot.save_report(
+            workspace,
+            &record,
+            if unchanged {
+                "任务已完成，本次无需修改文件"
+            } else {
+                "任务变更已汇总，等待审阅"
+            },
+        )?;
         record.event(XaimEvent::Message {
             task_id: record.task_id,
             content: if results.iter().any(|r| r["status"] == "unavailable") {
-                format!("{summary}\n\n{program_summary}\n无法完成全部检查，代码变更仍需审阅。")
+                format!(
+                    "{summary}\n\n{program_summary}\n{}",
+                    if unchanged {
+                        "无法完成全部检查，现有文件的运行效果尚未验证。"
+                    } else {
+                        "无法完成全部检查，代码变更仍需审阅。"
+                    }
+                )
             } else {
                 format!("{summary}\n\n{program_summary}")
             },
@@ -1863,6 +1905,308 @@ mod tests {
             .unwrap()
             .contains(&"x".repeat(3000)));
         assert_eq!(compact_tool_results(&mut messages), 0);
+    }
+
+    #[tokio::test]
+    async fn existing_html_can_complete_without_patches_or_confirmation() {
+        for submit_state in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let html = "<!doctype html><title>鹈鹕骑自行车</title><svg><animateTransform /></svg>";
+            std::fs::write(root.path().join("pelican-bicycle.html"), html).unwrap();
+            let completion = if submit_state {
+                call(
+                    "finish",
+                    "update_task_state",
+                    json!({
+                        "completed":["已读取并核对现有 SVG 动画"],"pending":[],
+                        "ready_for_review":true,"summary":"现有 pelican-bicycle.html 已包含所需动画，无需修改"
+                    }),
+                )
+            } else {
+                done()
+            };
+            let (agent, store, project, provider, sink) = setup(
+                root.path(),
+                vec![
+                    call(
+                        "read",
+                        "read_file",
+                        json!({"path":"pelican-bicycle.html","offset":0}),
+                    ),
+                    completion,
+                ],
+                LoopConfig::default(),
+            );
+            let task = agent
+                .run_task(project, "创建鹈鹕骑自行车 HTML 动画".into())
+                .await
+                .unwrap();
+            assert_eq!(provider.requests.lock().unwrap().len(), 2);
+            let saved = store::task::get_task(&store.conn(), task).unwrap().unwrap();
+            assert_eq!(saved.status, crate::types::TaskStatus::Done);
+            assert!(saved.finished_at.is_some());
+            assert!(saved.duration_ms.is_some());
+            assert!(store::patch::list_patches_by_task(&store.conn(), task)
+                .unwrap()
+                .is_empty());
+            assert!(
+                store::cache::get_cache(&store.conn(), &format!("task:{task}:changes"))
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("pelican-bicycle.html")).unwrap(),
+                html
+            );
+            let report: Value = serde_json::from_str(
+                &store::cache::get_cache(&store.conn(), &format!("task:{task}:report"))
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(report["phase"], "completed");
+            assert_eq!(report["completionConfirmed"], true);
+            assert_eq!(report["verificationStatus"], "unavailable");
+            assert_eq!(report["files"], json!([]));
+            let events = sink.0.lock().unwrap();
+            assert!(events
+                .iter()
+                .any(|e| matches!(e, XaimEvent::Done {status,..} if status == "done")));
+            assert!(!events
+                .iter()
+                .any(|e| matches!(e, XaimEvent::Error { .. } | XaimEvent::Patch { .. })));
+            assert!(events.iter().any(|e| matches!(e, XaimEvent::Message {content,..}
+                if content.contains("无需修改文件") && content.contains("尚未验证") && !content.contains("代码变更仍需审阅"))));
+            drop(events);
+            assert!(agent.confirm_task(task).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_completion_gets_one_chance_to_perform_the_task() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![
+                call(
+                    "claim",
+                    "update_task_state",
+                    json!({"completed":["Created page"],
+                "pending":[],"ready_for_review":true,"summary":"Done"}),
+                ),
+                call(
+                    "write",
+                    "create_file",
+                    json!({"path":"page.html","content":"<svg></svg>"}),
+                ),
+                done(),
+            ],
+            LoopConfig::default(),
+        );
+        let task = agent.run_task(project, "Create page".into()).await.unwrap();
+        assert_eq!(
+            store::task::get_task(&store.conn(), task)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::WaitingConfirm
+        );
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].messages.iter().any(|m| m.role == "user"
+            && m.content
+                .as_deref()
+                .unwrap_or_default()
+                .contains("没有成功读取文件")));
+        drop(requests);
+        agent.confirm_task(task).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("page.html")).unwrap(),
+            "<svg></svg>"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_reads_and_file_listings_do_not_support_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, store, project, provider, sink) = setup(
+            root.path(),
+            vec![
+                call("list", "list_dir", json!({"path":"."})),
+                call(
+                    "read",
+                    "read_file",
+                    json!({"path":"missing.html","offset":0}),
+                ),
+                done(),
+                done(),
+            ],
+            LoopConfig::default(),
+        );
+        let error = agent
+            .run_task(project, "Create page".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, XaimError::Model(_)));
+        assert!(error.to_string().contains("重复声明完成"));
+        assert_eq!(provider.requests.lock().unwrap().len(), 4);
+        let task = agent.current_task_id().unwrap();
+        assert_eq!(
+            store::task::get_task(&store.conn(), task)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::Failed
+        );
+        assert!(sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, XaimEvent::Message {content,..}
+            if content.contains("没有文件变更") && !content.contains("已保存阶段性成果"))));
+    }
+
+    #[tokio::test]
+    async fn unchanged_files_still_run_authorized_checks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"test":"node check.cjs"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("check.cjs"), "process.exit(0)").unwrap();
+        let (agent, store, project, _, sink) = setup(
+            root.path(),
+            vec![
+                call("read", "read_file", json!({"path":"check.cjs","offset":0})),
+                done(),
+            ],
+            LoopConfig {
+                allow_verification: true,
+                ..Default::default()
+            },
+        );
+        let task = agent
+            .run_task(project, "Check current implementation".into())
+            .await
+            .unwrap();
+        let report: Value = serde_json::from_str(
+            &store::cache::get_cache(&store.conn(), &format!("task:{task}:report"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["verificationStatus"], "passed");
+        assert!(sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, XaimEvent::Verify { passed: true, .. })));
+        assert_eq!(
+            store::task::get_task(&store.conn(), task)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::Done
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_files_with_failed_checks_keep_failure_in_saved_report() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"test":"node check.cjs"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("check.cjs"), "process.exit(1)").unwrap();
+        let (agent, store, project, provider, sink) = setup(
+            root.path(),
+            vec![
+                call("read", "read_file", json!({"path":"check.cjs","offset":0})),
+                done(),
+                done(),
+            ],
+            LoopConfig {
+                allow_verification: true,
+                ..Default::default()
+            },
+        );
+        let error = agent
+            .run_task(project, "Check implementation".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, XaimError::Verify(_)));
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        let task = agent.current_task_id().unwrap();
+        let report: Value = serde_json::from_str(
+            &store::cache::get_cache(&store.conn(), &format!("task:{task}:report"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["verificationStatus"], "failed");
+        assert_eq!(report["verification"][0]["status"], "failed");
+        assert_eq!(report["completionConfirmed"], false);
+        let events = sink.0.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(e, XaimEvent::Repair { .. })));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, XaimEvent::Done {status,..} if status == "done")));
+    }
+
+    #[tokio::test]
+    async fn final_checks_persist_before_error_recovery_reloads_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, store, project, _, sink) = setup(root.path(), vec![], LoopConfig::default());
+        let task = store::task::insert_task(&store.conn(), project, "Check page").unwrap();
+        let workspace = TaskWorkspace::snapshot(root.path()).unwrap();
+        let ctx = ToolContext {
+            project_root: workspace.root().into(),
+            store: store.clone(),
+            require_confirm: false,
+            allowed_commands: vec![],
+        };
+        let record = Recorder {
+            task_id: task,
+            store: &store,
+            sink: sink.as_ref(),
+        };
+        let mut snapshot = TaskSnapshot::new("Check page");
+        snapshot.save(&workspace, &record).unwrap();
+        verify_current(
+            &mut snapshot,
+            &workspace,
+            &ctx,
+            &LoopConfig::default(),
+            &AtomicBool::new(false),
+            &record,
+        )
+        .await
+        .unwrap();
+        // The failure path reconstructs its report from this saved state.
+        let mut recovered: TaskSnapshot = serde_json::from_str(
+            &store::cache::get_cache(&store.conn(), &format!("task:{task}:snapshot"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(recovered.verified_revision, Some(0));
+        recovered.phase = "partial".into();
+        recovered
+            .save_report(&workspace, &record, "Interrupted")
+            .unwrap();
+        let report: Value = serde_json::from_str(
+            &store::cache::get_cache(&store.conn(), &format!("task:{task}:report"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["verificationStatus"], "unavailable");
+        assert_eq!(report["verification"][0]["status"], "unavailable");
+        assert_eq!(report["phase"], "partial");
     }
 
     #[tokio::test]

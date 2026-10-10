@@ -55,7 +55,7 @@ export default function TaskPanel() {
   const interruptedText = latestText?.status === 'interrupted' || latestText && ['failed', 'cancelled'].includes(task.status) && latestText.status !== 'complete'
   const unavailable = verifies.filter((verify) => verify.status === 'unavailable').length
   const summary = task.status === 'waitingConfirm' ? `已生成 ${patches.length} 个代码变更，等待你确认后应用。`
-    : task.status === 'done' || task.status === 'applied' ? `任务已完成${patches.some((patch) => patch.applied) ? `，已应用 ${patches.filter((patch) => patch.applied).length} 个代码变更` : ''}。`
+    : task.status === 'done' || task.status === 'applied' ? `任务已完成${patches.some((patch) => patch.applied) ? `，已应用 ${patches.filter((patch) => patch.applied).length} 个代码变更` : patches.length === 0 ? '，本次无需修改文件' : ''}。`
       : task.status === 'rolledBack' ? '本次代码变更已回滚。' : task.status === 'cancelled' ? '本次任务已取消。' : task.status === 'failed' ? '任务执行失败。' : '正在处理你的请求。'
   const showResponseText = Boolean(responseText && (running || interruptedText || historical && !message))
   const outputText = [

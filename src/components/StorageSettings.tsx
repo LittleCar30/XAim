@@ -33,7 +33,7 @@ export default function StorageSettings() {
     finally { setBusy(false) }
   }
 
-  return <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-4" aria-label="数据与存储">
+  return <section className="settings-card" aria-label="数据与存储">
     <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold text-slate-200">数据与存储</h2>
       <button type="button" className={buttonCls} disabled={busy} aria-label="刷新存储信息" onClick={() => void run(refresh)}><RefreshCw size={13} /></button>
     </div>

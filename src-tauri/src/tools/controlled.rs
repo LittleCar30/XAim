@@ -27,7 +27,8 @@ pub fn definitions() -> Vec<Value> {
             "简短记录已完成事项、待办及摘要。全部用户要求完成时，将 pending 设为空、ready_for_review 设为 true，程序直接验证并汇总，无需额外一轮正文。无法验证不等于代码错误。",
             json!({"completed":{"type":"array","items":{"type":"string"},"maxItems":16},
                 "pending":{"type":"array","items":{"type":"string"},"maxItems":16},
-                "ready_for_review":{"type":"boolean"},"summary":{"type":"string"}}),
+                "ready_for_review":{"type":"boolean"},"summary":{"type":"string","maxLength":32000},
+                "task_kind":{"type":"string","enum":["analysis","coding"]}}),
             vec!["completed", "pending", "ready_for_review", "summary"],
         ),
         schema(
@@ -47,6 +48,12 @@ pub fn definitions() -> Vec<Value> {
             "读取 UTF-8 文件，返回版本 hash。长文件用 offset 分段读取。",
             json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":0}}),
             vec!["path", "offset"],
+        ),
+        schema(
+            "read_files",
+            "一次读取 1 至 8 个已知路径的 UTF-8 文件开头，返回各文件 hash 和正文。总输出有上限；用各项 next_offset 继续 read_file。单项失败不阻止其他文件读取。",
+            json!({"paths":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":8}}),
+            vec!["paths"],
         ),
         schema(
             "search",
@@ -100,6 +107,11 @@ struct ReadArgs {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ReadFilesArgs {
+    paths: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     query: String,
 }
@@ -143,6 +155,37 @@ fn read(root: &std::path::Path, path: &str) -> Result<String> {
     Ok(fs::read_to_string(target)?)
 }
 
+fn read_excerpt(path: &str, content: &str, offset: usize, budget: usize) -> Result<Value> {
+    let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    let length = content.chars().count();
+    if offset > length {
+        return Err(XaimError::Config("读取 offset 超出文件".into()));
+    }
+    let excerpt: Vec<char> = content.chars().skip(offset).take(MAX_READ_CHARS).collect();
+    let value = |count: usize| {
+        let next = offset + count;
+        json!({"path":path,"hash":hash,"content":excerpt[..count].iter().collect::<String>(),
+            "next_offset":next,"complete":next == length})
+    };
+    let mut low = 0;
+    let mut high = excerpt.len();
+    if value(0).to_string().chars().count() > budget {
+        return Err(XaimError::Config("读取结果元数据超过输出上限".into()));
+    }
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if value(middle).to_string().chars().count() <= budget {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    if low == 0 && !excerpt.is_empty() {
+        return Err(XaimError::Config("读取结果无法容纳正文".into()));
+    }
+    Ok(value(low))
+}
+
 pub async fn call(name: &str, args: Value, ctx: &ToolContext) -> crate::types::ToolResult {
     if matches!(name, "search_symbols" | "read_symbol") {
         return super::symbols::SessionSymbols::default()
@@ -157,7 +200,7 @@ pub async fn call(name: &str, args: Value, ctx: &ToolContext) -> crate::types::T
         success: result.success,
         output: if matches!(
             name,
-            "read_file" | "create_file" | "edit_file" | "append_file"
+            "read_file" | "read_files" | "create_file" | "edit_file" | "append_file"
         ) {
             result.output
         } else {
@@ -171,6 +214,33 @@ pub async fn call(name: &str, args: Value, ctx: &ToolContext) -> crate::types::T
 async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
     let root = &ctx.project_root;
     match name {
+        "read_files" => {
+            let args: ReadFilesArgs = serde_json::from_value(args)?;
+            if args.paths.is_empty() || args.paths.len() > 8 {
+                return Err(XaimError::Config("批量读取需要 1 至 8 个文件路径".into()));
+            }
+            // Bound the serialized envelope too, including escaping and long paths.
+            let budget = (MAX_OUTPUT_CHARS - 512) / args.paths.len();
+            let mut files = Vec::new();
+            for (index, path) in args.paths.into_iter().enumerate() {
+                if path.chars().count() > 1024 {
+                    return Err(XaimError::Config("批量读取路径超过 1024 字符".into()));
+                }
+                let mut value = match read(root, &path)
+                    .and_then(|content| read_excerpt(&path, &content, 0, budget))
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        json!({"path":path,"error":error.to_string().chars().take(128).collect::<String>()})
+                    }
+                };
+                if value.to_string().chars().count() > budget {
+                    value = json!({"index":index,"error":"路径元数据超过批量输出上限，请单独 read_file"});
+                }
+                files.push(value);
+            }
+            Ok(ToolResult::ok(json!({"files":files}).to_string()))
+        }
         "list_dir" => {
             let args: PathArgs = serde_json::from_value(args)?;
             let dir = if args.path == "." {
@@ -209,39 +279,9 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
         "read_file" => {
             let args: ReadArgs = serde_json::from_value(args)?;
             let content = read(root, &args.path)?;
-            let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-            let length = content.chars().count();
-            if args.offset > length {
-                return Err(XaimError::Config("读取 offset 超出文件".into()));
-            }
-            let excerpt: Vec<char> = content
-                .chars()
-                .skip(args.offset)
-                .take(MAX_READ_CHARS)
-                .collect();
-            let serialize = |count: usize| {
-                let next = args.offset + count;
-                json!({"path":args.path,"hash":hash,"content":excerpt[..count].iter().collect::<String>(),
-                    "next_offset":next,"complete": next == length}).to_string()
-            };
-            // Bound the serialized result, including JSON escaping, without cutting its structure.
-            let mut low = 0;
-            let mut high = excerpt.len();
-            if serialize(0).chars().count() > MAX_OUTPUT_CHARS {
-                return Err(XaimError::Config("读取结果元数据超过输出上限".into()));
-            }
-            while low < high {
-                let middle = (low + high).div_ceil(2);
-                if serialize(middle).chars().count() <= MAX_OUTPUT_CHARS {
-                    low = middle;
-                } else {
-                    high = middle - 1;
-                }
-            }
-            if low == 0 && !excerpt.is_empty() {
-                return Err(XaimError::Config("读取结果无法容纳正文".into()));
-            }
-            Ok(ToolResult::ok(serialize(low)))
+            Ok(ToolResult::ok(
+                read_excerpt(&args.path, &content, args.offset, MAX_OUTPUT_CHARS)?.to_string(),
+            ))
         }
         "search" => {
             let args: SearchArgs = serde_json::from_value(args)?;
@@ -274,12 +314,30 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
                     "文件版本已变化，请重新读取后编辑".into(),
                 ));
             }
-            if args.old_text.is_empty() || content.match_indices(&args.old_text).count() != 1 {
+            if args.old_text.is_empty() {
                 return Err(XaimError::PatchConflict(
-                    "old_text 必须非空且唯一匹配；请重新读取并提供更多上下文".into(),
+                    "old_text 不能为空；请提供实际读取的待替换文本".into(),
                 ));
             }
+            match content.match_indices(&args.old_text).count() {
+                0 => {
+                    return Err(XaimError::PatchConflict(
+                        "old_text 未匹配；请使用读取结果中的原文，保留空格与换行".into(),
+                    ))
+                }
+                1 => {}
+                count => {
+                    return Err(XaimError::PatchConflict(format!(
+                        "old_text 匹配 {count} 处；请增加前后文以唯一定位"
+                    )))
+                }
+            }
             let updated = content.replacen(&args.old_text, &args.new_text, 1);
+            if updated == content {
+                return Ok(ToolResult::ok(
+                    json!({"path":args.path,"hash":args.expected_hash,"changed":false}).to_string(),
+                ));
+            }
             if updated.len() as u64 > MAX_FILE_SIZE {
                 return Err(XaimError::Security("编辑结果超过 1 MB".into()));
             }
@@ -326,6 +384,66 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn batch_reads_bound_escaped_output_keep_hashes_and_isolate_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let content = format!("{}尾部", "\"\\\n中文".repeat(4000));
+        fs::write(root.path().join("large.txt"), &content).unwrap();
+        fs::write(root.path().join("small.txt"), "ready").unwrap();
+        fs::write(root.path().join(".env"), "PRIVATE_SECRET").unwrap();
+        let ctx = ToolContext {
+            project_root: root.path().into(),
+            store: std::sync::Arc::new(crate::store::Store::open_in_memory().unwrap()),
+            require_confirm: false,
+            allowed_commands: vec![],
+        };
+        let result = call("read_files", json!({"paths":["large.txt","small.txt","missing.txt",".env","../outside","large.txt","small.txt","large.txt"]}), &ctx).await;
+        assert!(result.success, "{result:?}");
+        assert!(result.output.chars().count() <= MAX_OUTPUT_CHARS);
+        assert!(!result.output.contains("PRIVATE_SECRET"));
+        let batch: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(batch["files"].as_array().unwrap().len(), 8);
+        assert_eq!(batch["files"][1]["content"], "ready");
+        for index in [2, 3, 4] {
+            assert!(batch["files"][index]["error"].is_string());
+            assert!(batch["files"][index]["content"].is_null());
+        }
+        let first = &batch["files"][0];
+        assert_eq!(
+            first["hash"],
+            blake3::hash(content.as_bytes()).to_hex().to_string()
+        );
+        assert_eq!(first["complete"], false);
+        let mut recovered = first["content"].as_str().unwrap().to_string();
+        let mut offset = first["next_offset"].as_u64().unwrap();
+        loop {
+            let response = call(
+                "read_file",
+                json!({"path":"large.txt","offset":offset}),
+                &ctx,
+            )
+            .await;
+            assert!(response.success);
+            let chunk: Value = serde_json::from_str(&response.output).unwrap();
+            recovered.push_str(chunk["content"].as_str().unwrap());
+            if chunk["complete"] == true {
+                break;
+            }
+            offset = chunk["next_offset"].as_u64().unwrap();
+        }
+        assert_eq!(recovered, content);
+        for paths in [Vec::<String>::new(), vec!["small.txt".into(); 9]] {
+            assert!(
+                !call("read_files", json!({"paths":paths}), &ctx)
+                    .await
+                    .success
+            );
+        }
+        let edited = call("edit_file", json!({"path":"small.txt","expected_hash":batch["files"][1]["hash"],"old_text":"ready","new_text":"done"}), &ctx).await;
+        assert!(edited.success);
+        assert!(!call("edit_file", json!({"path":"small.txt","expected_hash":batch["files"][1]["hash"],"old_text":"done","new_text":"done"}), &ctx).await.success);
+    }
 
     #[tokio::test]
     async fn list_nested_directory_with_noncanonical_root() {

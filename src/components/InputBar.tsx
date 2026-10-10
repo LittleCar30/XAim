@@ -5,7 +5,7 @@ import { ipc } from '@/services/ipc'
 import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
 import type { TaskStatus } from '@/types'
-import { ArrowUp, Loader2, Square } from 'lucide-react'
+import { ArrowUp, CircleHelp, Loader2, Square } from 'lucide-react'
 import { useConversationStore } from '@/stores/conversation'
 import { useConfigStore } from '@/stores/config'
 import ModelPicker from '@/components/ModelPicker'
@@ -15,7 +15,7 @@ const HISTORY_KEY = 'xaim.prompt-history'
 const HISTORY_LIMIT = 50
 const MAX_INPUT_HEIGHT = 160
 
-/** 这些状态表示任务已结束，输入栏恢复可用；其余状态（含 waitingConfirm）视为运行中。 */
+/** 执行结束或等待审阅时允许继续输入。 */
 const TERMINAL_STATUSES: TaskStatus[] = [
   'idle',
   'applied',
@@ -23,6 +23,7 @@ const TERMINAL_STATUSES: TaskStatus[] = [
   'failed',
   'rolledBack',
   'cancelled',
+  'waitingConfirm',
 ]
 
 function toMessage(e: unknown): string {
@@ -49,18 +50,21 @@ export default function InputBar() {
   const configLoading = useConfigStore((s) => s.loading)
   const events = useTaskStore((s) => s.events)
   const selectedId = useConversationStore((s) => s.selectedId)
-  const awaitingConfirmation = currentTask?.status === 'waitingConfirm'
+  const selectedTask = useConversationStore((s) => s.record?.task)
+  const awaitingConfirmation = (selectedId !== null ? selectedTask : currentTask)?.status === 'waitingConfirm'
 
   const [value, setValue] = useState('')
   const [history, setHistory] = useState<string[]>(loadHistory)
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
   const [sending, setSending] = useState(false)
   const [allowVerification, setAllowVerification] = useState(false)
+  const [checkHelpOpen, setCheckHelpOpen] = useState(false)
   const [error, setError] = useState<{ message: string; taskId?: number } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const running = currentTask !== null && !TERMINAL_STATUSES.includes(currentTask.status)
-  const disabled = running || sending || configLoading || currentProject === null
+  const conversationLoading = useConversationStore((s) => s.loading)
+  const disabled = running || sending || configLoading || conversationLoading || currentProject === null
   const canSend = !disabled && value.trim() !== ''
 
   // 多行自适应高度：随内容增长，封顶后内部滚动。
@@ -74,24 +78,32 @@ export default function InputBar() {
   const send = async () => {
     const project = currentProject
     const prompt = value.trim()
-    if (sending || running || configLoading || project === null || prompt === '') return
+    if (sending || running || configLoading || conversationLoading || project === null || prompt === '') return
     setSending(true)
     setError(null)
+    const parentTask = useConversationStore.getState().record?.task ?? useTaskStore.getState().currentTask
+    let executionStarted = false
     try {
+      if (parentTask && parentTask.id > 0) await useConversationStore.getState().loadTurns(parentTask.id)
       useConversationStore.getState().archiveCurrent()
       await useConversationStore.getState().select(null)
       const taskHistory = useTaskStore.getState().history
       useTaskStore.getState().reset()
       useTaskStore.setState({ history: taskHistory })
       setCurrentTask({ id: -1, projectId: project.id, prompt, status: 'parsing', intent: null, plan: null,
+        conversationId: parentTask?.conversationId ?? parentTask?.id ?? null, parentTaskId: parentTask?.id ?? null,
         createdAt: Date.now(), finishedAt: null, durationMs: null, tokenInput: 0, tokenOutput: 0, cost: null })
+      executionStarted = true
       const verificationApproved = allowVerification
       setAllowVerification(false)
-      const taskId = await ipc.runTask(project.id, prompt, verificationApproved)
+      const taskId = parentTask && parentTask.id > 0
+        ? await ipc.runTask(project.id, prompt, verificationApproved, parentTask.id)
+        : await ipc.runTask(project.id, prompt, verificationApproved)
       const [task, patches] = await Promise.all([ipc.getTask(taskId), ipc.listPatches(taskId)])
       // Event patches have temporary IDs; actions need the persisted database IDs.
       useTaskStore.setState({ patches })
       setCurrentTask(task)
+      await useConversationStore.getState().loadTurns(taskId).catch((error) => console.warn('[xaim] 会话记录刷新失败:', error))
       const next =
         history[history.length - 1] === prompt ? history : [...history, prompt].slice(-HISTORY_LIMIT)
       setHistory(next)
@@ -100,8 +112,8 @@ export default function InputBar() {
       void savePreference(HISTORY_KEY, JSON.stringify(next)).catch((error) => console.warn('[xaim] 输入历史持久化失败:', error))
     } catch (e) {
       const task = useTaskStore.getState().currentTask
-      setError({ message: toMessage(e), taskId: task?.id })
-      if (task && !['cancelled', 'done', 'rolledBack', 'failed'].includes(task.status)) {
+      setError({ message: toMessage(e), taskId: executionStarted ? task?.id : undefined })
+      if (executionStarted && task && !['cancelled', 'done', 'applied', 'waitingConfirm', 'rolledBack', 'failed'].includes(task.status)) {
         setCurrentTask({ ...task, status: 'failed', finishedAt: Date.now() })
       }
     } finally {
@@ -158,6 +170,7 @@ export default function InputBar() {
       {running && (
         <p className="mb-2 text-[11px] text-slate-500">{awaitingConfirmation ? '等待确认本次代码变更' : '任务运行中，输入暂时禁用…'}</p>
       )}
+      {awaitingConfirmation && !running && <p className="mb-2 text-[11px] text-slate-500">变更待审阅</p>}
       {error && !errorInConversation && <p role="alert" className="mb-2 text-[11px] text-rose-400">{error.message}</p>}
       <div className="composer-surface">
         <textarea
@@ -178,7 +191,10 @@ export default function InputBar() {
           }
           className="composer-input"
         />
-        <div className="composer-bottom justify-end gap-2"><label className="mr-auto flex items-center gap-1.5 text-xs text-slate-500" title="授权本次任务在隔离目录运行项目的测试与构建脚本；这些脚本仍可访问本机和网络。"><input type="checkbox" checked={allowVerification} disabled={running || sending} onChange={(event) => setAllowVerification(event.target.checked)} />运行项目检查</label><ModelPicker disabled={running || sending} /><div className="flex gap-2">
+        <div className="composer-bottom justify-end gap-2"><div className="composer-check-control">
+          <label className="flex items-center gap-1.5 text-xs text-slate-500"><input type="checkbox" checked={allowVerification} disabled={running || sending} onChange={(event) => setAllowVerification(event.target.checked)} />运行项目检查</label>
+          <button type="button" className="check-help-button" aria-label="了解运行项目检查" aria-expanded={checkHelpOpen} aria-controls="project-check-help" onClick={() => setCheckHelpOpen((open) => !open)}><CircleHelp size={14} /></button>
+        </div><ModelPicker disabled={running || sending} /><div className="flex gap-2">
         {running && !awaitingConfirmation && currentTask && currentTask.id >= 0 && <button className="icon-button" aria-label="停止任务" title="停止任务" onClick={() => void ipc.cancelTask(currentTask.id).catch((e) => setError({ message: toMessage(e) }))}><Square size={14} /></button>}
         <button
           type="button"
@@ -198,6 +214,11 @@ export default function InputBar() {
         </button>
         </div>
         </div>
+        {checkHelpOpen && <div id="project-check-help" className="project-check-help">
+          <strong>仅授权本次任务</strong>
+          <p>运行项目已有的类型检查、lint、测试或构建；失败时 Agent 会尝试修复。未勾选仍可生成变更，但检查会标记为未运行或无法验证。</p>
+          <p>检查不代表应用代码。脚本在源码副本中运行，仍可访问本机和网络，请在信任项目时启用。</p>
+        </div>}
       </div>
     </div>
   )

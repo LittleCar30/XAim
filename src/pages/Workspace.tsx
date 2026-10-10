@@ -44,13 +44,13 @@ export default function Workspace({ onOpenSettings }: WorkspaceProps) {
             <button className={`icon-button detail-toggle ${rightPanelOpen ? 'active' : ''}`} onClick={toggleRightPanel} aria-label="任务详情" title="任务详情" aria-expanded={rightPanelOpen}><PanelRight size={18} /></button>
           </header>
           <TaskPanel />
-          {selectedId === null && <InputBar />}
+          <InputBar />
         </main>
         {rightPanelOpen && <aside className="task-inspector" aria-label="任务详情面板">
           <header className="inspector-heading">{previewPath && <button className="icon-button" onClick={() => setPreviewPath(null)} aria-label="返回任务详情" title="返回任务详情"><ArrowLeft size={17} /></button>}<span>{previewPath ? previewPath.split(/[\\/]/).pop() : '任务详情'}</span><button className="icon-button" onClick={toggleRightPanel} aria-label="关闭任务详情" title="关闭"><X size={17} /></button></header>
           {previewPath ? <FilePreview path={previewPath} onClose={() => setPreviewPath(null)} /> : <>
             <div className="inspector-tabs" role="tablist" aria-label="详情视图">{(['context', 'tools', 'verify'] as const).map((tab) => <button key={tab} role="tab" aria-selected={detailTab === tab} onClick={() => useUiStore.setState({ detailTab: tab })}>{{ context: '上下文', tools: '工具日志', verify: '验证' }[tab]}</button>)}</div>
-            {detailTab === 'verify' ? <VerifyPanel verifies={selectedId === null ? verifies : selected?.verifies ?? []} /> : selectedId !== null ? <p className="inspector-empty">此历史任务未保存{detailTab === 'context' ? '上下文' : '工具日志'}</p> : detailTab === 'context' ? <ContextViewer /> : <ToolLog />}
+            {detailTab === 'verify' ? <VerifyPanel verifies={selectedId === null ? verifies : selected?.verifies ?? []} /> : detailTab === 'context' ? <ContextViewer /> : selectedId !== null ? <p className="inspector-empty">此历史任务未保存工具日志</p> : <ToolLog />}
           </>}
         </aside>}
       </div>

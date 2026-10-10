@@ -15,12 +15,14 @@ export const ipc = {
   readFile: (projectId: number, path: string, start?: number, end?: number) =>
     invoke<string>('read_file', { projectId, path, start, end }),
 
-  runTask: (projectId: number, prompt: string, allowVerification?: boolean) =>
-    invoke<number>('run_task', { projectId, prompt, ...(allowVerification !== undefined ? { allowVerification } : {}) }),
+  runTask: (projectId: number, prompt: string, allowVerification?: boolean, parentTaskId?: number) =>
+    invoke<number>('run_task', { projectId, prompt, ...(allowVerification !== undefined ? { allowVerification } : {}), ...(parentTaskId !== undefined ? { parentTaskId } : {}) }),
   cancelTask: (taskId: number) => invoke<void>('cancel_task', { taskId }),
   getTask: (taskId: number) => invoke<Task>('get_task', { taskId }),
   listTasks: (projectId: number) => invoke<Task[]>('list_tasks', { projectId }),
   listTaskSteps: (taskId: number) => invoke<TaskStep[]>('list_task_steps', { taskId }),
+  listConversationTasks: (taskId: number) => invoke<Task[]>('list_conversation_tasks', { taskId }),
+  readTaskFile: (taskId: number, path: string) => invoke<string>('read_task_file', { taskId, path }),
   applyPatch: (patchId: number) => invoke<void>('apply_patch', { patchId }),
   rejectPatch: (patchId: number) => invoke<void>('reject_patch', { patchId }),
   rollbackTask: (taskId: number) => invoke<void>('rollback_task', { taskId }),

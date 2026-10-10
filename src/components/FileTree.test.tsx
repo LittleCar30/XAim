@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import FileTree from './FileTree'
 import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
+import { useTaskStore } from '@/stores/task'
+import { patch, resetStores, task } from '@/test/fixtures'
 
 const tree = {
   name: 'repo', path: '.', isDir: true, size: null,
@@ -18,6 +20,7 @@ const tree = {
 
 describe('FileTree', () => {
   beforeEach(() => {
+    resetStores()
     useProjectStore.setState({ fileTree: null, currentProject: null, recentProjects: [], loading: false })
     useUiStore.setState({ sidebarOpen: true, rightPanelOpen: true, previewPath: null })
   })
@@ -50,6 +53,16 @@ describe('FileTree', () => {
     expect(file.querySelector('mark')).toHaveTextContent('main')
     fireEvent.click(screen.getByRole('button', { name: '清除搜索' }))
     expect(screen.getByPlaceholderText('搜索文件…')).toHaveValue('')
+  })
+
+  it('shows a newly generated file before it is applied', () => {
+    useProjectStore.setState({ fileTree: tree })
+    useTaskStore.setState({ currentTask: { ...task, status: 'waitingConfirm' }, patches: [{ ...patch, filePath: 'new.ts', applied: false }] })
+    render(<FileTree />)
+    expect(screen.getByText('new.ts')).toBeInTheDocument()
+    expect(screen.getByText('待应用')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('new.ts'))
+    expect(useUiStore.getState().previewPath).toBe('new.ts')
   })
 })
 

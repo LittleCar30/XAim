@@ -6,7 +6,7 @@ import { ipc } from '@/services/ipc'
 import { useTaskStore } from '@/stores/task'
 
 vi.mock('@/services/ipc', () => ({
-  ipc: { applyPatch: vi.fn(), rejectPatch: vi.fn(), rollbackTask: vi.fn() },
+  ipc: { applyPatch: vi.fn(), rejectPatch: vi.fn(), rollbackTask: vi.fn(), getFileTree: vi.fn() },
 }))
 const mockedIpc = vi.mocked(ipc, true)
 
@@ -29,6 +29,7 @@ describe('ActionBar', () => {
     expect(useTaskStore.getState().patches.find((p) => p.id === 1)?.applied).toBe(true)
     expect(useTaskStore.getState().patches.find((p) => p.id === 3)?.applied).toBe(true)
     expect(mockedIpc.applyPatch).toHaveBeenCalledTimes(1)
+    expect(mockedIpc.getFileTree).toHaveBeenCalledWith(task.projectId)
   })
 
   it('rejects pending patches and rolls back applied patches', async () => {

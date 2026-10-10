@@ -10,6 +10,7 @@ module.exports = {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      borderRadius: { md: '0.75rem', lg: '1rem', xl: '1.25rem', '2xl': '1.5rem' },
       colors: {
         slate: Object.fromEntries(Object.keys(colors.slate).map((shade) => [shade, themedColor('slate', shade)])),
         ...Object.fromEntries(accents.map((name) => [name, {

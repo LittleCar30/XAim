@@ -7,14 +7,17 @@ import { useConfigStore } from '@/stores/config'
 import { ipc } from '@/services/ipc'
 import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
+import { useConversationStore } from '@/stores/conversation'
 import { patch, project, resetStores, task } from '@/test/fixtures'
 
-vi.mock('@/services/ipc', () => ({ ipc: { runTask: vi.fn(), getTask: vi.fn(), listPatches: vi.fn(), setPreference: vi.fn() } }))
+vi.mock('@/services/ipc', () => ({ ipc: { runTask: vi.fn(), getTask: vi.fn(), listPatches: vi.fn(), listTaskSteps: vi.fn(), listConversationTasks: vi.fn(), setPreference: vi.fn() } }))
 const mocked = vi.mocked(ipc, true)
 
 describe('InputBar', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    mocked.listConversationTasks.mockResolvedValue([])
+    mocked.listTaskSteps.mockResolvedValue([])
     resetStores()
     localStorage.clear()
   })
@@ -130,5 +133,56 @@ describe('InputBar', () => {
     act(() => useConfigStore.setState({ loading: true }))
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(mocked.runTask).not.toHaveBeenCalled()
+  })
+
+  it('continues a pending review in the same conversation without applying it', async () => {
+    useProjectStore.setState({ currentProject: project })
+    useTaskStore.setState({ currentTask: { ...task, status: 'waitingConfirm', conversationId: task.id } })
+    mocked.runTask.mockResolvedValue(43)
+    mocked.getTask.mockResolvedValue({ ...task, id: 43, conversationId: task.id, parentTaskId: task.id })
+    mocked.listPatches.mockResolvedValue([])
+    render(<InputBar />)
+    const input = screen.getByRole('textbox')
+    expect(input).toBeEnabled()
+    fireEvent.change(input, { target: { value: '再增加一个文件' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledWith(project.id, '再增加一个文件', false, task.id))
+    await waitFor(() => expect(useTaskStore.getState().currentTask?.id).toBe(43))
+  })
+
+  it('preserves the pending review when conversation preflight fails', async () => {
+    useProjectStore.setState({ currentProject: project })
+    useTaskStore.setState({ currentTask: { ...task, status: 'waitingConfirm' }, patches: [patch] })
+    mocked.listConversationTasks.mockRejectedValue('history unavailable')
+    render(<InputBar />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'continue' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(screen.getByText('history unavailable')).toHaveAttribute('role', 'alert'))
+    expect(mocked.runTask).not.toHaveBeenCalled()
+    expect(useTaskStore.getState().currentTask?.status).toBe('waitingConfirm')
+    expect(useTaskStore.getState().patches).toEqual([patch])
+  })
+
+  it('blocks Enter while conversation history is loading', () => {
+    useProjectStore.setState({ currentProject: project })
+    render(<InputBar />)
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'continue' } })
+    act(() => useConversationStore.setState({ loading: true }))
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(mocked.runTask).not.toHaveBeenCalled()
+  })
+
+  it('continues the selected historical task rather than the unrelated active task', async () => {
+    useProjectStore.setState({ currentProject: project })
+    useTaskStore.setState({ currentTask: { ...task, id: 90 } })
+    useConversationStore.setState({ selectedId: task.id, record: { task, patches: [], verifies: [], steps: [] } })
+    mocked.runTask.mockResolvedValue(91)
+    mocked.getTask.mockResolvedValue({ ...task, id: 91, conversationId: task.id, parentTaskId: task.id })
+    mocked.listPatches.mockResolvedValue([])
+    render(<InputBar />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '继续介绍' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledWith(project.id, '继续介绍', false, task.id))
   })
 })

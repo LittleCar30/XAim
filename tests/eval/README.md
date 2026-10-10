@@ -30,16 +30,7 @@ tasks/<id>/
 - 可通过 `EVAL_PYTHON`、`EVAL_GO` 指定解释器或编译器路径。
 - TS 验证自动执行 `npm ci`，首次需要下载锁定的 TypeScript 5.5.4；Python 构建工具需提前安装。Rust、Go 和三个升级任务的目标依赖均不需要外部服务。升级任务使用随任务提供的真实 v1/v2 包，验证版本、锁文件（适用时）、API 迁移与运行结果。
 
-本机验收已准备 Go 和 wheel，可在项目根目录的 PowerShell 中复用：
-
-```powershell
-$env:EVAL_GO = Join-Path $env:TEMP 'xaim-eval-go1.24.0\go\bin\go.exe'
-$env:PATH = "$(Split-Path $env:EVAL_GO);$env:PATH"
-$env:PYTHONPATH = (Resolve-Path 'tests/eval/.tools/python-build').Path
-node tests/eval/run.mjs reference
-```
-
-验收结果见 `VALIDATION.md`。更换机器后按环境要求安装工具或设置对应路径。
+安装上述工具后，在项目根目录运行 `node tests/eval/run.mjs reference`。非标准安装路径可通过 `EVAL_GO`、`EVAL_PYTHON` 指定。验收摘要见 [VALIDATION.md](VALIDATION.md)。
 
 ## 单任务
 

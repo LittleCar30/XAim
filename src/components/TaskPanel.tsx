@@ -9,15 +9,44 @@ import { useConversationStore } from '@/stores/conversation'
 import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
 import { useUiStore } from '@/stores/ui'
+import type { ConversationRecord } from '@/stores/conversation'
+import { useLayoutEffect, useRef } from 'react'
+import MarkdownMessage from '@/components/MarkdownMessage'
 
 export default function TaskPanel() {
+  const { turns, selectedId, record } = useConversationStore()
+  const current = useTaskStore((s) => s.currentTask)
+  const eventCount = useTaskStore((s) => s.events.length)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const followLatest = useRef(true)
+  const task = selectedId !== null ? record?.task : current
+  const conversationId = task?.conversationId ?? task?.id
+  const previous = turns.filter((turn) => turn.task.id !== task?.id &&
+    (turn.task.conversationId ?? turn.task.id) === conversationId && turn.task.id < (task?.id === -1 ? Infinity : task?.id ?? 0))
+  useLayoutEffect(() => { followLatest.current = true }, [task?.id, selectedId])
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (el && followLatest.current) el.scrollTop = el.scrollHeight
+  }, [task?.id, task?.status, selectedId, eventCount, turns])
+  return <div ref={scrollRef} className="conversation-scroll" role="log" aria-label="对话记录" onScroll={(event) => {
+    const el = event.currentTarget
+    followLatest.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }}>
+    {previous.map((turn) => <TaskTurn key={turn.task.id} previous={turn} />)}
+    <TaskTurn />
+  </div>
+}
+
+function TaskTurn({ previous }: { previous?: ConversationRecord }) {
   const currentTask = useTaskStore((s) => s.currentTask)
   const livePatches = useTaskStore((s) => s.patches)
   const liveSteps = useTaskStore((s) => s.steps)
   const liveVerifies = useTaskStore((s) => s.verifies)
   const events = useTaskStore((s) => s.events)
   const project = useProjectStore((s) => s.currentProject)
-  const { selectedId, record, loading, error } = useConversationStore()
+  const { selectedId: selection, record: selectedRecord, loading, error } = useConversationStore()
+  const record = previous ?? selectedRecord
+  const selectedId = previous ? previous.task.id : selection
   const historical = selectedId !== null
   const task = historical ? record?.task : currentTask
   const patches = historical ? record?.patches ?? [] : livePatches
@@ -33,7 +62,7 @@ export default function TaskPanel() {
     } catch { return [] }
   }) : liveSteps
   const verifies = historical ? record?.verifies ?? [] : liveVerifies
-  if (loading || error) return <div className="conversation-scroll"><div className="conversation-content"><p role={error ? 'alert' : 'status'}>{error ? `无法读取历史对话：${error}` : '正在读取历史对话…'}</p></div></div>
+  if (!previous && (loading || error)) return <div className="conversation-content"><p role={error ? 'alert' : 'status'}>{error ? `无法读取历史对话：${error}` : '正在读取历史对话…'}</p></div>
   if (!task) return <div className="conversation-scroll"><div className="conversation-empty"><img src="/xaim.svg" alt="XAim" width="44" height="44" /><h1>新对话</h1><p>{project?.name ?? '未打开项目'}</p></div></div>
   const running = !['waitingConfirm', 'idle', 'done', 'applied', 'failed', 'cancelled', 'rolledBack'].includes(task.status)
   // Coalesce running/done event pairs into one row per stage.
@@ -68,16 +97,16 @@ export default function TaskPanel() {
     : null
   const outputTime = task.finishedAt ?? (task.durationMs != null ? task.createdAt + task.durationMs : null)
     ?? (historical ? rawSteps.at(-1)?.createdAt : null) ?? task.createdAt
-  return <div className="conversation-scroll" role="log" aria-label="对话记录"><div className="conversation-content" key={task.id}>
+  return <div className="conversation-content" key={task.id}>
     <article className="user-message"><span className="message-label">你</span><p>{task.prompt}</p>
       <MessageFooter text={task.prompt} label="输入" timestamp={task.createdAt} />
     </article>
     <article className="agent-message">
       <header className="agent-header"><img src="/xaim.svg" width="28" height="28" alt="" /><strong>XAim</strong><span className={`task-status ${taskStatusBadgeCls(task.status)}`}>{TASK_STATUS_LABELS[task.status]}</span></header>
       <p className="agent-summary">{summary}</p>
-      {message?.type === 'message' && <p className="agent-summary whitespace-pre-wrap">{message.content}</p>}
+      {message?.type === 'message' && <MarkdownMessage content={message.content} />}
       {showResponseText && <div aria-label="模型回复">
-        <p className="agent-summary whitespace-pre-wrap">{responseText}</p>
+        <MarkdownMessage content={responseText} />
         {interruptedText && <p className="historical-note">回复已中断，内容尚未完成。</p>}
       </div>}
       {errorEvent?.type === 'error' && <p className="message-error">{errorEvent.message}</p>}
@@ -96,5 +125,5 @@ export default function TaskPanel() {
       <MessageFooter text={outputText} label="输出" timestamp={outputTime}
         timeLabel={running || task.status === 'idle' ? '开始于' : task.finishedAt != null ? '完成于' : '更新于'} durationMs={duration} />
     </article>
-  </div></div>
+  </div>
 }

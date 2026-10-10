@@ -2,10 +2,15 @@
   "name": "xaim",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LittleCar30/XAim.git"
+  },
   "description": "XAim — a desktop coding agent built with Tauri 2 + React 18",
   "packageManager": "pnpm@12.3.4",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "vite",
@@ -25,6 +30,8 @@
     "monaco-editor": "^0.52.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "zustand": "^5.0.15"
   },
   "devDependencies": {

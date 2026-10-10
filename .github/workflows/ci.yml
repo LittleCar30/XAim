@@ -2,10 +2,15 @@ name: CI
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   checks:
@@ -33,7 +38,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -50,8 +55,24 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Build frontend (includes typecheck)
+        run: pnpm build
+
+      - name: Rust format
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
+
+      - name: Evaluation runner tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --bin xaim-eval
+
+      - name: Rust lint
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --lib --bin xaim-eval
+
+      - name: Review scorer tests
+        run: node --test tests/eval/review-validation.test.mjs
+
+      - name: React to Rust integration
+        if: runner.os == 'Windows'
+        run: pnpm test:e2e

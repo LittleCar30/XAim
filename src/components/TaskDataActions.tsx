@@ -4,6 +4,7 @@ import { ipc } from '@/services/ipc'
 import { toMessage } from '@/lib/task-format'
 import { useConversationStore } from '@/stores/conversation'
 import { useTaskStore } from '@/stores/task'
+import { useProjectStore } from '@/stores/project'
 import type { Patch, Task } from '@/types'
 
 export default function TaskDataActions({ task, patches, historical }: { task: Task; patches: Patch[]; historical: boolean }) {
@@ -20,6 +21,7 @@ export default function TaskDataActions({ task, patches, historical }: { task: T
     await action()
     await useConversationStore.getState().select(taskId)
     await useTaskStore.getState().loadHistory(task.projectId)
+    await useProjectStore.getState().loadFileTree(task.projectId)
   }
   return <div className="mt-4 text-xs text-slate-500">
     <div className="flex flex-wrap gap-3">

@@ -281,11 +281,15 @@ impl Harness {
             "list_task_steps" => Ok(serde_json::to_value(
                 task::steps(&self.state, id("taskId")?).await?,
             )?),
+            "list_conversation_tasks" => Ok(serde_json::to_value(
+                store::task::conversation_tasks(&self.state.store.conn(), id("taskId")?)?,
+            )?),
             "list_patches" => Ok(serde_json::to_value(
                 task::patches(&self.state, id("taskId")?).await?,
             )?),
             "run_task" => {
                 let mut config = task::orchestrator_config(&self.state)?;
+                config.parent_task_id = args["parentTaskId"].as_i64();
                 let runtime =
                     crate::config::runtime::load(&self.state.store, Some(id("projectId")?))?
                         .effective;

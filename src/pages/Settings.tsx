@@ -13,6 +13,17 @@ import ModelParameters from '@/components/ModelParameters'
 import StorageSettings from '@/components/StorageSettings'
 import RuntimeSettings from '@/components/RuntimeSettings'
 import { savePreference } from '@/services/preferences'
+import { Bot, Database, FolderSearch, Palette, ShieldCheck, Workflow } from 'lucide-react'
+
+const CATEGORIES = [
+  { id: 'model', label: '模型与连接', description: '配置模型服务、连接与推理参数', icon: Bot },
+  { id: 'execution', label: '任务与检查', description: '设置执行额度，了解项目检查与修复', icon: Workflow },
+  { id: 'index', label: '项目索引', description: '文件检索与索引偏好', icon: FolderSearch },
+  { id: 'safety', label: '安全与确认', description: '查看代码应用与命令执行偏好', icon: ShieldCheck },
+  { id: 'appearance', label: '界面与外观', description: '主题和界面语言', icon: Palette },
+  { id: 'storage', label: '数据与存储', description: '管理数据目录、备份和工作区保留期限', icon: Database },
+] as const
+type Category = typeof CATEGORIES[number]['id']
 
 export interface SettingsProps {
   /** 返回工作区（由路由层提供）。 */
@@ -152,7 +163,7 @@ const inputErrorCls = 'ring-rose-500/70'
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
+    <section className="settings-card">
       <h2 className="mb-3 text-sm font-semibold text-slate-200">{title}</h2>
       <div className="space-y-3">{children}</div>
     </section>
@@ -192,6 +203,8 @@ const FALLBACK_PROVIDERS = ['openai', 'deepseek', 'qwen', 'ollama', 'anthropic',
 // ---------------------------------------------------------------------------
 
 export default function Settings({ onBack }: SettingsProps) {
+  const [category, setCategory] = useState<Category>('model')
+  const activeCategory = CATEGORIES.find((item) => item.id === category)!
   const [modelManager, setModelManager] = useState(false)
   const config = useConfigStore((s) => s.config)
   const configBusy = useConfigStore((s) => s.loading)
@@ -286,7 +299,11 @@ export default function Settings({ onBack }: SettingsProps) {
   const handleSave = async () => {
     const errs = validate(form)
     setErrors(errs)
-    if (Object.keys(errs).length > 0) return
+    if (Object.keys(errs).length > 0) {
+      const group = Object.keys(errs)[0].split('.')[0]
+      setCategory(group === 'verify' || group === 'repair' ? 'execution' : group === 'ui' ? 'appearance' : group as Category)
+      return
+    }
     setSaveError(null)
     try {
       await savePrefs(form)
@@ -330,7 +347,7 @@ export default function Settings({ onBack }: SettingsProps) {
   const mErr = (key: string) => errors[key]
 
   return (
-    <div className="flex h-screen flex-col bg-slate-950 text-slate-100">
+    <div className="settings-page">
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-slate-800 bg-slate-900 px-4">
         {onBack && (
           <button
@@ -364,18 +381,36 @@ export default function Settings({ onBack }: SettingsProps) {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto">
-        <div className="mx-auto max-w-2xl space-y-4 p-4">
+      <div className="settings-layout">
+        <nav className="settings-navigation" aria-label="设置分类">
+          <p className="settings-nav-label">偏好设置</p>
+          {CATEGORIES.map(({ id, label, icon: Icon }) => <button key={id} type="button"
+            aria-current={category === id ? 'page' : undefined} onClick={() => setCategory(id)}>
+            <Icon size={18} aria-hidden="true" /><span>{label}</span>
+          </button>)}
+          <p className="settings-nav-note">配置你的工作方式</p>
+        </nav>
+        <main className="settings-main">
+        <div className="settings-content">
+          <div className="settings-intro"><h2>{activeCategory.label}</h2><p>{activeCategory.description}</p></div>
           {loadError && (
             <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
               无法从后端读取配置（{loadError}），以下为本地默认值；连接后端后保存将覆盖。
             </p>
           )}
           {loadingConfig && <p className="text-xs text-slate-500">正在读取配置…</p>}
-          <StorageSettings />
-          <RuntimeSettings />
+          <div hidden={category !== 'storage'} className="settings-group"><StorageSettings /></div>
+          <div hidden={category !== 'execution'} className="settings-group">
+            <RuntimeSettings />
+            <Section title="项目检查说明">
+              <p className="settings-help">在对话输入框勾选“运行项目检查”，可允许本次任务运行项目已配置的类型检查、lint、测试或构建。程序自动检测检查命令，检查在源码副本中执行。</p>
+              <p className="settings-help">不勾选也能生成代码，检查会标记为未运行或无法验证。检查失败时会尝试修复，最多三轮；依赖缺失不会自动安装。纯分析任务无需代码检查。授权只生效一次，应用代码仍需单独确认。</p>
+              <p className="settings-help">项目脚本以当前用户权限运行，可以访问本机和网络；请在信任项目时启用。</p>
+            </Section>
+          </div>
 
           {/* 1. 模型 */}
+          <div hidden={category !== 'model'} className="settings-group">
           <Section title="模型">
             <fieldset className="min-w-0 space-y-3" disabled={loadingConfig || configBusy || !!loadError}>
               <button type="button" onClick={() => setModelManager(true)} disabled={loadingConfig || !!loadError} className="rounded-md border border-slate-700 px-3 py-1.5 text-xs disabled:opacity-50">管理模型</button>
@@ -450,12 +485,15 @@ export default function Settings({ onBack }: SettingsProps) {
               </div>
             </fieldset>
           </Section>
+          </div>
 
           {/* 2. 索引 */}
+          <div hidden={category !== 'index'} className="settings-group">
+          <p className="settings-preference-note">以下选项目前仅保存界面偏好，尚未接入执行内核。</p>
           <Section title="索引">
             <Field
               label="忽略目录"
-              title="每行一个目录名，也可用逗号分隔；保存后下次打开项目生效"
+              title="每行一个目录名，也可用逗号分隔；目前仅保存偏好"
             >
               <textarea
                 rows={4}
@@ -474,8 +512,11 @@ export default function Settings({ onBack }: SettingsProps) {
               />
             </Field>
           </Section>
+          </div>
 
           {/* 3. 验证 */}
+          <div hidden={category !== 'execution'} className="settings-group">
+          <p className="settings-preference-note">以下验证与修复选项目前仅保存界面偏好。实际项目检查由每次任务的勾选授权决定。</p>
           <Section title="验证">
             <label className="flex items-center gap-2 text-sm text-slate-300">
               <input
@@ -526,6 +567,9 @@ export default function Settings({ onBack }: SettingsProps) {
           </Section>
 
           {/* 5. 安全 */}
+          </div>
+          <div hidden={category !== 'safety'} className="settings-group">
+          <p className="settings-preference-note">以下选项目前仅保存界面偏好。当前代码变更均需手动应用，模型不能执行任意命令。</p>
           <Section title="安全">
             <Field label="命令白名单" title="每行一条允许执行的命令前缀；留空表示不限制">
               <textarea
@@ -550,8 +594,10 @@ export default function Settings({ onBack }: SettingsProps) {
               </select>
             </Field>
           </Section>
+          </div>
 
           {/* 6. 界面 */}
+          <div hidden={category !== 'appearance'} className="settings-group">
           <Section title="界面">
             <div className="grid grid-cols-2 gap-3">
               <Field label="主题">
@@ -582,11 +628,13 @@ export default function Settings({ onBack }: SettingsProps) {
               </Field>
             </div>
           </Section>
+          </div>
 
           <p className="pb-2 text-center text-[11px] text-slate-600">
-            配置和界面偏好保存在数据目录；主题即时保存。索引 / 验证 / 修复 / 安全 / 语言仍为界面偏好。
+            模型和偏好通过“保存全部”保存；任务设置与存储操作在各自分类中保存，主题即时生效。
           </p>
         </div>
+        </main>
       </div>
       {modelManager && <ModelManager onClose={() => setModelManager(false)} />}
     </div>

@@ -3,6 +3,8 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 
 import { useProjectStore } from '@/stores/project'
 import { useUiStore } from '@/stores/ui'
+import { useTaskStore } from '@/stores/task'
+import { useConversationStore } from '@/stores/conversation'
 import type { FileNode } from '@/types'
 
 /** 行高与上下越界行数：虚拟滚动的常量。 */
@@ -195,7 +197,32 @@ function ChevronIcon({ open }: { open: boolean }) {
 
 /** 左侧文件树：虚拟滚动 + 目录折叠 + 搜索 + 键盘导航 + 点选预览。 */
 export default function FileTree() {
-  const fileTree = useProjectStore((s) => s.fileTree)
+  const projectTree = useProjectStore((s) => s.fileTree)
+  const livePatches = useTaskStore((s) => s.patches)
+  const liveTask = useTaskStore((s) => s.currentTask)
+  const { selectedId, record } = useConversationStore()
+  const task = selectedId !== null ? record?.task : liveTask
+  const patches = useMemo(() => selectedId !== null ? record?.patches ?? [] : livePatches, [selectedId, record, livePatches])
+  const pendingPaths = useMemo(() => new Set(task && ['waitingConfirm', 'failed'].includes(task.status)
+    ? patches.filter((p) => !p.applied && !p.diff.includes('+++ /dev/null')).map((p) => p.filePath) : []), [patches, task])
+  const fileTree = useMemo(() => {
+    if (!projectTree || pendingPaths.size === 0) return projectTree
+    const tree = structuredClone(projectTree)
+    for (const path of pendingPaths) {
+      const parts = path.split('/')
+      let parent = tree
+      for (let i = 0; i < parts.length; i++) {
+        const name = parts[i]
+        let child = parent.children.find((node) => node.name === name)
+        if (!child) {
+          child = { name, path: parts.slice(0, i + 1).join('/'), isDir: i < parts.length - 1, size: null, children: [] }
+          parent.children.push(child)
+        }
+        parent = child
+      }
+    }
+    return tree
+  }, [projectTree, pendingPaths])
   const previewPath = useUiStore((s) => s.previewPath)
   const setPreviewPath = useUiStore((s) => s.setPreviewPath)
 
@@ -399,6 +426,7 @@ export default function FileTree() {
                     <span className="min-w-0 truncate">
                       <Highlight text={row.node.name} query={deferredQuery} />
                     </span>
+                    {pendingPaths.has(row.node.path) && <span className="ml-auto shrink-0 text-[10px] text-amber-500">待应用</span>}
                   </div>
                 )
               })

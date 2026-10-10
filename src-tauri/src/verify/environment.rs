@@ -2,6 +2,9 @@
 //! snapshots or the proposed patch, and checks cannot rewrite candidate files.
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use serde::Serialize;
 
 use crate::agent::workspace::TaskWorkspace;
 use crate::errors::{Result, XaimError};
@@ -11,6 +14,21 @@ pub struct VerificationEnvironment {
     node_status: Option<String>,
     python_status: Option<String>,
     python: Option<PathBuf>,
+    metrics: PreparationMetrics,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparationMetrics {
+    pub duration_ms: u64,
+    pub source_copy_ms: u64,
+    pub source_files: usize,
+    pub source_bytes: u64,
+    pub node_copy_ms: u64,
+    pub node_entries: usize,
+    pub node_bytes: u64,
+    pub node_reuse: &'static str,
+    pub python_reuse: &'static str,
 }
 
 fn same_manifests(candidate: &Path, original: &Path, names: &[&str]) -> bool {
@@ -74,7 +92,17 @@ fn copy_dependencies(
 
 impl VerificationEnvironment {
     pub fn prepare(candidate: &Path, original: Option<&Path>) -> Result<Self> {
+        let started = Instant::now();
         let workspace = TaskWorkspace::snapshot(candidate)?;
+        let (source_files, source_bytes) = workspace.source_stats();
+        let mut metrics = PreparationMetrics {
+            source_copy_ms: started.elapsed().as_millis() as u64,
+            source_files,
+            source_bytes,
+            node_reuse: "not_required",
+            python_reuse: "not_found",
+            ..Default::default()
+        };
         let mut node_status = None;
         let mut python_status = None;
         let mut python = None;
@@ -91,18 +119,23 @@ impl VerificationEnvironment {
                         "pnpm-workspace.yaml",
                     ],
                 ) {
+                    metrics.node_reuse = "manifest_changed";
                     node_status = Some("依赖清单已变化，需准备匹配的新依赖环境".into());
                 } else if original.join("node_modules").is_dir() {
+                    let copy_started = Instant::now();
+                    metrics.node_reuse = "copied";
                     if let Err(error) = copy_dependencies(
                         &original.join("node_modules"),
                         &workspace.root().join("node_modules"),
-                        &mut 0,
-                        &mut 0,
+                        &mut metrics.node_bytes,
+                        &mut metrics.node_entries,
                         &fs::canonicalize(original)?,
                         0,
                     ) {
+                        metrics.node_reuse = "copy_failed";
                         node_status = Some(format!("依赖环境准备失败：{error}"));
                     }
+                    metrics.node_copy_ms = copy_started.elapsed().as_millis() as u64;
                 } else {
                     let needs_dependencies = fs::read(candidate.join("package.json"))
                         .ok()
@@ -113,6 +146,7 @@ impl VerificationEnvironment {
                                 .any(|key| m[key].as_object().is_some_and(|deps| !deps.is_empty()))
                         });
                     if needs_dependencies {
+                        metrics.node_reuse = "missing";
                         node_status = Some("项目未安装 node_modules，无法运行 Node 检查".into());
                     }
                 }
@@ -134,6 +168,7 @@ impl VerificationEnvironment {
                         "bin/python"
                     });
                     if executable.is_file() {
+                        metrics.python_reuse = "existing_interpreter";
                         python = Some(executable);
                         break;
                     }
@@ -141,15 +176,25 @@ impl VerificationEnvironment {
             } else if candidate.join("requirements.txt").is_file()
                 || candidate.join("pyproject.toml").is_file()
             {
+                metrics.python_reuse = "manifest_changed";
                 python_status = Some("Python 依赖清单已变化，需准备匹配的新依赖环境".into());
             }
+        } else {
+            metrics.node_reuse = "no_original_source";
+            metrics.python_reuse = "no_original_source";
         }
+        metrics.duration_ms = started.elapsed().as_millis() as u64;
         Ok(Self {
             workspace,
             node_status,
             python_status,
             python,
+            metrics,
         })
+    }
+
+    pub fn metrics(&self) -> &PreparationMetrics {
+        &self.metrics
     }
 
     pub fn unavailable(&self, command: &str) -> Option<&str> {
@@ -196,6 +241,11 @@ mod tests {
             VerificationEnvironment::prepare(candidate.root(), Some(original.path())).unwrap();
         assert!(env.unavailable("npm test").is_none());
         assert!(env.root().join("node_modules/dependency").is_file());
+        assert_eq!(env.metrics().source_files, 2);
+        assert_eq!(env.metrics().source_bytes, 10);
+        assert_eq!(env.metrics().node_entries, 2);
+        assert_eq!(env.metrics().node_bytes, 9);
+        assert_eq!(env.metrics().node_reuse, "copied");
         fs::write(env.root().join("Cargo.lock"), "check side effect").unwrap();
         assert_eq!(env.side_effects().unwrap().len(), 1);
         fs::write(env.root().join("generated.bin"), [0xff, 0xfe]).unwrap();
@@ -206,5 +256,7 @@ mod tests {
             VerificationEnvironment::prepare(candidate.root(), Some(original.path())).unwrap();
         assert!(changed.unavailable("npm test").is_some());
         assert!(!changed.root().join("node_modules").exists());
+        assert_eq!(changed.metrics().node_reuse, "manifest_changed");
+        assert_eq!(changed.metrics().node_entries, 0);
     }
 }

@@ -68,6 +68,8 @@ export interface RuntimeSettings {
 /** 一次编码任务及其统计信息，对应 Rust Task（tasks 表）。 */
 export interface Task {
   id: number
+  conversationId?: number | null
+  parentTaskId?: number | null
   projectId: number
   prompt: string
   status: TaskStatus

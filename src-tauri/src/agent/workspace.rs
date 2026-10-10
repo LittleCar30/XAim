@@ -228,6 +228,13 @@ impl TaskWorkspace {
         &self.directory
     }
 
+    pub fn source_stats(&self) -> (usize, u64) {
+        (
+            self.baseline.len(),
+            self.baseline.values().map(|bytes| bytes.len() as u64).sum(),
+        )
+    }
+
     /// Side-effect attribution also supports binary generated files.
     pub fn changed_paths(&self) -> Result<Vec<String>> {
         let current = collect(self.root())?;

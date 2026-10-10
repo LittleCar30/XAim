@@ -4,13 +4,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import FilePreview from './FilePreview'
 import { ipc } from '@/services/ipc'
 import { useProjectStore } from '@/stores/project'
+import { useTaskStore } from '@/stores/task'
+import { patch, resetStores, task } from '@/test/fixtures'
 
-vi.mock('@/services/ipc', () => ({ ipc: { readFile: vi.fn() } }))
+vi.mock('@/services/ipc', () => ({ ipc: { readFile: vi.fn(), readTaskFile: vi.fn() } }))
 const mockedIpc = vi.mocked(ipc, true)
 
 describe('FilePreview', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    resetStores()
     useProjectStore.setState({ currentProject: { id: 7, path: 'repo', name: 'repo', createdAt: 0, lastOpenedAt: 0 }, fileTree: null, recentProjects: [], loading: false })
   })
 
@@ -31,6 +34,16 @@ describe('FilePreview', () => {
     await waitFor(() => expect(screen.getByText('permission denied')).toBeInTheDocument())
     screen.getByRole('button', { name: '返回上下文' }).click()
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('previews the generated version before applying changes', async () => {
+    useTaskStore.setState({ currentTask: { ...task, status: 'waitingConfirm' }, patches: [{ ...patch, filePath: 'new.ts' }] })
+    mockedIpc.readTaskFile.mockResolvedValue('generated content')
+    render(<FilePreview path="new.ts" onClose={vi.fn()} />)
+    await waitFor(() => expect(screen.getByText('generated content')).toBeInTheDocument())
+    expect(screen.getByText('待应用版本')).toBeInTheDocument()
+    expect(mockedIpc.readTaskFile).toHaveBeenCalledWith(task.id, 'new.ts')
+    expect(mockedIpc.readFile).not.toHaveBeenCalled()
   })
 
   it('reports missing project without calling IPC', () => {

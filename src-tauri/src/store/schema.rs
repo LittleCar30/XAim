@@ -14,7 +14,7 @@ use crate::errors::{Result, XaimError};
 use crate::utils::now_ms;
 
 /// 当前 schema 的最新版本。
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 /// 版本登记表。必须先于任何迁移存在，用于记录/查询已应用的版本；
 /// 行数极少，`version` 为主键自带索引，`applied_at` 仅供审计。
@@ -124,7 +124,13 @@ const V2: &[&str] =
 
 /// 全部迁移步骤：`MIGRATIONS[i]` 把 schema 从版本 i 升级到版本 i + 1。
 /// 新增迁移时在数组末尾追加一项，并把 [`CURRENT_SCHEMA_VERSION`] 加一。
-const MIGRATIONS: &[&[&str]] = &[V1, V2];
+const V3: &[&str] = &[
+    "ALTER TABLE tasks ADD COLUMN conversation_id INTEGER REFERENCES tasks(id)",
+    "ALTER TABLE tasks ADD COLUMN parent_task_id INTEGER REFERENCES tasks(id)",
+    "UPDATE tasks SET conversation_id = id",
+    "CREATE INDEX idx_tasks_conversation ON tasks(conversation_id, id)",
+];
+const MIGRATIONS: &[&[&str]] = &[V1, V2, V3];
 
 /// 把数据库 schema 迁移到 [`CURRENT_SCHEMA_VERSION`]。
 ///
@@ -311,5 +317,22 @@ mod tests {
         let err = migrate(&conn).unwrap_err();
         assert!(matches!(err, XaimError::Config(_)));
         assert!(err.to_string().contains("高于"));
+    }
+
+    #[test]
+    fn v2_tasks_migrate_to_independent_conversations() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(CREATE_SCHEMA_VERSION).unwrap();
+        for statement in V1.iter().chain(V2.iter()) {
+            conn.execute_batch(statement).unwrap();
+        }
+        conn.execute_batch("INSERT INTO schema_version VALUES (1, 0), (2, 0);
+            INSERT INTO projects VALUES (1, 'project', 'demo', 0, 0);
+            INSERT INTO tasks (id, project_id, prompt, status, created_at) VALUES (1, 1, 'old', 'done', 0);").unwrap();
+        migrate(&conn).unwrap();
+        let task = crate::store::task::get_task(&conn, 1).unwrap().unwrap();
+        assert_eq!(task.conversation_id, Some(task.id));
+        assert_eq!(task.parent_task_id, None);
+        migrate(&conn).unwrap();
     }
 }

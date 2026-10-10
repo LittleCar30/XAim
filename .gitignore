@@ -20,3 +20,19 @@ src-tauri/gen/schemas/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local credentials, app data and development overrides
+*.local.json
+*.local.toml
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+__pycache__/
+.venv/
+.idea/

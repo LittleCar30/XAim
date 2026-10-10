@@ -17,7 +17,7 @@ export default function ConversationSidebar({ onNavigate }: { onNavigate?: () =>
   const currentTask = useTaskStore((s) => s.currentTask)
   const selectedId = useConversationStore((s) => s.selectedId)
   const select = useConversationStore((s) => s.select)
-  const busy = currentTask !== null && !['idle', 'done', 'applied', 'failed', 'cancelled', 'rolledBack'].includes(currentTask.status)
+  const busy = currentTask !== null && !['idle', 'waitingConfirm', 'done', 'applied', 'failed', 'cancelled', 'rolledBack'].includes(currentTask.status)
   const refresh = useCallback(async () => {
     if (!project) return
     const version = ++refreshVersion.current
@@ -32,14 +32,22 @@ export default function ConversationSidebar({ onNavigate }: { onNavigate?: () =>
   }, [project])
   useEffect(() => { void refresh() }, [refresh, currentTask?.id, currentTask?.status])
   useEffect(() => () => { refreshVersion.current++ }, [project?.id])
-  const conversations = currentTask && currentTask.id >= 0
+  const allTasks = currentTask && currentTask.id >= 0
     ? [currentTask, ...history.filter((task) => task.id !== currentTask.id)] : history
+  const seen = new Set<number>()
+  const conversations = [...allTasks].sort((a, b) => b.id - a.id).filter((task) => {
+    const id = task.conversationId ?? task.id
+    if (seen.has(id)) return false
+    seen.add(id)
+    return true
+  })
   const activeId = selectedId ?? currentTask?.id
   const newConversation = () => {
     useConversationStore.getState().archiveCurrent()
     const history = useTaskStore.getState().history
     useTaskStore.getState().reset()
     useTaskStore.setState({ history })
+    useConversationStore.getState().clear()
     void select(null)
     setTab('chats')
     onNavigate?.()

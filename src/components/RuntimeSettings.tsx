@@ -36,7 +36,7 @@ export default function RuntimeSettings() {
       fill(await ipc.getRuntimeSettings(projectId)); setSaved(true)
     } catch (error) { setError(toMessage(error)) } finally { setBusy(false) }
   }
-  return <section className="rounded-lg border border-slate-800 bg-slate-900/50 p-4" aria-label="任务执行设置">
+  return <section className="settings-card" aria-label="任务执行设置">
     <h2 className="mb-3 text-sm font-semibold text-slate-200">任务执行</h2>
     <label className="mb-3 flex items-center gap-3 text-xs text-slate-400">适用范围<select aria-label="任务设置范围" value={scope} disabled={busy} className="rounded bg-slate-950 px-2 py-1.5 ring-1 ring-slate-700" onChange={(e) => setScope(e.target.value as 'user' | 'project')}>
       <option value="user">所有项目默认</option><option value="project" disabled={!project}>当前项目{project ? ` · ${project.name}` : ''}</option>

@@ -16,7 +16,7 @@ use crate::utils::now_ms;
 
 /// tasks 表查询列清单，列序与 [`row_to_task`] 的读取顺序一致。
 const TASK_COLUMNS: &str =
-    "id, project_id, prompt, status, intent, plan, created_at, finished_at, duration_ms, token_input, token_output, cost";
+    "id, project_id, prompt, status, intent, plan, created_at, finished_at, duration_ms, token_input, token_output, cost, conversation_id, parent_task_id";
 
 /// task_steps 表查询列清单，列序与 [`row_to_step`] 的读取顺序一致。
 const STEP_COLUMNS: &str = "id, task_id, step_type, content, created_at";
@@ -34,7 +34,27 @@ pub fn insert_task(conn: &Connection, project_id: i64, prompt: &str) -> Result<i
             now_ms()
         ],
     )?;
-    Ok(conn.last_insert_rowid())
+    let id = conn.last_insert_rowid();
+    conn.execute("UPDATE tasks SET conversation_id = ?1 WHERE id = ?1", [id])?;
+    Ok(id)
+}
+
+pub fn attach_to_conversation(conn: &Connection, id: i64, parent: &Task) -> Result<()> {
+    conn.execute(
+        "UPDATE tasks SET conversation_id = ?1, parent_task_id = ?2 WHERE id = ?3",
+        params![parent.conversation_id.unwrap_or(parent.id), parent.id, id],
+    )?;
+    Ok(())
+}
+
+pub fn conversation_tasks(conn: &Connection, task_id: i64) -> Result<Vec<Task>> {
+    let task =
+        get_task(conn, task_id)?.ok_or_else(|| XaimError::Config("历史任务不存在".into()))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TASK_COLUMNS} FROM tasks WHERE conversation_id = ?1 ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([task.conversation_id.unwrap_or(task.id)], row_to_task)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// 按主键查任务；不存在返回 `None`。
@@ -158,6 +178,8 @@ fn row_to_task(row: &Row<'_>) -> rusqlite::Result<Task> {
         token_input: row.get(9)?,
         token_output: row.get(10)?,
         cost: row.get(11)?,
+        conversation_id: row.get(12)?,
+        parent_task_id: row.get(13)?,
     })
 }
 

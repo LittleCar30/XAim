@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { useTaskStore } from '@/stores/task'
+import { useConversationStore } from '@/stores/conversation'
+import { toolContext } from '@/lib/tool-context'
+import type { ContextFile, XaimEvent } from '@/types'
 
 export interface ContextViewerProps {
   /** TODO: 高亮关键词覆盖（缺省从当前任务描述提取）。 */
@@ -78,7 +81,21 @@ function TargetIcon() {
 
 /** 上下文查看器：展示检索阶段实际注入模型的文件片段，含 token 估算、入选原因与相关行高亮。 */
 export default function ContextViewer(_props: ContextViewerProps) {
-  const context = useTaskStore((s) => s.context)
+  const liveContext = useTaskStore((s) => s.context)
+  const { selectedId, record } = useConversationStore()
+  const context = useMemo(() => {
+    if (selectedId === null) return liveContext
+    const files = new Map<string, ContextFile>()
+    for (const step of record?.steps ?? []) {
+      if (step.stepType !== 'event') continue
+      try {
+        const event = JSON.parse(step.content) as XaimEvent
+        if (event.type !== 'toolFinished') continue
+        for (const file of toolContext(event.result)) files.set(file.path, file)
+      } catch { /* Older records may lack structured tool results. */ }
+    }
+    return [...files.values()]
+  }, [selectedId, record, liveContext])
   const prompt = useTaskStore((s) => s.currentTask?.prompt ?? '')
 
   // 挂载时展开首个（相关度最高的）文件；流式到达的新文件接管展开。

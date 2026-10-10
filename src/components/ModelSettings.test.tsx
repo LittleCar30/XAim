@@ -76,6 +76,31 @@ describe('model settings across both entry points', () => {
     expect(useConfigStore.getState().config).toEqual(previous)
   })
 
+  it('preserves unsaved model edits when switching settings categories', async () => {
+    render(<Settings />)
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存全部' })).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Max Tokens'), { target: { value: '9000' } })
+    fireEvent.click(screen.getByRole('button', { name: '界面与外观' }))
+    expect(screen.getByLabelText('主题')).toBeVisible()
+    expect(screen.getByLabelText('Max Tokens')).not.toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '模型与连接' }))
+    expect(screen.getByLabelText('Max Tokens')).toBeVisible()
+    expect(screen.getByLabelText('Max Tokens')).toHaveValue(9000)
+    expect(mocked.setConfig).not.toHaveBeenCalled()
+  })
+
+  it('opens the category containing a validation error when saving from another category', async () => {
+    render(<Settings />)
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存全部' })).toBeEnabled())
+    fireEvent.click(screen.getByRole('button', { name: '项目索引' }))
+    fireEvent.change(screen.getByLabelText('最大文件数'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: '界面与外观' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存全部' }))
+    expect(screen.getByRole('button', { name: '项目索引' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByText('取值范围 1 ~ 1000000')).toBeVisible()
+    expect(mocked.setConfig).not.toHaveBeenCalled()
+  })
+
   it('reports preference persistence failure without claiming model settings were saved', async () => {
     render(<Settings />)
     await waitFor(() => expect(screen.getByRole('button', { name: '保存全部' })).toBeEnabled())

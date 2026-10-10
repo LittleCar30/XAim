@@ -25,6 +25,7 @@ const SYSTEM: &str = r#"你是 XAim 编程 Agent。根据用户任务使用工�
 文件工具只操作隔离副本，最终差异由程序计算。不要输出 unified diff。
 按需要先 list_dir / search，再 read_file；仅在支持的源码语言中定位声明时使用 search_symbols / read_symbol，HTML/SVG 直接读取文件。edit_file 必须使用最新 hash 和唯一的非空 old_text。
 长文件必须分块生成：先 create_file 创建小骨架，再 append_file 追加或 edit_file 编辑。
+已知多个相关文件路径时，优先用 read_files 一次读取，避免逐文件模型往返。读取结果不完整时按 next_offset 继续 read_file。
 单次写入建议不超过 4000 字符，使用写入工具返回的新 hash，不要反复读取整个文件。
 根据剩余 token 预算及时收尾，避免无必要的搜索、重复读取和装饰性大输出。
 工具失败时根据错误继续读取和修复，不要假定失败的操作已执行。
@@ -32,6 +33,7 @@ const SYSTEM: &str = r#"你是 XAim 编程 Agent。根据用户任务使用工�
 不访问凭据，不修改 .git，不执行任意命令，不为使验证通过而删除测试或削弱检查。
 遵循用户的原始要求和现有项目约定。完成后用简短正文总结变更与限制。
 可用 update_task_state 简短记录完成事项和待办；全部要求完成后声明 ready_for_review=true，程序直接验证和汇总，不需要额外一轮正文。
+用户要求介绍、解释、分析、审查或讨论时，以回答为成果，不要求修改或创建文件，不为产生差异而写文件。详细回答可直接输出正文；用 update_task_state 提交回答时 task_kind=analysis，summary 必须包含完整回答而非一句完成声明。
 已有文件可能满足原始要求：必须先读取并核对内容，再说明为何无需修改，允许以零变更完成。文件存在或搜索命中本身不代表任务已完成；仍有缺失时必须实际写入。
 程序进入收尾状态后，禁止美化、扩展功能和反复编辑，只能执行提供的检查工具；真实验证失败时才能针对性修复。
 你提出完成后程序还会执行最终验证；只有 status=failed 才需要继续修复，unavailable 不代表代码错误。
@@ -39,6 +41,7 @@ const SYSTEM: &str = r#"你是 XAim 编程 Agent。根据用户任务使用工�
 
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
+    pub conversation_context: String,
     pub max_turns: usize,
     pub max_tool_calls: usize,
     pub max_total_tokens: u64,
@@ -53,6 +56,7 @@ pub struct LoopConfig {
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
+            conversation_context: String::new(),
             max_turns: 32,
             max_tool_calls: 96,
             max_total_tokens: 500_000,
@@ -210,12 +214,19 @@ fn compact_tool_results(messages: &mut [ToolMessage]) -> usize {
         let output = result["output"].as_str().unwrap_or_default();
         if !matches!(
             name,
-            "read_file" | "read_symbol" | "search" | "search_symbols" | "list_dir"
+            "read_file" | "read_files" | "read_symbol" | "search" | "search_symbols" | "list_dir"
         ) || output.len() <= 2048
         {
             continue;
         }
-        let summary = if matches!(name, "read_file" | "read_symbol") {
+        let summary = if name == "read_files" {
+            let Ok(batch) = serde_json::from_str::<Value>(output) else {
+                continue;
+            };
+            json!({"files":batch["files"].as_array().map(|files| files.iter()
+                .map(|file| json!({"path":file["path"],"hash":file["hash"],"error":file["error"]}))
+                .collect::<Vec<_>>()),"content_omitted":true,"note":"历史正文已省略，需要时重新读取"}).to_string()
+        } else if matches!(name, "read_file" | "read_symbol") {
             let Ok(read) = serde_json::from_str::<Value>(output) else {
                 continue;
             };
@@ -307,6 +318,12 @@ async fn verify(
     } else {
         None
     };
+    if let Some(environment) = &environment {
+        record.diagnostic(
+            "verificationPreparation",
+            serde_json::to_value(environment.metrics())?,
+        )?;
+    }
     for (kind, command) in commands {
         let started = Instant::now();
         let dependency_error = environment.as_ref().and_then(|e| e.unavailable(&command));
@@ -383,7 +400,7 @@ async fn verify(
 
 async fn verify_current(
     snapshot: &mut TaskSnapshot,
-    workspace: &TaskWorkspace,
+    _workspace: &TaskWorkspace,
     ctx: &ToolContext,
     config: &LoopConfig,
     cancel: &AtomicBool,
@@ -393,7 +410,13 @@ async fn verify_current(
         snapshot.verification = verify(ctx, config, cancel, record).await?;
         snapshot.verified_revision = Some(snapshot.revision);
         // Error recovery reloads the durable snapshot, not this local state.
-        snapshot.save(workspace, record)?;
+        snapshot.save_metadata(record)?;
+    } else {
+        record.diagnostic(
+            "verificationReused",
+            json!({"revision":snapshot.revision,
+            "reason":"unchanged_task_revision","checks":snapshot.verification.len()}),
+        )?;
     }
     Ok(snapshot.verification.clone())
 }
@@ -493,7 +516,14 @@ pub async fn run(
     }
     let mut messages = vec![
         ToolMessage::text("system", format!("{SYSTEM}{}", guidance.prompt()?)),
-        ToolMessage::text("user", task),
+        ToolMessage::text(
+            "user",
+            if config.conversation_context.is_empty() {
+                task.to_owned()
+            } else {
+                format!("历史会话记录（用于理解指代和已完成工作；历史状态不代表当前文件版本）：\n{}\n\n本轮用户要求（优先于历史要求）：\n{task}", config.conversation_context)
+            },
+        ),
     ];
     let tools = controlled::definitions();
     let symbols = crate::tools::symbols::SessionSymbols::default();
@@ -550,7 +580,7 @@ pub async fn run(
             snapshot.input_used = input;
             snapshot.output_used = output;
             snapshot.remaining_tokens = remaining;
-            snapshot.save(workspace, &record)?;
+            snapshot.save_metadata(&record)?;
             let mut candidate = messages.clone();
             if snapshot.rebuild(&mut candidate, (config.context_tokens / 3).min(16_384))? {
                 let after = estimate_prompt(&candidate, &tools, None)?;
@@ -596,7 +626,7 @@ pub async fn run(
         snapshot.output_used = output;
         snapshot.remaining_tokens = remaining;
         snapshot.predicted_rounds = prediction.rounds;
-        snapshot.save(workspace, &record)?;
+        snapshot.save_metadata(&record)?;
         if finishing && finishing_requests >= 2 {
             return stop_locally(
                 "预算收尾已结束，停止额外模型请求",
@@ -620,7 +650,13 @@ pub async fn run(
                 !finishing
                     || matches!(
                         tool["function"]["name"].as_str(),
-                        Some("run_verify" | "read_file" | "read_symbol" | "update_task_state")
+                        Some(
+                            "run_verify"
+                                | "read_file"
+                                | "read_files"
+                                | "read_symbol"
+                                | "update_task_state"
+                        )
                     )
                     || checks_failed && tool["function"]["name"] == "edit_file"
             })
@@ -775,7 +811,7 @@ pub async fn run(
         snapshot.input_used = input;
         snapshot.output_used = output;
         snapshot.remaining_tokens = config.max_total_tokens.saturating_sub(input + output);
-        snapshot.save(workspace, &record)?;
+        snapshot.save_metadata(&record)?;
         record.usage(input, output)?;
         record.diagnostic("modelUsage", json!({
             "round":turn + 1,"usageReported":response.usage_reported,
@@ -926,6 +962,7 @@ pub async fn run(
                         if call.function.name == "run_verify"
                             && args.as_object().is_some_and(|o| o.is_empty()) =>
                     {
+                        let check_started = Instant::now();
                         let checks =
                             verify_current(&mut snapshot, workspace, ctx, config, &cancel, &record).await?;
                         crate::types::ToolResult {
@@ -934,7 +971,7 @@ pub async fn run(
                             success: true,
                             output: serde_json::to_string(&checks)?,
                             error: None,
-                            duration_ms: Some(checks.iter().filter_map(|r| r["durationMs"].as_u64()).sum::<u64>() as i64),
+                            duration_ms: Some(check_started.elapsed().as_millis() as i64),
                         }
                     }
                     Ok(args) if matches!(call.function.name.as_str(), "search_symbols" | "read_symbol") =>
@@ -948,16 +985,44 @@ pub async fn run(
                         duration_ms: Some(0),
                     },
                 };
+                let changed = result.success
+                    && matches!(
+                        call.function.name.as_str(),
+                        "create_file" | "edit_file" | "append_file"
+                    )
+                    && serde_json::from_str::<Value>(&result.output)
+                        .map_or(true, |output| output["changed"] != false);
                 snapshot.observe(
                     &call.function.name,
                     path.as_deref(),
                     result.success,
+                    changed,
                     result.error.as_deref(),
                 );
+                if result.success && call.function.name == "read_files" {
+                    if let Ok(batch) = serde_json::from_str::<Value>(&result.output) {
+                        for file in batch["files"].as_array().into_iter().flatten() {
+                            if file["hash"].is_string() && file["content"].is_string() {
+                                snapshot.observe(
+                                    "read_file",
+                                    file["path"].as_str(),
+                                    true,
+                                    false,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
                 if result.success
                     && matches!(
                         call.function.name.as_str(),
-                        "list_dir" | "search" | "read_file" | "search_symbols" | "read_symbol"
+                        "list_dir"
+                            | "search"
+                            | "read_file"
+                            | "read_files"
+                            | "search_symbols"
+                            | "read_symbol"
                     )
                 {
                     // IDs and duration vary even when the request and observed
@@ -977,7 +1042,11 @@ pub async fn run(
                     repeated_exploration = false;
                     exploration_results.clear();
                 }
-                snapshot.save(workspace, &record)?;
+                if changed {
+                    snapshot.save(workspace, &record)?;
+                } else {
+                    snapshot.save_metadata(&record)?;
+                }
                 record.event(XaimEvent::ToolFinished {
                     task_id: record.task_id,
                     call_id: call.id.clone(),
@@ -1026,7 +1095,15 @@ pub async fn run(
                 continue;
             }
         }
-        let summary = if snapshot.ready_for_review {
+        let summary = if snapshot.task_kind == "analysis"
+            && response
+                .message
+                .content
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            response.message.content.clone().unwrap()
+        } else if snapshot.ready_for_review {
             snapshot.model_summary.clone()
         } else {
             response.message.content.clone().unwrap_or_default()
@@ -1036,12 +1113,20 @@ pub async fn run(
         }
         if response.message.tool_calls.is_empty() {
             messages.push(response.message);
+            if snapshot.reported_pending
+                && !snapshot.pending.is_empty()
+                && !snapshot.ready_for_review
+            {
+                messages.push(ToolMessage::text("user", "任务状态仍有待办，请继续完成待办；若已全部完成，请用 update_task_state 清空待办并提交完整结果。"));
+                continue;
+            }
             snapshot.ready_for_review = true;
             snapshot.pending.clear();
             snapshot.model_summary = summary.clone();
         }
         let changes = workspace.changes()?;
-        if changes.files.is_empty()
+        if snapshot.task_kind != "analysis"
+            && changes.files.is_empty()
             && !snapshot
                 .completed_operations
                 .keys()
@@ -1049,7 +1134,7 @@ pub async fn run(
         {
             snapshot.ready_for_review = false;
             snapshot.pending = vec!["需读取现有文件核对要求，或实际完成必要写入".into()];
-            snapshot.save(workspace, &record)?;
+            snapshot.save_metadata(&record)?;
             if unsupported_completion_warned {
                 return Err(XaimError::Model(
                     "模型重复声明完成，但未产生文件变更，也未成功读取文件核对原始要求".into(),
@@ -1060,12 +1145,15 @@ pub async fn run(
                 "程序未发现文件变更，也没有成功读取文件的记录，无法确认完成。请读取现有文件并核对原始要求；若全部满足，说明无需修改的依据后提交完成；否则必须实际写入。"));
             continue;
         }
-        let results =
-            verify_current(&mut snapshot, workspace, ctx, config, &cancel, &record).await?;
+        let results = if snapshot.task_kind == "analysis" && snapshot.revision == 0 {
+            Vec::new()
+        } else {
+            verify_current(&mut snapshot, workspace, ctx, config, &cancel, &record).await?
+        };
         if results.iter().any(|r| r["status"] == "failed") {
             snapshot.ready_for_review = false;
             snapshot.pending = vec!["真实检查失败，需要针对性修复".into()];
-            snapshot.save(workspace, &record)?;
+            snapshot.save_metadata(&record)?;
             if last_failed_revision == Some(snapshot.revision) {
                 record.diagnostic(
                     "unchangedVerificationFailure",
@@ -1105,7 +1193,9 @@ pub async fn run(
         let program_summary = snapshot.save_report(
             workspace,
             &record,
-            if unchanged {
+            if unchanged && snapshot.task_kind == "analysis" {
+                "分析已完成，本次无需修改文件或运行代码检查"
+            } else if unchanged {
                 "任务已完成，本次无需修改文件"
             } else {
                 "任务变更已汇总，等待审阅"
@@ -1392,6 +1482,175 @@ mod tests {
             provider.clone(),
         );
         (orchestrator, store, project_id, provider, sink)
+    }
+
+    #[tokio::test]
+    async fn batch_read_evidence_allows_zero_change_completion_but_errors_do_not() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "ready").unwrap();
+        std::fs::write(root.path().join("b.txt"), "ready").unwrap();
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![
+                call(
+                    "read",
+                    "read_files",
+                    json!({"paths":["a.txt","missing.txt","b.txt"]}),
+                ),
+                done(),
+            ],
+            LoopConfig::default(),
+        );
+        let task = agent
+            .run_task(
+                project,
+                "Check that both files already contain ready".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            store::task::get_task(&store.conn(), task)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::Done
+        );
+        let (agent, _, project, _, _) = setup(
+            root.path(),
+            vec![
+                call(
+                    "read",
+                    "read_files",
+                    json!({"paths":["missing.txt",".env"]}),
+                ),
+                done(),
+                done(),
+            ],
+            LoopConfig::default(),
+        );
+        assert!(agent
+            .run_task(project, "Check existing files".into())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("未成功读取文件"));
+    }
+
+    #[tokio::test]
+    async fn noop_edits_keep_checks_and_real_edits_recheck_without_read_scans() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "module.exports = 0;\n";
+        let hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"test":"node check.cjs"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("check.cjs"),
+            "console.log(require('./value.cjs'))",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("value.cjs"), source).unwrap();
+        let (agent, store, project, _, sink) = setup(
+            root.path(),
+            vec![
+                call(
+                    "read",
+                    "read_files",
+                    json!({"paths":["value.cjs","check.cjs"]}),
+                ),
+                call("check1", "run_verify", json!({})),
+                call(
+                    "noop",
+                    "edit_file",
+                    json!({"path":"value.cjs","expected_hash":hash,"old_text":"0","new_text":"0"}),
+                ),
+                call("check2", "run_verify", json!({})),
+                call(
+                    "edit",
+                    "edit_file",
+                    json!({"path":"value.cjs","expected_hash":hash,"old_text":"0","new_text":"42"}),
+                ),
+                call("check3", "run_verify", json!({})),
+                done(),
+            ],
+            LoopConfig {
+                allow_verification: true,
+                ..Default::default()
+            },
+        );
+        let task = agent
+            .run_task(project, "Change value to 42".into())
+            .await
+            .unwrap();
+        let events = sink.0.lock().unwrap();
+        let checks: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                XaimEvent::Verify { output, status, .. } if status.as_deref() == Some("passed") => {
+                    Some(output)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            checks.len(),
+            2,
+            "No-op and final completion must reuse checks"
+        );
+        assert_eq!(checks[0].trim().lines().last(), Some("0"));
+        assert_eq!(checks[1].trim().lines().last(), Some("42"));
+        drop(events);
+        let steps = store::task::list_steps(&store.conn(), task).unwrap();
+        let diagnostics: Vec<Value> = steps
+            .iter()
+            .filter(|step| step.step_type == "diagnostic")
+            .map(|step| serde_json::from_str(&step.content).unwrap())
+            .collect();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d["kind"] == "verificationReused")
+                .count(),
+            2
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d["kind"] == "checkpointPersistence" && d["data"]["mode"] == "files")
+                .count(),
+            3,
+            "Only initial state, actual write and final report scan the task files"
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d["kind"] == "verificationPreparation")
+                .count(),
+            2
+        );
+        assert!(diagnostics
+            .iter()
+            .any(|d| d["kind"] == "workspacePreparation" && d["data"]["sourceFiles"] == 3));
+        let snapshot: TaskSnapshot = serde_json::from_str(
+            &store::cache::get_cache(&store.conn(), &format!("task:{task}:snapshot"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(snapshot.revision, 1);
+        assert_eq!(snapshot.verified_revision, Some(1));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("value.cjs")).unwrap(),
+            source
+        );
+        agent.confirm_task(task).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("value.cjs")).unwrap(),
+            "module.exports = 42;\n"
+        );
     }
 
     #[test]
@@ -1845,11 +2104,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (agent, store, id, _, sink) = setup(
             root.path(),
-            vec![call(
-                "a",
-                "create_file",
-                json!({"path":"a.txt","content":"partial"}),
-            )],
+            vec![
+                call(
+                    "a",
+                    "create_file",
+                    json!({"path":"a.txt","content":"partial"}),
+                ),
+                call(
+                    "read",
+                    "read_files",
+                    json!({"paths":["a.txt","missing.txt"]}),
+                ),
+            ],
             LoopConfig::default(),
         );
         assert!(agent.run_task(id, "Create file".into()).await.is_err());
@@ -1889,9 +2155,15 @@ mod tests {
         assistant.reasoning_content = Some("private".into());
         let mut messages = vec![assistant];
         for index in 0..8 {
-            messages.push(ToolMessage::result(&format!("call-{index}"), json!({
-                "name":"read_file","success":true,"output":json!({"path":"a","hash":"h","content":"x".repeat(3000)}).to_string(),
-            }).to_string()));
+            let read = json!({"path":"a","hash":"h","content":"x".repeat(3000)});
+            messages.push(ToolMessage::result(
+                &format!("call-{index}"),
+                json!({
+                    "name":if index == 1 { "read_files" } else { "read_file" },"success":true,
+                    "output":if index == 1 { json!({"files":[read]}) } else { read }.to_string(),
+                })
+                .to_string(),
+            ));
         }
         assert_eq!(compact_tool_results(&mut messages), 2);
         assert_eq!(messages[0].reasoning_content.as_deref(), Some("private"));
@@ -1899,6 +2171,13 @@ mod tests {
         let result: Value = serde_json::from_str(messages[1].content.as_ref().unwrap()).unwrap();
         let read: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
         assert_eq!(read["content_omitted"], true);
+        let batch_result: Value =
+            serde_json::from_str(messages[2].content.as_ref().unwrap()).unwrap();
+        let batch: Value = serde_json::from_str(batch_result["output"].as_str().unwrap()).unwrap();
+        assert_eq!(batch["content_omitted"], true);
+        assert_eq!(batch["files"][0]["path"], "a");
+        assert_eq!(batch["files"][0]["hash"], "h");
+        assert!(batch["files"][0]["content"].is_null());
         assert!(messages[8]
             .content
             .as_ref()
@@ -1980,6 +2259,265 @@ mod tests {
             drop(events);
             assert!(agent.confirm_task(task).await.is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn project_analysis_preserves_detailed_answer_without_writes_or_checks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("README.md"),
+            "Project architecture and setup",
+        )
+        .unwrap();
+        let answer = "Architecture, modules, setup and limitations.\n".repeat(100);
+        let (agent, store, project, _, sink) = setup(
+            root.path(),
+            vec![
+                call("read", "read_file", json!({"path":"README.md","offset":0})),
+                call(
+                    "answer",
+                    "update_task_state",
+                    json!({"task_kind":"analysis", "completed":["Explained the project"],"pending":[],"ready_for_review":true,"summary":answer}),
+                ),
+            ],
+            LoopConfig::default(),
+        );
+        let id = agent
+            .run_task(project, "详细介绍这个项目".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            store::task::get_task(&store.conn(), id)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::Done
+        );
+        assert!(store::patch::list_patches_by_task(&store.conn(), id)
+            .unwrap()
+            .is_empty());
+        let events = sink.0.lock().unwrap();
+        assert!(events.iter().any(
+            |e| matches!(e, XaimEvent::Message { content, .. } if content.starts_with(&answer))
+        ));
+        assert!(!events.iter().any(|e| matches!(e, XaimEvent::Verify { .. })));
+    }
+
+    #[tokio::test]
+    async fn direct_analysis_answer_needs_neither_patch_nor_code_checks() {
+        let root = tempfile::tempdir().unwrap();
+        let mut answer = done();
+        answer.message.content = Some("上下文保存了用户问题和公开回答。".into());
+        let (agent, store, project, _, sink) =
+            setup(root.path(), vec![answer], LoopConfig::default());
+        let id = agent
+            .run_task(project, "解释对话上下文如何工作".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            store::task::get_task(&store.conn(), id)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::Done
+        );
+        assert!(!sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, XaimEvent::Verify { .. } | XaimEvent::Patch { .. })));
+    }
+
+    #[tokio::test]
+    async fn commentary_does_not_discard_explicit_pending_work() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![
+                call(
+                    "state",
+                    "update_task_state",
+                    json!({"completed":[],"pending":["create a file"],"ready_for_review":false,"summary":"Work remains"}),
+                ),
+                done(),
+                call(
+                    "create",
+                    "create_file",
+                    json!({"path":"result.txt","content":"finished"}),
+                ),
+                call(
+                    "finish",
+                    "update_task_state",
+                    json!({"completed":["created the file"],"pending":[],"ready_for_review":true,"summary":"Finished"}),
+                ),
+            ],
+            LoopConfig::default(),
+        );
+        let id = agent
+            .run_task(project, "Create a file".into())
+            .await
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 4);
+        assert_eq!(
+            store::patch::list_patches_by_task(&store.conn(), id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn continuation_restores_history_and_pending_files_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let database = data.path().join("history.db");
+        let store = Arc::new(Store::new(&database).unwrap());
+        let project =
+            store::project::insert_project(&store.conn(), root.path().to_str().unwrap(), "test")
+                .unwrap();
+        let sink = Arc::new(Sink::default());
+        let first = Orchestrator::with_sink(
+            store.clone(),
+            OrchestratorConfig::default(),
+            sink.clone(),
+            Arc::new(Script {
+                responses: Mutex::new(
+                    vec![
+                        call(
+                            "create",
+                            "create_file",
+                            json!({"path":"a.txt","content":"first\n"}),
+                        ),
+                        done(),
+                    ]
+                    .into(),
+                ),
+                requests: Mutex::new(vec![]),
+                delay: Duration::ZERO,
+            }),
+        );
+        let parent = first
+            .run_task(project, "Create the first file".into())
+            .await
+            .unwrap();
+        drop(first);
+        drop(store);
+        let store = Arc::new(Store::new(&database).unwrap());
+        let provider = Arc::new(Script {
+            responses: Mutex::new(
+                vec![
+                    call("read", "read_file", json!({"path":"a.txt","offset":0})),
+                    call(
+                        "create",
+                        "create_file",
+                        json!({"path":"b.txt","content":"second\n"}),
+                    ),
+                    done(),
+                ]
+                .into(),
+            ),
+            requests: Mutex::new(vec![]),
+            delay: Duration::ZERO,
+        });
+        let next = Orchestrator::with_sink(
+            store.clone(),
+            OrchestratorConfig {
+                parent_task_id: Some(parent),
+                ..Default::default()
+            },
+            sink,
+            provider.clone(),
+        );
+        let id = next
+            .run_task(project, "Keep that file and add another".into())
+            .await
+            .unwrap();
+        let task = store::task::get_task(&store.conn(), id).unwrap().unwrap();
+        assert_eq!(task.conversation_id, Some(parent));
+        assert_eq!(task.parent_task_id, Some(parent));
+        assert_eq!(
+            store::task::get_task(&store.conn(), parent)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::Cancelled
+        );
+        assert_eq!(
+            store::patch::list_patches_by_task(&store.conn(), id)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(provider.requests.lock().unwrap()[0].messages[1]
+            .content
+            .as_ref()
+            .unwrap()
+            .contains("Create the first file"));
+        assert!(!root.path().join("a.txt").exists());
+        next.confirm_task(id).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("b.txt")).unwrap(),
+            "second\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_continuation_keeps_previous_pending_review() {
+        let root = tempfile::tempdir().unwrap();
+        let (first, store, project, _, sink) = setup(
+            root.path(),
+            vec![
+                call(
+                    "create",
+                    "create_file",
+                    json!({"path":"a.txt","content":"first\n"}),
+                ),
+                done(),
+            ],
+            LoopConfig::default(),
+        );
+        let parent = first
+            .run_task(project, "Create a file".into())
+            .await
+            .unwrap();
+        let provider = Arc::new(Script {
+            responses: Mutex::new(
+                vec![ToolResponse {
+                    message: ToolMessage::text("assistant", ""),
+                    finish_reason: "stop".into(),
+                    usage: Usage::new(10, 0),
+                    usage_reported: true,
+                    reasoning_tokens: None,
+                }]
+                .into(),
+            ),
+            requests: Mutex::new(vec![]),
+            delay: Duration::ZERO,
+        });
+        let next = Orchestrator::with_sink(
+            store.clone(),
+            OrchestratorConfig {
+                parent_task_id: Some(parent),
+                ..Default::default()
+            },
+            sink,
+            provider,
+        );
+        assert!(next.run_task(project, "Continue".into()).await.is_err());
+        assert_eq!(
+            store::task::get_task(&store.conn(), parent)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::WaitingConfirm
+        );
+        first.confirm_task(parent).await.unwrap();
+        assert!(root.path().join("a.txt").exists());
     }
 
     #[tokio::test]

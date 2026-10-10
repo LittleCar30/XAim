@@ -125,6 +125,41 @@ mod tests {
     use rusqlite::params;
 
     #[test]
+    fn conversation_history_survives_database_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conversation.db");
+        let (parent, child) = {
+            let store = Store::new(&path).unwrap();
+            let conn = store.conn();
+            let project = project::insert_project(&conn, "project", "demo").unwrap();
+            let parent = task::insert_task(&conn, project, "first question").unwrap();
+            let child = task::insert_task(&conn, project, "followup").unwrap();
+            let parent_task = task::get_task(&conn, parent).unwrap().unwrap();
+            task::attach_to_conversation(&conn, child, &parent_task).unwrap();
+            task::insert_step(
+                &conn,
+                parent,
+                "event",
+                r#"{"type":"message","content":"first answer"}"#,
+            )
+            .unwrap();
+            (parent, child)
+        };
+        let reopened = Store::new(&path).unwrap();
+        let conn = reopened.conn();
+        let turns = task::conversation_tasks(&conn, child).unwrap();
+        assert_eq!(
+            turns.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![parent, child]
+        );
+        assert_eq!(turns[1].parent_task_id, Some(parent));
+        assert_eq!(turns[1].conversation_id, Some(parent));
+        assert!(task::list_steps(&conn, parent).unwrap()[0]
+            .content
+            .contains("first answer"));
+    }
+
+    #[test]
     fn crud_survives_reopen_and_cascade_is_project_scoped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/store.db");

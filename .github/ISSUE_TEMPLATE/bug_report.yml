@@ -1,0 +1,29 @@
+name: Bug 报告
+description: 提交可复现的问题（安全漏洞请私下报告）
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 现象与预期
+      description: 实际发生了什么？你期望什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 给出最小复现，勿包含私密项目或密钥。
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      description: XAim 版本/提交、操作系统、模型和接入方式。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 删除 API 密钥、私人路径、网关地址与敏感源码后再提交。

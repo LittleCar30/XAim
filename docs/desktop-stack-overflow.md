@@ -2,8 +2,7 @@
 
 ## 证据与原因
 
-用户安装的 `D:\XAim\xaim.exe` 在 2026-10-09 23:59:38 和 2026-10-10 00:03:58
-均产生 Windows Application Error 1000。异常代码 `0xc00000fd` 表示线程栈溢出；
+旧 Windows 安装版在两次任务入口调用中均产生 Application Error 1000。异常代码 `0xc00000fd` 表示线程栈溢出；
 相同故障偏移 `0xfaa707` 通过旧包构建时保留的发布版 PDB 解析为 `__chkstk + 55`，即 Windows 栈探测函数。
 
 对旧安装版启动临时 WebView 调试端口后，直接调用真实 Tauri `run_task`，

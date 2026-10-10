@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 
 import { ipc } from '@/services/ipc'
+import { toolContext } from '@/lib/tool-context'
 import type {
   ContextFile,
   Patch,
@@ -139,6 +140,14 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
           try { return JSON.parse(log.args).call_id === event.callId } catch { return false }
         })
         if (index >= 0) get().setToolResult(index, event.result)
+        const files = toolContext(event.result)
+        if (files.length > 0) {
+          set((state) => {
+            const context = new Map(state.context.map((file) => [file.path, file]))
+            for (const file of files) context.set(file.path, file)
+            return { context: [...context.values()] }
+          })
+        }
         break
       }
       case 'message':

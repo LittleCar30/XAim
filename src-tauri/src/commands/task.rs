@@ -31,6 +31,7 @@ pub async fn run_task(
     project_id: i64,
     prompt: String,
     allow_verification: Option<bool>,
+    parent_task_id: Option<i64>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<i64, String> {
@@ -41,6 +42,7 @@ pub async fn run_task(
     config.task_timeout_sec = runtime.task_timeout_sec.unwrap_or(1800);
     config.tool_loop.max_turns = runtime.max_turns.unwrap_or(32);
     config.tool_loop.allow_verification = allow_verification.unwrap_or(false);
+    config.parent_task_id = parent_task_id;
     let orchestrator =
         Orchestrator::new(app, Arc::new(state.store.clone()), config).map_err(String::from)?;
     // Tauri constructs/spawns this future on the Windows UI thread. Keep the
@@ -130,6 +132,44 @@ pub async fn list_task_steps(
     state: State<'_, AppState>,
 ) -> Result<Vec<TaskStep>, String> {
     steps(&state, task_id).await.map_err(String::from)
+}
+
+#[tauri::command]
+pub async fn list_conversation_tasks(
+    task_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<Task>, String> {
+    store::task::conversation_tasks(&state.store.conn(), task_id).map_err(String::from)
+}
+
+#[tauri::command]
+pub async fn read_task_file(
+    task_id: i64,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let conn = state.store.conn();
+    store::task::get_task(&conn, task_id)
+        .map_err(String::from)?
+        .ok_or_else(|| "任务不存在".to_string())?;
+    let saved = store::cache::get_cache(&conn, &format!("task:{task_id}:changes"))
+        .map_err(String::from)?
+        .or(
+            store::cache::get_cache(&conn, &format!("task:{task_id}:partial_changes"))
+                .map_err(String::from)?,
+        )
+        .ok_or_else(|| "任务没有已保存的文件变更".to_string())?;
+    let changes: crate::agent::workspace::ChangeSet =
+        serde_json::from_str(&saved).map_err(|e| e.to_string())?;
+    let file = changes
+        .files
+        .into_iter()
+        .find(|f| f.path == path)
+        .ok_or_else(|| "文件不属于任务变更".to_string())?;
+    let text = file
+        .after
+        .ok_or_else(|| "此文件已在任务中删除".to_string())?;
+    Ok(text.lines().take(2000).collect::<Vec<_>>().join("\n"))
 }
 
 /// 应用已审阅的任务变更，保留 Git 历史与其他工作区修改。

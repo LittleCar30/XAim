@@ -39,6 +39,8 @@ fn main() {
             commands::task::get_task,
             commands::task::list_tasks,
             commands::task::list_task_steps,
+            commands::task::list_conversation_tasks,
+            commands::task::read_task_file,
             commands::task::apply_patch,
             commands::task::reject_patch,
             commands::task::rollback_task,

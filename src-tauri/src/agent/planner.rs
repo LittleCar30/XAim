@@ -227,7 +227,7 @@ async fn generate_candidates_inner(
     for result in results {
         match result {
             Ok((_, Ok(parsed))) => {
-                for candidate in parsed {
+                for candidate in group_candidate(parsed) {
                     if seen.insert((candidate.file_path.clone(), candidate.diff.clone())) {
                         candidates.push(candidate);
                     }
@@ -268,7 +268,7 @@ async fn generate_candidates_inner(
             );
             match provider.complete(request).await {
                 Ok(response) => match parse_candidate_response(&response.content, &new_paths) {
-                    Ok(parsed) => candidates.extend(parsed),
+                    Ok(parsed) => candidates.extend(group_candidate(parsed)),
                     Err(error) => failures.push(error.to_string()),
                 },
                 Err(error) => failures.push(error.to_string()),
@@ -300,6 +300,25 @@ fn planned_new_paths(plan: &Plan, root: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(paths)
+}
+
+fn group_candidate(files: Vec<PatchCandidate>) -> Vec<PatchCandidate> {
+    if files.len() <= 1 {
+        return files;
+    }
+    vec![PatchCandidate {
+        file_path: files
+            .iter()
+            .map(|f| f.file_path.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        diff: files
+            .iter()
+            .map(|f| f.diff.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        score: None,
+    }]
 }
 
 #[derive(Deserialize)]
@@ -1528,16 +1547,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_file_patch_yields_multiple_candidates() {
+    async fn multi_file_patch_yields_one_complete_candidate() {
         let provider = SeqProvider::of(vec![multi_file_diff()]);
         let candidates =
             generate_candidates("改 a 和 b", &simple_plan(), &context(&[]), &provider, 1)
                 .await
                 .unwrap();
 
-        assert_eq!(candidates.len(), 2, "单次多文件 diff 应切成两个候选");
-        assert_eq!(candidates[0].file_path, "src/a.ts");
-        assert_eq!(candidates[1].file_path, "src/b.ts");
+        assert_eq!(
+            candidates.len(),
+            1,
+            "单次多文件输出应作为同一个完整方案评估"
+        );
+        let files = parse_diff(&candidates[0].diff).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].file_path, "src/a.ts");
+        assert_eq!(files[1].file_path, "src/b.ts");
     }
 
     #[tokio::test]

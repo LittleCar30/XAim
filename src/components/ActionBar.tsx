@@ -2,6 +2,7 @@ import { useState } from 'react'
 
 import { ipc } from '@/services/ipc'
 import { useTaskStore } from '@/stores/task'
+import { useProjectStore } from '@/stores/project'
 
 /** IPC 抛出值的统一展示消息（Tauri 命令失败时 reject 的是 string）。 */
 function toMessage(e: unknown): string {
@@ -44,6 +45,7 @@ export default function ActionBar() {
         await ipc.applyPatch(patch.id)
         for (const file of unapplied.filter((file) => file.taskId === patch.taskId)) setPatchApplied(file.id, true)
       }
+      if (currentTask) await useProjectStore.getState().loadFileTree(currentTask.projectId)
     })
 
   const handleReject = () =>
@@ -61,6 +63,7 @@ export default function ActionBar() {
       await ipc.rollbackTask(currentTask.id)
       for (const patch of applied) setPatchApplied(patch.id, false)
       setCurrentTask({ ...currentTask, status: 'rolledBack' })
+      await useProjectStore.getState().loadFileTree(currentTask.projectId)
     })
 
   return (

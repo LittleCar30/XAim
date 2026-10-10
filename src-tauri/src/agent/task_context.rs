@@ -15,6 +15,8 @@ use crate::store;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskSnapshot {
+    #[serde(default)]
+    pub task_kind: String,
     pub goal: String,
     pub phase: String,
     pub round: usize,
@@ -31,13 +33,87 @@ pub struct TaskSnapshot {
     pub pending: Vec<String>,
     pub ready_for_review: bool,
     pub model_summary: String,
+    #[serde(default)]
+    pub reported_pending: bool,
     pub verification: Vec<Value>,
     pub verified_revision: Option<usize>,
+}
+
+fn is_analysis_goal(goal: &str) -> bool {
+    let lower = goal.to_ascii_lowercase();
+    let matches = |word: &&str| {
+        if word.is_ascii() {
+            lower
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|token| token == *word)
+        } else {
+            goal.contains(*word)
+        }
+    };
+    if [
+        "修复",
+        "修改",
+        "实现",
+        "创建",
+        "新增",
+        "添加",
+        "重构",
+        "生成",
+        "构建",
+        "删除",
+        "更新",
+        "编写",
+        "增加",
+        "fix",
+        "implement",
+        "create",
+        "add",
+        "refactor",
+        "build",
+        "write",
+        "update",
+        "change",
+        "delete",
+        "generate",
+    ]
+    .iter()
+    .any(matches)
+    {
+        return false;
+    }
+    [
+        "介绍",
+        "分析",
+        "解释",
+        "说明",
+        "审查",
+        "评审",
+        "对比",
+        "总结",
+        "为什么",
+        "如何",
+        "什么",
+        "describe",
+        "explain",
+        "analyze",
+        "review",
+        "compare",
+        "summarize",
+        "why",
+        "how",
+    ]
+    .iter()
+    .any(matches)
 }
 
 impl TaskSnapshot {
     pub fn new(goal: &str) -> Self {
         Self {
+            task_kind: if is_analysis_goal(goal) {
+                "analysis".into()
+            } else {
+                "coding".into()
+            },
             goal: goal.into(),
             phase: "executing".into(),
             round: 0,
@@ -53,16 +129,24 @@ impl TaskSnapshot {
             pending: vec!["原始用户要求的完成情况尚未确认".into()],
             ready_for_review: false,
             model_summary: String::new(),
+            reported_pending: false,
             verification: vec![],
             verified_revision: None,
         }
     }
 
-    pub fn observe(&mut self, name: &str, path: Option<&str>, success: bool, error: Option<&str>) {
+    pub fn observe(
+        &mut self,
+        name: &str,
+        path: Option<&str>,
+        success: bool,
+        changed: bool,
+        error: Option<&str>,
+    ) {
         if success {
             let key = format!("{name}{}", path.map_or(String::new(), |p| format!(":{p}")));
             *self.completed_operations.entry(key).or_default() += 1;
-            if matches!(name, "create_file" | "append_file" | "edit_file") {
+            if changed && matches!(name, "create_file" | "append_file" | "edit_file") {
                 self.revision += 1;
                 self.ready_for_review = false;
                 self.verified_revision = None;
@@ -81,6 +165,8 @@ impl TaskSnapshot {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Report {
+            #[serde(default)]
+            task_kind: String,
             completed: Vec<String>,
             pending: Vec<String>,
             ready_for_review: bool,
@@ -94,7 +180,8 @@ impl TaskSnapshot {
                 .iter()
                 .chain(&report.pending)
                 .any(|s| s.chars().count() > 2048)
-            || report.summary.chars().count() > 2048
+            || report.summary.chars().count() > 32_000
+            || !matches!(report.task_kind.as_str(), "" | "analysis" | "coding")
             || (report.ready_for_review
                 && (!report.pending.is_empty()
                     || report.completed.is_empty()
@@ -105,6 +192,10 @@ impl TaskSnapshot {
             ));
         }
         self.reported_completed = report.completed;
+        self.reported_pending = !report.pending.is_empty();
+        if !report.task_kind.is_empty() {
+            self.task_kind = report.task_kind;
+        }
         self.pending = report.pending;
         self.ready_for_review = report.ready_for_review;
         self.model_summary = report.summary;
@@ -112,6 +203,7 @@ impl TaskSnapshot {
     }
 
     pub fn save(&mut self, workspace: &TaskWorkspace, record: &Recorder<'_>) -> Result<ChangeSet> {
+        let started = std::time::Instant::now();
         let changes = workspace.changes()?;
         self.files = changes.files.iter().map(|f| json!({
             "path":f.path,"deleted":f.after.is_none(),
@@ -134,7 +226,30 @@ impl TaskSnapshot {
             None,
         )?;
         tx.commit()?;
+        drop(conn);
+        record.diagnostic(
+            "checkpointPersistence",
+            json!({"mode":"files","revision":self.revision,
+            "durationMs":started.elapsed().as_millis() as u64,"changedFiles":changes.files.len()}),
+        )?;
         Ok(changes)
+    }
+
+    /// Read/search/state tools cannot modify task files. Preserve the last durable
+    /// candidate and save only metadata; writes and final reports still scan files.
+    pub fn save_metadata(&self, record: &Recorder<'_>) -> Result<()> {
+        let started = std::time::Instant::now();
+        store::cache::set_cache(
+            &record.store.conn(),
+            &format!("task:{}:snapshot", record.task_id),
+            &serde_json::to_string(self)?,
+            None,
+        )?;
+        record.diagnostic(
+            "checkpointPersistence",
+            json!({"mode":"metadata","revision":self.revision,
+            "durationMs":started.elapsed().as_millis() as u64}),
+        )
     }
 
     pub fn save_report(
@@ -144,7 +259,9 @@ impl TaskSnapshot {
         reason: &str,
     ) -> Result<String> {
         let changes = self.save(workspace, record)?;
-        let verification_status = if self.verified_revision != Some(self.revision) {
+        let verification_status = if self.task_kind == "analysis" && self.revision == 0 {
+            "not_required"
+        } else if self.verified_revision != Some(self.revision) {
             "not_run"
         } else if self.verification.iter().any(|r| r["status"] == "failed") {
             "failed"
@@ -183,6 +300,7 @@ impl TaskSnapshot {
                 format!("（{paths}）")
             },
             match verification_status {
+                "not_required" => "不适用（分析任务）",
                 "passed" => "通过",
                 "failed" => "检查失败",
                 "unavailable" => "无法验证",
@@ -244,7 +362,12 @@ impl TaskSnapshot {
                     m.tool_calls.iter().any(|c| {
                         matches!(
                             c.function.name.as_str(),
-                            "read_file" | "read_symbol" | "search" | "search_symbols" | "list_dir"
+                            "read_file"
+                                | "read_files"
+                                | "read_symbol"
+                                | "search"
+                                | "search_symbols"
+                                | "list_dir"
                         )
                     })
                 }) =>
@@ -288,35 +411,37 @@ mod tests {
 
     #[test]
     fn checkpoint_keeps_large_fresh_reads_and_refuses_to_discard_them() {
-        let snapshot = TaskSnapshot::new("Finish page");
-        let body = "fresh SVG file\n".repeat(1500);
-        let mut read = ToolMessage::text("assistant", "");
-        read.tool_calls = vec![ToolCall {
-            id: "read".into(),
-            kind: "function".into(),
-            function: FunctionCall {
-                name: "read_file".into(),
-                arguments: "{\"path\":\"index.html\"}".into(),
-            },
-        }];
-        let messages = vec![
-            ToolMessage::text("system", "stable"),
-            ToolMessage::text("user", "Finish page"),
-            ToolMessage::text("assistant", "old history"),
-            read,
-            ToolMessage::result("read", body.clone()),
-        ];
-        let mut too_small = messages.clone();
-        assert!(!snapshot.rebuild(&mut too_small, 2000).unwrap());
-        assert_eq!(too_small.len(), messages.len());
-        let mut enough = messages;
-        assert!(snapshot.rebuild(&mut enough, 16_384).unwrap());
-        assert_eq!(
-            enough.last().unwrap().content.as_deref(),
-            Some(body.as_str())
-        );
-        assert_eq!(enough[3].tool_calls[0].id, "read");
-        assert_eq!(enough[4].tool_call_id.as_deref(), Some("read"));
+        for tool_name in ["read_file", "read_files"] {
+            let snapshot = TaskSnapshot::new("Finish page");
+            let body = "fresh SVG file\n".repeat(1500);
+            let mut read = ToolMessage::text("assistant", "");
+            read.tool_calls = vec![ToolCall {
+                id: "read".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: tool_name.into(),
+                    arguments: "{\"path\":\"index.html\"}".into(),
+                },
+            }];
+            let messages = vec![
+                ToolMessage::text("system", "stable"),
+                ToolMessage::text("user", "Finish page"),
+                ToolMessage::text("assistant", "old history"),
+                read,
+                ToolMessage::result("read", body.clone()),
+            ];
+            let mut too_small = messages.clone();
+            assert!(!snapshot.rebuild(&mut too_small, 2000).unwrap());
+            assert_eq!(too_small.len(), messages.len());
+            let mut enough = messages;
+            assert!(snapshot.rebuild(&mut enough, 16_384).unwrap());
+            assert_eq!(
+                enough.last().unwrap().content.as_deref(),
+                Some(body.as_str())
+            );
+            assert_eq!(enough[3].tool_calls[0].id, "read");
+            assert_eq!(enough[4].tool_call_id.as_deref(), Some("read"));
+        }
     }
 
     #[test]

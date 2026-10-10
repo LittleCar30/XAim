@@ -5,9 +5,9 @@ import { useTaskStore } from './task'
 import { patch, resetStores, task } from '@/test/fixtures'
 import type { Task } from '@/types'
 
-vi.mock('@/services/ipc', () => ({ ipc: { getTask: vi.fn(), listTaskSteps: vi.fn(), listPatches: vi.fn() } }))
+vi.mock('@/services/ipc', () => ({ ipc: { getTask: vi.fn(), listTaskSteps: vi.fn(), listPatches: vi.fn(), listConversationTasks: vi.fn() } }))
 const mocked = vi.mocked(ipc, true)
-beforeEach(() => { vi.clearAllMocks(); resetStores(); mocked.listTaskSteps.mockResolvedValue([]); mocked.listPatches.mockResolvedValue([patch]) })
+beforeEach(() => { vi.clearAllMocks(); resetStores(); mocked.listConversationTasks.mockResolvedValue([]); mocked.listTaskSteps.mockResolvedValue([]); mocked.listPatches.mockResolvedValue([patch]) })
 
 it('opens a persisted task without replacing the active task or its patches', async () => {
   const live = { ...task, id: 90, status: 'generating' as const }

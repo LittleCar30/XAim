@@ -45,6 +45,8 @@ pub struct Project {
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: i64,
+    pub conversation_id: Option<i64>,
+    pub parent_task_id: Option<i64>,
     pub project_id: i64,
     pub prompt: String,
     pub status: TaskStatus,
@@ -312,6 +314,8 @@ mod tests {
     fn task_optional_fields_serialize_as_null() {
         let task = Task {
             id: 7,
+            conversation_id: Some(7),
+            parent_task_id: None,
             project_id: 1,
             prompt: "add login".to_string(),
             status: TaskStatus::Planning,

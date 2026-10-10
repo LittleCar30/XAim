@@ -9,6 +9,19 @@ import { useConversationStore } from '@/stores/conversation'
 beforeEach(resetStores)
 afterEach(() => vi.unstubAllGlobals())
 
+it('renders prior turns and the latest reply in one conversation', () => {
+  useConversationStore.setState({ turns: [{ task: { ...task, conversationId: task.id }, patches: [], verifies: [], steps: [{
+    id: 1, taskId: task.id, stepType: 'event', createdAt: 1,
+    content: JSON.stringify({ type: 'message', taskId: task.id, content: '项目架构介绍' }),
+  }] }] })
+  useTaskStore.setState({ currentTask: { ...task, id: 43, conversationId: task.id, prompt: '再介绍部署方式' },
+    events: [{ type: 'message', taskId: 43, content: '部署流程' }] })
+  render(<TaskPanel />)
+  expect(screen.getByText('项目架构介绍')).toBeInTheDocument()
+  expect(screen.getByText('部署流程')).toBeInTheDocument()
+  expect(screen.getByText('再介绍部署方式')).toBeInTheDocument()
+})
+
 it('copies the original input and saved output as plain text, preserving whitespace', async () => {
   const writeText = vi.fn().mockResolvedValue(undefined)
   vi.stubGlobal('navigator', { clipboard: { writeText } })

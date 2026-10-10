@@ -55,6 +55,7 @@ pub struct OrchestratorConfig {
     pub tool_loop: LoopConfig,
     pub task_timeout_sec: u64,
     pub workspace_root: Option<PathBuf>,
+    pub parent_task_id: Option<i64>,
 }
 
 impl Default for OrchestratorConfig {
@@ -71,6 +72,7 @@ impl Default for OrchestratorConfig {
             tool_loop: LoopConfig::default(),
             task_timeout_sec: 1800,
             workspace_root: None,
+            parent_task_id: None,
         }
     }
 }
@@ -192,7 +194,27 @@ impl Orchestrator {
         // 1. 创建任务记录（Idle），随后第一步转入 Parsing。
         let task_id = {
             let conn = self.store.conn();
-            store::task::insert_task(&conn, project_id, &prompt)?
+            let parent = self
+                .config
+                .parent_task_id
+                .map(|id| {
+                    let task = store::task::get_task(&conn, id)?
+                        .ok_or_else(|| XaimError::Config("续聊任务不存在".into()))?;
+                    if task.project_id != project_id
+                        || (!task.status.is_terminal() && task.status != TaskStatus::WaitingConfirm)
+                    {
+                        return Err(XaimError::Config(
+                            "只能继续当前项目中已停止执行的对话".into(),
+                        ));
+                    }
+                    Ok(task)
+                })
+                .transpose()?;
+            let id = store::task::insert_task(&conn, project_id, &prompt)?;
+            if let Some(parent) = parent {
+                store::task::attach_to_conversation(&conn, id, &parent)?;
+            }
+            id
         };
         self.current_task_id.store(task_id, Ordering::SeqCst);
         let ctx = ToolContext {
@@ -378,6 +400,13 @@ impl Orchestrator {
         }
         // Compatibility path also operates entirely in a private snapshot.
         let workspace = self.snapshot(root, task_id)?;
+        let (history, inherited_from) = self.restore_conversation(task_id, &workspace)?;
+        let continued_prompt = if history.is_empty() {
+            prompt.to_owned()
+        } else {
+            format!("历史会话记录：{history}\n\n本轮用户要求：{prompt}")
+        };
+        let prompt = continued_prompt.as_str();
         let isolated_ctx = ToolContext {
             project_root: workspace.root().into(),
             ..ctx.clone()
@@ -536,28 +565,25 @@ impl Orchestrator {
             TaskStatus::WaitingConfirm,
             "等待确认",
             async {
-                let patch_id = {
+                for file in patch::parse_diff(&best.diff)? {
                     let conn = self.store.conn();
                     store::patch::insert_patch(
                         &conn,
                         task_id,
-                        &best.file_path,
-                        &best.diff,
+                        &file.file_path,
+                        &file.diff,
                         best.score,
-                    )?
-                };
-                self.emit_patch(task_id, &best)?;
-                tracing::info!(
-                    task_id,
-                    patch_id,
-                    file = %best.file_path,
-                    score = ?best.score,
-                    "最优候选已记录，等待用户确认"
-                );
+                    )?;
+                    drop(conn);
+                    self.emit_patch(task_id, &file)?;
+                }
                 Ok(())
             },
         )
         .await?;
+        if let Some(parent) = inherited_from {
+            store::task::finish_task(&self.store.conn(), parent, TaskStatus::Cancelled)?;
+        }
         Ok(())
     }
 
@@ -669,6 +695,7 @@ impl Orchestrator {
             async { Ok(()) },
         )
         .await?;
+        let snapshot_started = Instant::now();
         let workspace = self
             .run_step(
                 task_id,
@@ -678,6 +705,17 @@ impl Orchestrator {
                 async { self.snapshot(root, task_id) },
             )
             .await?;
+        let (source_files, source_bytes) = workspace.source_stats();
+        Recorder {
+            task_id,
+            store: &self.store,
+            sink: self.sink.as_ref(),
+        }
+        .diagnostic(
+            "workspacePreparation",
+            serde_json::json!({"durationMs":snapshot_started.elapsed().as_millis() as u64,
+                "sourceFiles":source_files,"sourceBytes":source_bytes}),
+        )?;
         self.run_step(
             task_id,
             &mut status,
@@ -686,6 +724,8 @@ impl Orchestrator {
             async { Ok(()) },
         )
         .await?;
+        let (conversation_context, inherited_from) =
+            self.restore_conversation(task_id, &workspace)?;
         self.run_step(
             task_id,
             &mut status,
@@ -700,6 +740,7 @@ impl Orchestrator {
         };
         let model = self.routed_model(TaskKind::Generate);
         let mut loop_config = self.config.tool_loop.clone();
+        loop_config.conversation_context = conversation_context;
         loop_config.verification_source = Some(root.into());
         loop_config.deadline = Some(deadline);
         let result = self
@@ -773,6 +814,9 @@ impl Orchestrator {
         )
         .await?;
         if result.changes.files.is_empty() {
+            if let Some(parent) = inherited_from {
+                store::task::finish_task(&self.store.conn(), parent, TaskStatus::Cancelled)?;
+            }
             self.run_step(
                 task_id,
                 &mut status,
@@ -821,7 +865,84 @@ impl Orchestrator {
             },
         )
         .await?;
+        if let Some(parent) = inherited_from {
+            store::task::finish_task(&self.store.conn(), parent, TaskStatus::Cancelled)?;
+        }
         Ok(())
+    }
+
+    fn restore_conversation(
+        &self,
+        task_id: i64,
+        workspace: &TaskWorkspace,
+    ) -> Result<(String, Option<i64>)> {
+        let Some(parent_id) = self.config.parent_task_id else {
+            return Ok((String::new(), None));
+        };
+        let conn = self.store.conn();
+        let parent = store::task::get_task(&conn, parent_id)?
+            .ok_or_else(|| XaimError::Config("续聊任务不存在".into()))?;
+        let mut turns = Vec::new();
+        for task in store::task::conversation_tasks(&conn, parent_id)?
+            .into_iter()
+            .filter(|t| t.id <= parent_id && t.id < task_id)
+            .rev()
+            .take(24)
+        {
+            let steps = store::task::list_steps(&conn, task.id)?;
+            let answer = steps
+                .iter()
+                .rev()
+                .filter(|s| s.step_type == "event")
+                .filter_map(|s| serde_json::from_str::<serde_json::Value>(&s.content).ok())
+                .find_map(|e| {
+                    if e["type"] == "message" {
+                        e["content"].as_str().map(str::to_owned)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            turns.push(
+                serde_json::json!({"user": task.prompt,"assistant": answer,"status": task.status}),
+            );
+        }
+        turns.reverse();
+        let mut context = serde_json::to_string(&turns)?;
+        while context.chars().count() > 48_000 && turns.len() > 1 {
+            turns.remove(0);
+            context = serde_json::to_string(&turns)?;
+        }
+        if context.chars().count() > 48_000 {
+            for turn in &mut turns {
+                for key in ["user", "assistant"] {
+                    if let Some(text) = turn[key].as_str() {
+                        turn[key] =
+                            serde_json::json!(text.chars().take(20_000).collect::<String>());
+                    }
+                }
+            }
+            context = serde_json::to_string(&turns)?;
+        }
+        let inherited = if matches!(
+            parent.status,
+            TaskStatus::WaitingConfirm | TaskStatus::Failed
+        ) {
+            let saved = store::cache::get_cache(&conn, &format!("task:{parent_id}:changes"))?.or(
+                store::cache::get_cache(&conn, &format!("task:{parent_id}:partial_changes"))?,
+            );
+            if let Some(json) = saved {
+                serde_json::from_str::<ChangeSet>(&json)?.apply(workspace.root(), false)?;
+            } else if parent.status == TaskStatus::WaitingConfirm {
+                return Err(XaimError::PatchConflict(
+                    "待审阅变更缺少文件基线，无法继续".into(),
+                ));
+            }
+            (parent.status == TaskStatus::WaitingConfirm).then_some(parent_id)
+        } else {
+            None
+        };
+        Ok((context, inherited))
     }
 
     /// 统一步骤骨架：取消检查 -> 严格状态转移 -> Step 事件 -> 超时包裹 -> 完成事件。
@@ -1838,6 +1959,49 @@ mod tests {
         orchestrator.rollback_task(task_id).await.unwrap();
         assert_eq!(task_status(&store, task_id), TaskStatus::RolledBack);
         assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn compatibility_keeps_all_files_from_the_selected_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, project_id) = setup_project(dir.path());
+        let provider = Arc::new(ScriptedProvider::new(&[
+            r#"{"action":"add_feature","target":"web"}"#,
+            r#"{"steps":[{"action":"modify","file":"web/index.html","reason":"create page"},{"action":"modify","file":"web/style.css","reason":"create styles"}],"files_to_modify":["web/index.html","web/style.css"],"risks":[]}"#,
+            r#"{"files":[{"path":"web/index.html","content":"<html></html>\n"},{"path":"web/style.css","content":"body { color: red; }\n"}]}"#,
+            CONFIDENCE_JSON,
+        ]));
+        let orchestrator = Orchestrator::with_sink(
+            store.clone(),
+            OrchestratorConfig {
+                candidate_count: 1,
+                ..Default::default()
+            },
+            Arc::new(CollectSink::default()),
+            provider,
+        );
+        let id = orchestrator
+            .run_task(project_id, "Create a page and stylesheet".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            store::patch::list_patches_by_task(&store.conn(), id)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!dir.path().join("web/index.html").exists());
+        orchestrator.confirm_task(id).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("web/index.html")).unwrap(),
+            "<html></html>\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("web/style.css")).unwrap(),
+            "body { color: red; }\n"
+        );
+        orchestrator.rollback_task(id).await.unwrap();
+        assert!(!dir.path().join("web").join("style.css").exists());
     }
 
     #[tokio::test]

@@ -81,6 +81,8 @@ export function setupPreview(): void {
   taskSteps.set(99, [
     { id: 1, taskId: 99, stepType: '读取 average 实现', content: 'done', createdAt: now - 3599000 },
     { id: 2, taskId: 99, stepType: '检查测试覆盖范围', content: 'done', createdAt: now - 3595000 },
+    { id: 3, taskId: 99, stepType: 'event', content: JSON.stringify({ type: 'message', taskId: 99,
+      content: '## 检查结果\n\n`average` 用于计算数组的平均值。空数组会导致 **NaN**，建议补充边界检查。\n\n| 输入 | 当前结果 | 建议结果 |\n| --- | --- | --- |\n| `[2, 4, 6]` | 4 | 4 |\n| `[]` | NaN | 0 |\n\n### 修复建议\n\n```ts\nif (values.length === 0) return 0\n```\n\n- [x] 阅读实现与测试\n- [ ] 添加空数组分支\n\n> 本次仅分析，未修改代码。' }), createdAt: now - 3590000 },
   ])
   const stages: { name: string; status: TaskStatus }[] = [
     { name: '理解任务：定位空数组返回 NaN 的原因', status: 'parsing' },
@@ -120,14 +122,19 @@ export function setupPreview(): void {
       result: { name: 'read_file', success: true, output: original, error: null, durationMs: 12 } })
     useTaskStore.getState().addToolLog({ taskId, tool: 'exec', args: JSON.stringify({ command: 'pnpm test' }), createdAt: Date.now(),
       result: { name: 'exec', success: true, output: '2 tests passed', error: null, durationMs: 680 } })
+    const message = { type: 'message' as const, taskId, content: '## 修复完成\n\n已在 `average` 中添加空数组检查，避免返回 **NaN**。\n\n- 类型检查通过\n- 两项测试通过\n\n请查看代码变更，然后确认应用。' }
+    useTaskStore.getState().handleEvent(message)
+    taskSteps.get(taskId)!.push({ id: 10, taskId, stepType: 'event', content: JSON.stringify(message), createdAt: Date.now() })
     finish('waitingConfirm')
   }
 
-  function start(prompt: string, ready: boolean): number {
+  function start(prompt: string, ready: boolean, parentId?: number): number {
     useConversationStore.getState().archiveCurrent()
     const currentGeneration = ++generation
     const id = ++sequence
+    const parent = parentId === undefined ? undefined : tasks.get(parentId)
     const task: Task = { id, projectId: 1, prompt, status: 'parsing', intent: '修复空数组边界情况', plan: null,
+      conversationId: parent?.conversationId ?? parent?.id ?? id, parentTaskId: parent?.id ?? null,
       createdAt: Date.now(), finishedAt: null, durationMs: null, tokenInput: 2840, tokenOutput: 386, cost: 0.0012 }
     tasks.set(id, task)
     patches.set(id, [])
@@ -145,7 +152,11 @@ export function setupPreview(): void {
       const record = { id: index, taskId: id, stepType: step.name, content: 'done', createdAt: Date.now() }
       taskSteps.get(id)!.push(record)
       useTaskStore.getState().addStep(record)
-      if (index === stages.length - 1) addResults(id)
+      if (index === stages.length - 1) {
+        addResults(id)
+        if (parent?.status === 'waitingConfirm') tasks.set(parent.id, { ...parent, status: 'cancelled' })
+        void useConversationStore.getState().loadTurns(id)
+      }
     }
     stages.forEach((_, index) => {
       if (ready) advance(index)
@@ -170,6 +181,11 @@ export function setupPreview(): void {
     setPreference: async () => {},
     getRuntimeSettings: async () => ({ defaults: {}, shared: {}, local: {}, effective: { taskTimeoutSec: 1800, maxTurns: 32 } }),
     setRuntimeSettings: async () => { throw new Error('请在桌面应用中保存任务设置') },
+    listConversationTasks: async (id) => {
+      const conversationId = tasks.get(id)?.conversationId ?? id
+      return Array.from(tasks.values()).filter((task) => (task.conversationId ?? task.id) === conversationId)
+    },
+    readTaskFile: async (_, path) => path === 'src/utils/average.ts' ? modified : files[path] ?? '',
     pickProjectFolder: async () => { throw new Error('浏览器预览无法打开系统文件夹选择器，请在桌面应用中使用') },
     openProject: async () => project,
     closeProject: async () => { generation++; useTaskStore.getState().reset() },
@@ -179,7 +195,7 @@ export function setupPreview(): void {
       if (!(path in files)) throw new Error('示例中没有此文件')
       return files[path].split('\n').slice(start - 1, end).join('\n')
     },
-    runTask: async (_, prompt) => start(prompt, false),
+    runTask: async (_, prompt, _approved, parentId) => start(prompt, false, parentId),
     cancelTask: async () => { generation++; finish('cancelled') },
     getTask: async (id) => {
       const task = tasks.get(id)

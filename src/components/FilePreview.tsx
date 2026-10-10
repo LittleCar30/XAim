@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 
 import { ipc } from '@/services/ipc'
 import { useProjectStore } from '@/stores/project'
+import { useTaskStore } from '@/stores/task'
+import { useConversationStore } from '@/stores/conversation'
 
 /** 预览最多加载的行数（read_file 的 end 为 1-based 闭区间行号）。 */
 const PREVIEW_MAX_LINES = 2000
@@ -22,6 +24,13 @@ export interface FilePreviewProps {
 /** 文件预览内容区：加载项目内文件文本，带行号与截断提示。头部由右栏容器提供。 */
 export default function FilePreview({ path, onClose }: FilePreviewProps) {
   const projectId = useProjectStore((s) => s.currentProject?.id)
+  const live = useTaskStore((s) => s.currentTask)
+  const livePatches = useTaskStore((s) => s.patches)
+  const { selectedId, record } = useConversationStore()
+  const task = selectedId !== null ? record?.task : live
+  const patches = selectedId !== null ? record?.patches ?? [] : livePatches
+  const pendingTaskId = task && ['waitingConfirm', 'failed', 'cancelled'].includes(task.status)
+    && patches.some((p) => !p.applied && p.filePath === path) ? task.id : null
   const [content, setContent] = useState<string | null>(null)
   const [truncated, setTruncated] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -35,8 +44,9 @@ export default function FilePreview({ path, onClose }: FilePreviewProps) {
       return
     }
     let cancelled = false
-    ipc
-      .readFile(projectId, path, 1, PREVIEW_MAX_LINES)
+    const request = pendingTaskId !== null ? ipc.readTaskFile(pendingTaskId, path)
+      : ipc.readFile(projectId, path, 1, PREVIEW_MAX_LINES)
+    request
       .then((text) => {
         if (cancelled) return
         setContent(text)
@@ -48,7 +58,7 @@ export default function FilePreview({ path, onClose }: FilePreviewProps) {
     return () => {
       cancelled = true
     }
-  }, [projectId, path])
+  }, [projectId, path, pendingTaskId])
 
   if (error) {
     return (
@@ -73,6 +83,7 @@ export default function FilePreview({ path, onClose }: FilePreviewProps) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      {pendingTaskId !== null && <p className="p-3 text-xs text-amber-500">待应用版本</p>}
       <div className="min-h-0 flex-1 overflow-auto p-3">
         <pre className="font-mono text-[11px] leading-4 text-slate-300">
           {lines.map((line, i) => (

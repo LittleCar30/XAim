@@ -1352,6 +1352,54 @@ mod tests {
         (orchestrator, store, project_id, provider, sink)
     }
 
+    #[test]
+    fn native_task_runs_on_a_one_mib_desktop_stack() {
+        std::thread::Builder::new()
+            .name("native-desktop-stack-regression".into())
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let root = tempfile::tempdir().unwrap();
+                        let (agent, store, project, _, _) = setup(
+                            root.path(),
+                            vec![
+                                call(
+                                    "write",
+                                    "create_file",
+                                    json!({"path":"result.txt","content":"ready"}),
+                                ),
+                                done(),
+                            ],
+                            LoopConfig::default(),
+                        );
+                        let task = agent
+                            .run_task(project, "Create result".into())
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            store::task::get_task(&store.conn(), task)
+                                .unwrap()
+                                .unwrap()
+                                .status,
+                            crate::types::TaskStatus::WaitingConfirm
+                        );
+                        assert!(!root.path().join("result.txt").exists());
+                        agent.confirm_task(task).await.unwrap();
+                        assert_eq!(
+                            std::fs::read_to_string(root.path().join("result.txt")).unwrap(),
+                            "ready"
+                        );
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn project_guidance_and_symbol_tools_reach_default_loop_and_keep_current_hash() {
         let root = tempfile::tempdir().unwrap();

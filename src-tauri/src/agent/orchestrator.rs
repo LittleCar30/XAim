@@ -173,9 +173,10 @@ impl Orchestrator {
         };
 
         let deadline = started + Duration::from_secs(self.config.task_timeout_sec);
-        let outcome = self
-            .drive(task_id, project_id, &prompt, &root, &ctx, deadline)
-            .await;
+        // Do not embed both execution paths in every caller's future. Desktop
+        // IPC constructs it on a small Windows stack before the first poll.
+        let outcome =
+            Box::pin(self.drive(task_id, project_id, &prompt, &root, &ctx, deadline)).await;
         match outcome {
             Ok(()) => {
                 tracing::info!(
@@ -342,8 +343,7 @@ impl Orchestrator {
         deadline: Instant,
     ) -> Result<()> {
         if self.provider.supports_tools() {
-            return self
-                .drive_tools(task_id, project_id, prompt, root, ctx, deadline)
+            return Box::pin(self.drive_tools(task_id, project_id, prompt, root, ctx, deadline))
                 .await;
         }
         // Compatibility path also operates entirely in a private snapshot.
@@ -677,7 +677,7 @@ impl Orchestrator {
                 tool_loop::cancellable_until(
                     &self.cancel_flag,
                     deadline,
-                    tool_loop::run(
+                    Box::pin(tool_loop::run(
                         prompt,
                         &model,
                         self.provider.as_ref(),
@@ -690,7 +690,7 @@ impl Orchestrator {
                             store: &self.store,
                             sink: self.sink.as_ref(),
                         },
-                    ),
+                    )),
                 ),
             )
             .await;

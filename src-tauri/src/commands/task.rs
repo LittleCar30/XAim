@@ -38,7 +38,9 @@ pub async fn run_task(
     config.tool_loop.allow_verification = allow_verification.unwrap_or(false);
     let orchestrator =
         Orchestrator::new(app, Arc::new(state.store.clone()), config).map_err(String::from)?;
-    run(&state, orchestrator, project_id, &prompt)
+    // Tauri constructs/spawns this future on the Windows UI thread. Keep the
+    // nested agent state on the heap instead of copying it through IPC frames.
+    Box::pin(run(&state, orchestrator, project_id, &prompt))
         .await
         .map_err(String::from)
 }
@@ -156,7 +158,7 @@ pub(super) async fn run(
     prompt: &str,
 ) -> Result<i64, XaimError> {
     state.try_begin_run(orchestrator.clone())?;
-    let outcome = orchestrator.run_task(project_id, prompt.to_string()).await;
+    let outcome = Box::pin(orchestrator.run_task(project_id, prompt.to_string())).await;
     state.end_run();
     let task_id = outcome?;
     state.remember_orchestrator(task_id, orchestrator);
@@ -440,6 +442,26 @@ mod tests {
 
     // -- run_task -----------------------------------------------------------
 
+    #[test]
+    fn task_entry_future_has_bounded_size() {
+        let (state, store) = setup();
+        let orchestrator = orchestrator_with(
+            &store,
+            CollectSink::default(),
+            Arc::new(MockProvider::new("unused")),
+        );
+        let agent_future = orchestrator.run_task(999, "stack probe".into());
+        let agent_bytes = std::mem::size_of_val(&agent_future);
+        drop(agent_future);
+        let command_future = run(&state, orchestrator, 999, "stack probe");
+        let command_bytes = std::mem::size_of_val(&command_future);
+        println!("task future sizes: agent={agent_bytes}, command={command_bytes} bytes");
+        assert!(
+            agent_bytes <= 8 * 1024 && command_bytes <= 8 * 1024,
+            "task futures must fit desktop thread stacks: agent={agent_bytes}, command={command_bytes} bytes"
+        );
+    }
+
     #[tokio::test]
     async fn run_reaches_waiting_confirm_and_remembers_orchestrator() {
         let dir = tempdir().unwrap();
@@ -477,6 +499,43 @@ mod tests {
         assert!(state.running_orchestrator().is_none(), "结束后应释放运行槽");
         assert!(sink.has_event("patch", ""), "应推送补丁事件");
         assert!(!sink.has_event("done", ""), "到达等待确认不算终态");
+    }
+
+    #[test]
+    fn task_runs_on_a_one_mib_desktop_stack() {
+        std::thread::Builder::new()
+            .name("desktop-stack-regression".into())
+            .stack_size(1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let dir = tempdir().unwrap();
+                        write_file(dir.path(), "src/lib.rs", BROKEN_LIB);
+                        let (state, store) = setup();
+                        let project_id = register_project(&store, dir.path());
+                        let orchestrator = orchestrator_with(
+                            &store,
+                            CollectSink::default(),
+                            Arc::new(QueueProvider::new(&[
+                                INTENT_JSON,
+                                PLAN_JSON,
+                                FIX_DIFF,
+                                CONFIDENCE_JSON,
+                            ])),
+                        );
+                        let task = run(&state, orchestrator, project_id, "Fix add")
+                            .await
+                            .unwrap();
+                        assert_eq!(task_status(&store, task), TaskStatus::WaitingConfirm);
+                        assert!(state.running_orchestrator().is_none());
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[tokio::test]

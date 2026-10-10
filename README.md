@@ -119,6 +119,13 @@ IPC 包装、组件、stores、Rust 命令业务、索引、模型 HTTP 协议�
 应用后的验证由测试专用诊断命令调用真实验证器，不代表应用增加了验证按钮。
 此测试不启动桌面窗口，因此不覆盖 WebView2、原生窗口或 Tauri 运行时的 IPC 权限。
 
+Windows 发布版另需检查真实 IPC，避免测试进程的线程栈掩盖桌面问题。
+启动待测 EXE 时临时设置 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=19371`，
+然后运行 `node scripts/check-desktop-ipc.mjs http://127.0.0.1:19371`。
+应用需有可加载的模型配置；脚本只向不存在的项目发送三次任务请求并检查后续 IPC 响应，
+不调用模型、不创建任务、不改配置。退出待测实例后恢复该环境变量；正常启动不启用调试端口。
+该检查补充桌面任务入口覆盖，不代替完整工作流测试。修复背景见 [桌面栈溢出分析](docs/desktop-stack-overflow.md)。
+
 ## Rust 单元测试与覆盖率
 
 在 `src-tauri/` 目录运行：

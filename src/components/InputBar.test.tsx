@@ -9,7 +9,7 @@ import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
 import { patch, project, resetStores, task } from '@/test/fixtures'
 
-vi.mock('@/services/ipc', () => ({ ipc: { runTask: vi.fn(), getTask: vi.fn(), listPatches: vi.fn() } }))
+vi.mock('@/services/ipc', () => ({ ipc: { runTask: vi.fn(), getTask: vi.fn(), listPatches: vi.fn(), setPreference: vi.fn() } }))
 const mocked = vi.mocked(ipc, true)
 
 describe('InputBar', () => {

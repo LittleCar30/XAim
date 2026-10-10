@@ -9,6 +9,7 @@ import { ArrowUp, Loader2, Square } from 'lucide-react'
 import { useConversationStore } from '@/stores/conversation'
 import { useConfigStore } from '@/stores/config'
 import ModelPicker from '@/components/ModelPicker'
+import { savePreference } from '@/services/preferences'
 
 const HISTORY_KEY = 'xaim.prompt-history'
 const HISTORY_LIMIT = 50
@@ -96,11 +97,7 @@ export default function InputBar() {
       setHistory(next)
       setHistoryIndex(null)
       setValue('')
-      try {
-        localStorage.setItem(HISTORY_KEY, JSON.stringify(next))
-      } catch {
-        // 持久化失败不影响发送
-      }
+      void savePreference(HISTORY_KEY, JSON.stringify(next)).catch((error) => console.warn('[xaim] 输入历史持久化失败:', error))
     } catch (e) {
       const task = useTaskStore.getState().currentTask
       setError({ message: toMessage(e), taskId: task?.id })

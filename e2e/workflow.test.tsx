@@ -135,6 +135,11 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
   const indexed = await request<Inspection>('e2e_inspect', { projectId })
   expect(indexed.files).toContainEqual(expect.objectContaining({ path: 'src/lib.rs', language: 'rust', hash: expect.any(String) }))
 
+  await ipc.setPreference('xaim.theme', 'light')
+  expect(await ipc.getPreferences()).toMatchObject({ 'xaim.theme': 'light' })
+  await ipc.setRuntimeSettings(projectId, { taskTimeoutSec: 120, maxTurns: 8 })
+  expect((await ipc.getRuntimeSettings(projectId)).effective).toEqual({ taskTimeoutSec: 120, maxTurns: 8 })
+
   const config = await ipc.getConfig()
   await act(async () => {
     const selected = { ...config.model, name: 'selected-reasoner' }
@@ -188,6 +193,14 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
   await request('e2e_assert_model')
   const persisted = await ipc.listPatches(useTaskStore.getState().currentTask!.id)
   expect(persisted[0]).toMatchObject({ id: patch.id, applied: true })
+  const storage = await ipc.getStorageInfo()
+  expect(storage.workspaceCount).toBe(1)
+  expect(storage.retentionDays).toBe(30)
+  const backup = await ipc.createDataBackup()
+  await expect(access(backup)).resolves.toBeUndefined()
+  const backupBytes = await readFile(backup)
+  expect(backupBytes.includes(Buffer.from('xaim-vault-v1:'))).toBe(true)
+  expect(backupBytes.includes(Buffer.from('e2e-only'))).toBe(false)
   expect(useTaskStore.getState().events.some((event) => event.type === 'error')).toBe(false)
   expect(useTaskStore.getState().events.some((event) => event.type === 'modelText' && event.status === 'complete')).toBe(true)
   const taskId = useTaskStore.getState().currentTask!.id

@@ -6,16 +6,27 @@
 //! 命令实现见库 crate（`xaim_lib`）的 `commands` 模块；全局状态
 //! [`AppState`] 持有 SQLite 存储与当前项目/任务编排器。
 
+use tauri::Manager;
 use xaim_lib::commands;
 use xaim_lib::state::AppState;
 
 fn main() {
     init_logging();
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
-        .manage(AppState::new())
+        .setup(|app| {
+            app.manage(AppState::new());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::project::open_project,
             commands::project::pick_project_folder,
@@ -39,6 +50,21 @@ fn main() {
             commands::model::list_providers,
             commands::config::get_config,
             commands::config::set_config,
+            commands::data::get_storage_info,
+            commands::data::open_data_folder,
+            commands::data::pick_storage_folder,
+            commands::data::move_data_directory,
+            commands::data::cancel_data_move,
+            commands::data::create_data_backup,
+            commands::data::restore_data_backup,
+            commands::data::set_workspace_retention,
+            commands::data::cleanup_workspaces,
+            commands::data::open_task_workspace,
+            commands::data::export_task_record,
+            commands::data::get_preferences,
+            commands::data::set_preference,
+            xaim_lib::config::runtime::get_runtime_settings,
+            xaim_lib::config::runtime::set_runtime_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

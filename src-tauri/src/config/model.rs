@@ -85,7 +85,16 @@ pub fn load(store: &Store) -> Config {
         return Config::default();
     };
     match serde_json::from_str(&json) {
-        Ok(config) => config,
+        Ok(config) => {
+            let migrate = super::credentials::needs_migration(&config);
+            let config = super::credentials::unseal(config);
+            if migrate {
+                if let Err(error) = save(store, &config) {
+                    tracing::warn!(%error, "旧版密钥迁移失败，保留原配置");
+                }
+            }
+            config
+        }
         Err(err) => {
             tracing::warn!(error = %err, "存储中的配置损坏，回退默认值");
             Config::default()
@@ -95,9 +104,22 @@ pub fn load(store: &Store) -> Config {
 
 /// 把配置整体覆盖写入存储。
 pub fn save(store: &Store, config: &Config) -> Result<()> {
-    let json = serde_json::to_string(config)?;
+    let stored = super::credentials::seal(config)?;
+    let json = serde_json::to_string(&stored)?;
     let conn = store.conn();
     cache::set_cache(&conn, CONFIG_KEY, &json, None)
+}
+
+/// Must succeed before exporting a backup that includes application configuration.
+pub fn migrate_credentials(store: &Store) -> Result<()> {
+    let value = cache::get_cache(&store.conn(), CONFIG_KEY)?;
+    if let Some(value) = value {
+        let stored: Config = serde_json::from_str(&value)?;
+        if super::credentials::needs_migration(&stored) {
+            save(store, &super::credentials::unseal(stored))?;
+        }
+    }
+    Ok(())
 }
 
 /// 校验配置：模型提供方必须受支持。

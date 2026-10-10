@@ -2,6 +2,8 @@ import { Check, ChevronDown, ChevronRight, Circle, Loader2, X, CircleHelp } from
 import type { XaimEvent } from '@/types'
 import ActionBar from '@/components/ActionBar'
 import DiffView from '@/components/DiffView'
+import MessageFooter from '@/components/MessageFooter'
+import TaskDataActions from '@/components/TaskDataActions'
 import { TASK_STATUS_LABELS, taskStatusBadgeCls } from '@/lib/task-format'
 import { useConversationStore } from '@/stores/conversation'
 import { useProjectStore } from '@/stores/project'
@@ -55,13 +57,26 @@ export default function TaskPanel() {
   const summary = task.status === 'waitingConfirm' ? `已生成 ${patches.length} 个代码变更，等待你确认后应用。`
     : task.status === 'done' || task.status === 'applied' ? `任务已完成${patches.some((patch) => patch.applied) ? `，已应用 ${patches.filter((patch) => patch.applied).length} 个代码变更` : ''}。`
       : task.status === 'rolledBack' ? '本次代码变更已回滚。' : task.status === 'cancelled' ? '本次任务已取消。' : task.status === 'failed' ? '任务执行失败。' : '正在处理你的请求。'
+  const showResponseText = Boolean(responseText && (running || interruptedText || historical && !message))
+  const outputText = [
+    message?.type === 'message' ? message.content : '',
+    showResponseText ? responseText : '',
+    errorEvent?.type === 'error' ? errorEvent.message : '',
+  ].filter(Boolean).join('\n\n') || summary
+  const duration = !running && task.status !== 'idle'
+    ? task.durationMs ?? (task.finishedAt != null ? task.finishedAt - task.createdAt : null)
+    : null
+  const outputTime = task.finishedAt ?? (task.durationMs != null ? task.createdAt + task.durationMs : null)
+    ?? (historical ? rawSteps.at(-1)?.createdAt : null) ?? task.createdAt
   return <div className="conversation-scroll" role="log" aria-label="对话记录"><div className="conversation-content" key={task.id}>
-    <article className="user-message"><span className="message-label">你</span><p>{task.prompt}</p></article>
+    <article className="user-message"><span className="message-label">你</span><p>{task.prompt}</p>
+      <MessageFooter text={task.prompt} label="输入" timestamp={task.createdAt} />
+    </article>
     <article className="agent-message">
       <header className="agent-header"><img src="/xaim.svg" width="28" height="28" alt="" /><strong>XAim</strong><span className={`task-status ${taskStatusBadgeCls(task.status)}`}>{TASK_STATUS_LABELS[task.status]}</span></header>
       <p className="agent-summary">{summary}</p>
       {message?.type === 'message' && <p className="agent-summary whitespace-pre-wrap">{message.content}</p>}
-      {responseText && (running || interruptedText || historical && !message) && <div aria-label="模型回复">
+      {showResponseText && <div aria-label="模型回复">
         <p className="agent-summary whitespace-pre-wrap">{responseText}</p>
         {interruptedText && <p className="historical-note">回复已中断，内容尚未完成。</p>}
       </div>}
@@ -76,7 +91,10 @@ export default function TaskPanel() {
       {patches.length > 0 && <section className="message-changes" aria-label="代码变更"><div className="result-heading"><h2>代码变更</h2><span>{new Set(patches.map((patch) => patch.filePath)).size} 个文件</span></div><DiffView patches={patches} compact /></section>}
       {verifies.length > 0 && <div className="verification-summary">{unavailable ? <CircleHelp size={15} className="text-slate-500" /> : <Check size={15} className={passed === verifies.length ? 'text-emerald-400' : 'text-rose-400'} />}<span>验证 · {passed}/{verifies.length} 通过{unavailable ? ` · ${unavailable} 项无法验证` : ''}</span><button onClick={() => useUiStore.setState({ rightPanelOpen: true, previewPath: null, detailTab: 'verify' })}>查看详情<ChevronRight size={14} /></button></div>}
       {!historical && patches.length > 0 && !['failed', 'cancelled'].includes(task.status) && <ActionBar />}
-      {historical && <p className="historical-note">历史任务 · {new Date(task.createdAt).toLocaleString('zh-CN')}{verifies.length === 0 ? ' · 未保存验证输出' : ''}</p>}
+      {historical && verifies.length === 0 && <p className="historical-note">历史任务 · 未保存验证输出</p>}
+      {task.id > 0 && !running && <TaskDataActions task={task} patches={patches} historical={historical} />}
+      <MessageFooter text={outputText} label="输出" timestamp={outputTime}
+        timeLabel={running || task.status === 'idle' ? '开始于' : task.finishedAt != null ? '完成于' : '更新于'} durationMs={duration} />
     </article>
   </div></div>
 }

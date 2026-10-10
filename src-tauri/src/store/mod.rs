@@ -74,6 +74,36 @@ impl Store {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// SQLite itself includes committed WAL data; never copy a live .db file.
+    pub fn backup_to(&self, destination: &Path) -> Result<()> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| crate::errors::XaimError::Config("备份路径无效".into()))?;
+        std::fs::create_dir_all(parent)?;
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        let temporary_path = temporary.into_temp_path();
+        std::fs::remove_file(&temporary_path)?;
+        self.conn().execute(
+            "VACUUM main INTO ?1",
+            [temporary_path.to_string_lossy().as_ref()],
+        )?;
+        let check = Connection::open_with_flags(
+            &temporary_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let result: String = check.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        drop(check);
+        if result != "ok" {
+            return Err(crate::errors::XaimError::Config(
+                "备份完整性检查失败".into(),
+            ));
+        }
+        temporary_path
+            .persist_noclobber(destination)
+            .map_err(|error| error.error)?;
+        Ok(())
+    }
 }
 
 /// 供 store 各子模块测试共用的工具。

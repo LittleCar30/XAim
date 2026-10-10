@@ -15,7 +15,8 @@ const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_FILES: usize = 50_000;
 
 pub struct TaskWorkspace {
-    directory: tempfile::TempDir,
+    directory: PathBuf,
+    _temporary: Option<tempfile::TempDir>,
     baseline: BTreeMap<String, Vec<u8>>,
 }
 
@@ -160,6 +161,22 @@ fn collect(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
 }
 
 impl TaskWorkspace {
+    /// Project copies must never contain application data or another task copy.
+    pub fn validate_parent(root: &Path, parent: &Path) -> Result<()> {
+        fs::create_dir_all(parent)?;
+        let root = root.canonicalize()?;
+        let parent = parent.canonicalize()?;
+        let home = parent
+            .parent()
+            .ok_or_else(|| XaimError::Config("数据目录无效".into()))?;
+        if root.starts_with(home) || home.starts_with(&root) {
+            return Err(XaimError::Config(
+                "项目目录与 XAim 数据目录不能互相包含，请在设置中选择独立的数据目录".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn snapshot(root: &Path) -> Result<Self> {
         let baseline = collect(root)?;
         let directory = tempfile::Builder::new().prefix("xaim-task-").tempdir()?;
@@ -170,13 +187,45 @@ impl TaskWorkspace {
             fs::set_permissions(&target, fs::metadata(root.join(path))?.permissions())?;
         }
         Ok(Self {
+            directory: directory.path().to_path_buf(),
+            _temporary: Some(directory),
+            baseline,
+        })
+    }
+
+    /// Keep the task's files across process exits; the retention service owns cleanup.
+    pub fn managed_snapshot(root: &Path, parent: &Path, task_id: i64) -> Result<Self> {
+        Self::validate_parent(root, parent)?;
+        let container = tempfile::Builder::new()
+            .prefix(&format!("task-{task_id}-"))
+            .tempdir_in(parent)?;
+        let directory = container.path().join("files");
+        fs::create_dir(&directory)?;
+        let baseline = collect(root)?;
+        for (path, content) in &baseline {
+            let target = safe_path(&directory, path)?;
+            fs::create_dir_all(target.parent().unwrap())?;
+            fs::write(&target, content)?;
+            fs::set_permissions(&target, fs::metadata(root.join(path))?.permissions())?;
+        }
+        crate::data::atomic_json(
+            &container.path().join("workspace.json"),
+            &crate::data::WorkspaceManifest {
+                task_id,
+                project_path: root.to_path_buf(),
+                created_at: crate::utils::now_ms(),
+            },
+        )?;
+        let _ = container.keep();
+        Ok(Self {
             directory,
+            _temporary: None,
             baseline,
         })
     }
 
     pub fn root(&self) -> &Path {
-        self.directory.path()
+        &self.directory
     }
 
     /// Side-effect attribution also supports binary generated files.
@@ -302,6 +351,43 @@ fn write(root: &Path, path: &str, content: &Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_workspace_rejects_overlapping_data_and_project_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("data/workspaces");
+        assert!(TaskWorkspace::managed_snapshot(root.path(), &nested, 1).is_err());
+        assert!(fs::read_dir(&nested).unwrap().next().is_none());
+        let project = root.path().join("data/project");
+        fs::create_dir(&project).unwrap();
+        assert!(TaskWorkspace::managed_snapshot(&project, &nested, 1).is_err());
+    }
+
+    #[test]
+    fn managed_workspace_keeps_task_files_after_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("source.txt"), "before").unwrap();
+        let workspace =
+            TaskWorkspace::managed_snapshot(root.path(), &data.path().join("workspaces"), 42)
+                .unwrap();
+        let path = workspace.root().to_path_buf();
+        fs::write(path.join("source.txt"), "after").unwrap();
+        drop(workspace);
+        assert_eq!(
+            fs::read_to_string(path.join("source.txt")).unwrap(),
+            "after"
+        );
+        let manifest: crate::data::WorkspaceManifest = serde_json::from_slice(
+            &fs::read(path.parent().unwrap().join("workspace.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.task_id, 42);
+        assert_eq!(
+            fs::read_to_string(root.path().join("source.txt")).unwrap(),
+            "before"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

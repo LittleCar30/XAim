@@ -40,6 +40,31 @@ export interface Project {
   lastOpenedAt: number
 }
 
+export interface StorageInfo {
+  home: string
+  database: string
+  workspaces: string
+  backups: string
+  bytes: number
+  workspaceCount: number
+  retentionDays: number
+  pendingHome: string | null
+  environmentOverride: boolean
+  notice: string | null
+}
+
+export interface RuntimeOverrides {
+  taskTimeoutSec?: number
+  maxTurns?: number
+}
+
+export interface RuntimeSettings {
+  defaults: RuntimeOverrides
+  shared: RuntimeOverrides
+  local: RuntimeOverrides
+  effective: Required<RuntimeOverrides>
+}
+
 /** 一次编码任务及其统计信息，对应 Rust Task（tasks 表）。 */
 export interface Task {
   id: number

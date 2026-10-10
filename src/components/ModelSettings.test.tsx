@@ -8,6 +8,7 @@ import type { Config } from '@/types'
 
 vi.mock('@/services/ipc', () => ({ ipc: {
   getConfig: vi.fn(), setConfig: vi.fn(), listModels: vi.fn(), listProviders: vi.fn(), testModelConnection: vi.fn(),
+  setPreference: vi.fn(), getStorageInfo: vi.fn(), getRuntimeSettings: vi.fn(),
 } }))
 const mocked = vi.mocked(ipc, true)
 let persisted: Config
@@ -25,6 +26,9 @@ describe('model settings across both entry points', () => {
     mocked.listModels.mockResolvedValue([])
     mocked.listProviders.mockResolvedValue(['openai', 'newapi', 'deepseek', 'qwen'])
     mocked.testModelConnection.mockResolvedValue(true)
+    mocked.setPreference.mockResolvedValue(undefined)
+    mocked.getStorageInfo.mockRejectedValue(new Error('storage not available in this test'))
+    mocked.getRuntimeSettings.mockResolvedValue({ defaults: {}, shared: {}, local: {}, effective: { taskTimeoutSec: 1800, maxTurns: 32 } })
     useConfigStore.setState({ config: null, modelConfig: null, loading: false })
   })
 
@@ -70,6 +74,16 @@ describe('model settings across both entry points', () => {
     await screen.findByText(/模型配置保存失败.*disk full/)
     expect(persisted).toEqual(previous)
     expect(useConfigStore.getState().config).toEqual(previous)
+  })
+
+  it('reports preference persistence failure without claiming model settings were saved', async () => {
+    render(<Settings />)
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存全部' })).toBeEnabled())
+    mocked.setPreference.mockRejectedValueOnce(new Error('database unavailable'))
+    fireEvent.click(screen.getByRole('button', { name: '保存全部' }))
+    await screen.findByText(/偏好设置保存失败.*database unavailable/)
+    expect(mocked.setConfig).not.toHaveBeenCalled()
+    expect(screen.queryByText('已保存')).not.toBeInTheDocument()
   })
 
   it('saves draft edits when activating another model instead of using old settings', async () => {

@@ -7,7 +7,6 @@
 //! 产生的编排器按任务 id 保留，供确认/拒绝/回滚复用其事件出口。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use notify::RecommendedWatcher;
@@ -27,6 +26,8 @@ pub struct OpenProject {
 pub struct AppState {
     /// SQLite 存储：项目/文件/符号/任务等全部持久化数据。
     pub store: Store,
+    pub data_paths: Option<crate::data::DataPaths>,
+    _data_lock: Option<std::fs::File>,
     current: Mutex<Option<OpenProject>>,
     /// 正在运行的任务编排器；`None` 即空闲。
     running: Mutex<Option<Orchestrator>>,
@@ -43,15 +44,31 @@ impl AppState {
     // 不提供 Default：new() 做可失败的 IO，panic 不应藏在 trait 方法背后。
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        let dir = default_data_dir().expect("无法定位应用数据目录");
-        let store = Store::new(&dir.join("xaim.db")).expect("无法打开应用数据库");
-        Self::with_store(store)
+        let lock = crate::data::DataPaths::acquire_process_lock()
+            .expect("XAim 已在运行或数据目录无法访问");
+        let paths = crate::data::DataPaths::resolve().expect("无法定位应用数据目录");
+        let store = Store::new(&paths.database()).expect("无法打开应用数据库");
+        if let Err(error) = crate::config::model::migrate_credentials(&store) {
+            tracing::warn!(%error, "无法迁移旧版凭据");
+        }
+        if let Err(error) = crate::data::recover_interrupted_tasks(&store) {
+            tracing::warn!(%error, "无法恢复中断任务状态");
+        }
+        if let Err(error) = crate::data::cleanup(&paths, &store) {
+            tracing::warn!(%error, "无法清理过期工作区");
+        }
+        let mut state = Self::with_store(store);
+        state.data_paths = Some(paths);
+        state._data_lock = Some(lock);
+        state
     }
 
     /// 用给定的存储构建状态（测试与自定义路径用）。
     pub fn with_store(store: Store) -> Self {
         Self {
             store,
+            data_paths: None,
+            _data_lock: None,
             current: Mutex::new(None),
             running: Mutex::new(None),
             orchestrators: Mutex::new(HashMap::new()),
@@ -131,13 +148,6 @@ impl AppState {
     }
 }
 
-/// 应用默认数据目录（存放 SQLite 库等）：与 Tauri `app_data_dir` 同一口径，
-/// 即系统数据目录 + 应用标识 `com.xaim.desktop`（Windows 为
-/// `%APPDATA%\com.xaim.desktop`）。
-fn default_data_dir() -> Option<PathBuf> {
-    directories::BaseDirs::new().map(|dirs| dirs.data_dir().join("com.xaim.desktop"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,16 +169,6 @@ mod tests {
     fn app_state_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AppState>();
-    }
-
-    #[test]
-    fn default_data_dir_resolves_to_app_folder() {
-        let dir = default_data_dir().expect("常规环境下应能解析数据目录");
-        assert!(
-            dir.ends_with("com.xaim.desktop"),
-            "应与 Tauri app_data_dir 同口径: {}",
-            dir.display()
-        );
     }
 
     /// 给 `root` 挂一个真实的监听器（`set_current_project` 需要）。

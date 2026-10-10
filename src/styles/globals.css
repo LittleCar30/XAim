@@ -148,6 +148,10 @@
   .conversation-empty p { @apply text-sm text-slate-500; }
   .user-message { @apply mb-9 ml-auto w-fit max-w-[85%] rounded-lg bg-slate-900 px-5 py-4; }
   .message-label { @apply mb-1 block text-xs font-medium text-slate-500; }
+  .message-footer { @apply mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-[11px] leading-5 text-slate-500; }
+  .message-footer button { @apply inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500 disabled:cursor-not-allowed disabled:opacity-50; }
+  .message-footer time { @apply tabular-nums; }
+  .message-duration { @apply inline-flex items-center gap-1 tabular-nums; }
   .user-message p { @apply whitespace-pre-wrap break-words text-sm leading-7; }
   .agent-header { @apply mb-3 flex items-center gap-2.5 text-sm; }
   .task-status { @apply ml-auto shrink-0 rounded px-2 py-0.5 text-[11px] font-medium; }
@@ -173,7 +177,7 @@
   .compact-diffs > ul > li > button { @apply gap-2 px-3 py-3 text-sm; }
   .verification-summary { @apply mb-4 flex items-center gap-2 text-xs text-slate-400; }
   .verification-summary button { @apply ml-auto flex items-center gap-1 text-slate-500 hover:text-slate-100; }
-  .agent-message > div:last-child:not(.verification-summary) { @apply border-0 px-0; }
+  .agent-message > .task-action-bar { @apply border-0 px-0; }
   .historical-note { @apply mt-5 text-xs leading-6 text-slate-500; }
   .conversation-composer { @apply mx-auto w-full max-w-3xl shrink-0 px-7 pb-6 pt-3; }
   .conversation-composer > p { @apply text-xs; }

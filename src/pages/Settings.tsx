@@ -10,6 +10,9 @@ import type { ModelOptions } from '@/lib/model-profiles'
 import type { ModelConfig, ModelProfile } from '@/types'
 import ModelManager from '@/components/ModelManager'
 import ModelParameters from '@/components/ModelParameters'
+import StorageSettings from '@/components/StorageSettings'
+import RuntimeSettings from '@/components/RuntimeSettings'
+import { savePreference } from '@/services/preferences'
 
 export interface SettingsProps {
   /** 返回工作区（由路由层提供）。 */
@@ -56,8 +59,8 @@ function loadPrefs(): Partial<SettingsForm> {
   }
 }
 
-function savePrefs(form: SettingsForm): void {
-  localStorage.setItem(
+async function savePrefs(form: SettingsForm): Promise<void> {
+  await savePreference(
     PREFS_KEY,
     JSON.stringify({
       index: form.index,
@@ -285,14 +288,18 @@ export default function Settings({ onBack }: SettingsProps) {
     setErrors(errs)
     if (Object.keys(errs).length > 0) return
     setSaveError(null)
-    // 本地偏好先落盘（必定成功），模型配置再走后端；后者失败单独报错。
-    savePrefs(form)
+    try {
+      await savePrefs(form)
+    } catch (e) {
+      setSaveError(`偏好设置保存失败：${toMessage(e)}`)
+      return
+    }
     try {
       await saveModelConfig(modelDraft.config, { supportsReasoning: modelDraft.supportsReasoning, reasoningEffort: modelDraft.reasoningEffort, thinking: modelDraft.thinking })
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } catch (e) {
-      setSaveError(`模型配置保存失败：${toMessage(e)}（其余设置已保存到本地）`)
+      setSaveError(`模型配置保存失败：${toMessage(e)}（偏好设置已保存）`)
     }
   }
 
@@ -365,6 +372,8 @@ export default function Settings({ onBack }: SettingsProps) {
             </p>
           )}
           {loadingConfig && <p className="text-xs text-slate-500">正在读取配置…</p>}
+          <StorageSettings />
+          <RuntimeSettings />
 
           {/* 1. 模型 */}
           <Section title="模型">
@@ -575,7 +584,7 @@ export default function Settings({ onBack }: SettingsProps) {
           </Section>
 
           <p className="pb-2 text-center text-[11px] text-slate-600">
-            模型配置保存到后端；主题即时保存；索引 / 验证 / 修复 / 安全 / 语言为本地偏好。
+            配置和界面偏好保存在数据目录；主题即时保存。索引 / 验证 / 修复 / 安全 / 语言仍为界面偏好。
           </p>
         </div>
       </div>

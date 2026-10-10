@@ -43,6 +43,7 @@ struct Harness {
     state: AppState,
     sink: Arc<CollectSink>,
     fixture: tempfile::TempDir,
+    _data: tempfile::TempDir,
     _server: ServerGuard,
     mocks: Vec<Mock>,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -158,7 +159,18 @@ impl Harness {
                 .await;
             mocks.push(mock);
         }
-        let state = AppState::with_store(Store::open_in_memory().unwrap());
+        let data = tempfile::tempdir().unwrap();
+        let home = data.path().join("home");
+        for directory in ["", "workspaces", "backups"] {
+            fs::create_dir_all(home.join(directory)).unwrap();
+        }
+        let mut state = AppState::with_store(Store::new(&home.join("xaim.db")).unwrap());
+        state.data_paths = Some(crate::data::DataPaths {
+            home,
+            bootstrap: data.path().to_path_buf(),
+            overridden: false,
+            notice: None,
+        });
         let config = Config {
             model: ModelConfig {
                 provider: "openai".into(),
@@ -175,6 +187,7 @@ impl Harness {
             state,
             sink: Arc::new(CollectSink::default()),
             fixture,
+            _data: data,
             _server: server,
             mocks,
             requests,
@@ -220,6 +233,45 @@ impl Harness {
                     .await?;
                 Ok(Value::Null)
             }
+            "get_preferences" => Ok(serde_json::to_value(
+                super::data::preferences(&self.state.store).map_err(XaimError::Config)?,
+            )?),
+            "set_preference" => {
+                let key = args["key"]
+                    .as_str()
+                    .ok_or_else(|| XaimError::Config("Missing key".into()))?;
+                let value = args["value"]
+                    .as_str()
+                    .ok_or_else(|| XaimError::Config("Missing value".into()))?;
+                super::data::save_preference(&self.state.store, key, value)
+                    .map_err(XaimError::Config)?;
+                Ok(Value::Null)
+            }
+            "get_storage_info" => Ok(serde_json::to_value(
+                self.state
+                    .data_paths
+                    .as_ref()
+                    .unwrap()
+                    .info(&self.state.store)?,
+            )?),
+            "create_data_backup" => Ok(json!(self
+                .state
+                .data_paths
+                .as_ref()
+                .unwrap()
+                .backup(&self.state.store)?)),
+            "get_runtime_settings" => Ok(serde_json::to_value(crate::config::runtime::load(
+                &self.state.store,
+                args["projectId"].as_i64(),
+            )?)?),
+            "set_runtime_settings" => {
+                crate::config::runtime::save(
+                    &self.state.store,
+                    args["projectId"].as_i64(),
+                    serde_json::from_value(args["settings"].clone())?,
+                )?;
+                Ok(Value::Null)
+            }
             "list_tasks" => Ok(serde_json::to_value(
                 task::list(&self.state, id("projectId")?).await?,
             )?),
@@ -234,6 +286,11 @@ impl Harness {
             )?),
             "run_task" => {
                 let mut config = task::orchestrator_config(&self.state)?;
+                let runtime =
+                    crate::config::runtime::load(&self.state.store, Some(id("projectId")?))?
+                        .effective;
+                config.task_timeout_sec = runtime.task_timeout_sec.unwrap();
+                config.tool_loop.max_turns = runtime.max_turns.unwrap();
                 config.candidate_count = 1;
                 config.step_timeout_sec = 60;
                 config.tool_loop.allow_verification =

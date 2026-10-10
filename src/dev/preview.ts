@@ -155,6 +155,21 @@ export function setupPreview(): void {
   }
 
   const previewIpc: typeof ipc = {
+    getStorageInfo: async () => { throw new Error('请在桌面应用中管理本地数据') },
+    openDataFolder: async () => { throw new Error('浏览器预览无法打开本地数据目录') },
+    pickStorageFolder: async () => { throw new Error('浏览器预览无法选择本地数据目录') },
+    moveDataDirectory: async () => { throw new Error('请在桌面应用中迁移数据') },
+    cancelDataMove: async () => { throw new Error('请在桌面应用中管理数据迁移') },
+    createDataBackup: async () => { throw new Error('请在桌面应用中备份数据') },
+    restoreDataBackup: async () => { throw new Error('请在桌面应用中恢复备份') },
+    setWorkspaceRetention: async () => { throw new Error('请在桌面应用中设置保留期限') },
+    cleanupWorkspaces: async () => { throw new Error('请在桌面应用中清理工作区') },
+    openTaskWorkspace: async () => { throw new Error('示例任务没有本地工作区') },
+    exportTaskRecord: async () => { throw new Error('请在桌面应用中导出对话') },
+    getPreferences: async () => ({}),
+    setPreference: async () => {},
+    getRuntimeSettings: async () => ({ defaults: {}, shared: {}, local: {}, effective: { taskTimeoutSec: 1800, maxTurns: 32 } }),
+    setRuntimeSettings: async () => { throw new Error('请在桌面应用中保存任务设置') },
     pickProjectFolder: async () => { throw new Error('浏览器预览无法打开系统文件夹选择器，请在桌面应用中使用') },
     openProject: async () => project,
     closeProject: async () => { generation++; useTaskStore.getState().reset() },

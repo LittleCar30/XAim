@@ -64,7 +64,7 @@ export default function ActionBar() {
     })
 
   return (
-    <div className="flex shrink-0 items-center gap-2 border-t border-slate-800 px-3 py-2">
+    <div className="task-action-bar flex shrink-0 items-center gap-2 border-t border-slate-800 px-3 py-2">
       <button
         type="button"
         onClick={handleApply}

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { savePreference } from '@/services/preferences'
 
 export type Theme = 'light' | 'dark'
 export const THEME_KEY = 'xaim.theme'
@@ -23,11 +24,7 @@ export const useThemeStore = create<{
 }>()((set) => ({
   theme: loadTheme(),
   setTheme: (theme) => {
-    try {
-      localStorage.setItem(THEME_KEY, theme)
-    } catch {
-      // The current session can still switch themes when storage is unavailable.
-    }
+    void savePreference(THEME_KEY, theme).catch((error) => console.warn('[xaim] 主题持久化失败:', error))
     applyTheme(theme)
     set({ theme })
   },

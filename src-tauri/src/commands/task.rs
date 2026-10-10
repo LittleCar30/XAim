@@ -5,8 +5,8 @@
 //!
 //! 会话模型：`run_task` 同一时间只允许一个任务在运行，返回即代表流程
 //! 走到等待确认（或失败）；产生的编排器按任务 id 保留在 [`AppState`]，
-//! 后续的确认/拒绝/回滚借它复用事件出口——应用重启后未确认的任务
-//! 需重新运行才能继续操作。
+//! 后续的确认/拒绝/回滚借它复用事件出口；重启后从文件基线恢复，
+//! 无需重新生成或调用模型。
 
 use std::sync::Arc;
 
@@ -35,6 +35,11 @@ pub async fn run_task(
     state: State<'_, AppState>,
 ) -> Result<i64, String> {
     let mut config = orchestrator_config(&state)?;
+    let runtime = crate::config::runtime::load(&state.store, Some(project_id))
+        .map_err(String::from)?
+        .effective;
+    config.task_timeout_sec = runtime.task_timeout_sec.unwrap_or(1800);
+    config.tool_loop.max_turns = runtime.max_turns.unwrap_or(32);
     config.tool_loop.allow_verification = allow_verification.unwrap_or(false);
     let orchestrator =
         Orchestrator::new(app, Arc::new(state.store.clone()), config).map_err(String::from)?;
@@ -48,7 +53,9 @@ pub async fn run_task(
 /// 从存储中的用户配置构建编排配置（模型连接 + 路由；其余步骤参数用默认值）。
 pub(super) fn orchestrator_config(state: &AppState) -> Result<OrchestratorConfig, XaimError> {
     let app = crate::config::model::load(&state.store);
-    orchestrator_config_from(app)
+    let mut config = orchestrator_config_from(app)?;
+    config.workspace_root = state.data_paths.as_ref().map(|paths| paths.workspaces());
+    Ok(config)
 }
 
 pub fn orchestrator_config_from(
@@ -127,19 +134,40 @@ pub async fn list_task_steps(
 
 /// 应用已审阅的任务变更，保留 Git 历史与其他工作区修改。
 #[tauri::command]
-pub async fn apply_patch(patch_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn apply_patch(
+    patch_id: i64,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let task_id = patch_task_id(&state.store, patch_id)
+        .await
+        .map_err(String::from)?;
+    ensure_review_with_app(&state, task_id, app);
     apply(&state, patch_id).await.map_err(String::from)
 }
 
 /// 拒绝候选补丁：不改动工作区，任务转入 Cancelled。
 #[tauri::command]
-pub async fn reject_patch(patch_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn reject_patch(
+    patch_id: i64,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let task_id = patch_task_id(&state.store, patch_id)
+        .await
+        .map_err(String::from)?;
+    ensure_review_with_app(&state, task_id, app);
     reject(&state, patch_id).await.map_err(String::from)
 }
 
 /// 撤销任务自身的文件变更；文件已被其他操作修改时拒绝覆盖。
 #[tauri::command]
-pub async fn rollback_task(task_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn rollback_task(
+    task_id: i64,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    ensure_review_with_app(&state, task_id, app);
     rollback(&state, task_id).await.map_err(String::from)
 }
 
@@ -214,6 +242,7 @@ pub(super) async fn steps(state: &AppState, task_id: i64) -> Result<Vec<TaskStep
 /// `apply_patch` 的实现：补丁 → 所属任务 → 该任务的编排器 → 确认。
 pub(super) async fn apply(state: &AppState, patch_id: i64) -> Result<(), XaimError> {
     let task_id = patch_task_id(&state.store, patch_id).await?;
+    ensure_review(state, task_id);
     let orchestrator = state
         .orchestrator_for(task_id)
         .ok_or_else(|| not_operable(task_id))?;
@@ -223,6 +252,7 @@ pub(super) async fn apply(state: &AppState, patch_id: i64) -> Result<(), XaimErr
 /// `reject_patch` 的实现。
 async fn reject(state: &AppState, patch_id: i64) -> Result<(), XaimError> {
     let task_id = patch_task_id(&state.store, patch_id).await?;
+    ensure_review(state, task_id);
     let orchestrator = state
         .orchestrator_for(task_id)
         .ok_or_else(|| not_operable(task_id))?;
@@ -236,6 +266,7 @@ async fn rollback(state: &AppState, task_id: i64) -> Result<(), XaimError> {
         store::task::get_task(&conn, task_id)?
             .ok_or_else(|| XaimError::Config(format!("任务 #{task_id} 不存在")))?;
     }
+    ensure_review(state, task_id);
     let orchestrator = state
         .orchestrator_for(task_id)
         .ok_or_else(|| not_operable(task_id))?;
@@ -261,6 +292,24 @@ fn not_operable(task_id: i64) -> XaimError {
     XaimError::Config(format!(
         "任务 #{task_id} 尚未完成或不在当前会话中，无法操作其补丁"
     ))
+}
+
+fn ensure_review(state: &AppState, task_id: i64) {
+    if state.orchestrator_for(task_id).is_none() {
+        state.remember_orchestrator(
+            task_id,
+            Orchestrator::for_review(Arc::new(state.store.clone())),
+        );
+    }
+}
+
+fn ensure_review_with_app(state: &AppState, task_id: i64, app: AppHandle) {
+    if state.orchestrator_for(task_id).is_none() {
+        state.remember_orchestrator(
+            task_id,
+            Orchestrator::for_review_with_app(app, Arc::new(state.store.clone())),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -802,21 +851,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_rejects_unknown_patch_and_missing_orchestrator() {
+    async fn apply_recovers_after_restart_and_rejects_unknown_patch() {
         let dir = tempdir().unwrap();
         write_file(dir.path(), "src/lib.rs", BROKEN_LIB);
         let (state, store) = setup();
-        let (_task_id, patch_id) = waiting_task(&store, dir.path());
+        let (task_id, patch_id) = waiting_task(&store, dir.path());
 
         let err = apply(&state, 999).await.unwrap_err();
         assert!(err.to_string().contains("补丁 #999 不存在"), "{err}");
 
-        let err = apply(&state, patch_id).await.unwrap_err();
-        assert!(
-            err.to_string().contains("尚未完成或不在当前会话中"),
-            "没有会话内编排器应报错: {err}"
+        apply(&state, patch_id).await.unwrap();
+        assert_eq!(task_status(&store, task_id), TaskStatus::Done);
+        rollback(&state, task_id).await.unwrap();
+        assert_eq!(task_status(&store, task_id), TaskStatus::RolledBack);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+            BROKEN_LIB
         );
-        assert_eq!(task_status(&store, _task_id), TaskStatus::WaitingConfirm);
     }
 
     #[tokio::test]

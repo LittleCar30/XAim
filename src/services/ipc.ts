@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Project, Task, TaskStep, Patch, FileNode, ModelConfig, Config } from '../types';
+import type { Project, Task, TaskStep, Patch, FileNode, ModelConfig, Config, StorageInfo, RuntimeSettings, RuntimeOverrides } from '../types';
 
 /**
  * Tauri IPC 封装层：前端统一经由 `ipc` 对象调用后端命令，
@@ -36,4 +36,19 @@ export const ipc = {
 
   getConfig: () => invoke<Config>('get_config'),
   setConfig: (config: Config) => invoke<void>('set_config', { config }),
+  getStorageInfo: () => invoke<StorageInfo>('get_storage_info'),
+  openDataFolder: (kind: 'home' | 'workspaces' | 'backups') => invoke<void>('open_data_folder', { kind }),
+  pickStorageFolder: () => invoke<string | null>('pick_storage_folder'),
+  moveDataDirectory: (path: string) => invoke<void>('move_data_directory', { path }),
+  cancelDataMove: () => invoke<void>('cancel_data_move'),
+  createDataBackup: () => invoke<string>('create_data_backup'),
+  restoreDataBackup: () => invoke<string | null>('restore_data_backup'),
+  setWorkspaceRetention: (days: number) => invoke<void>('set_workspace_retention', { days }),
+  cleanupWorkspaces: () => invoke<number>('cleanup_workspaces'),
+  openTaskWorkspace: (taskId: number) => invoke<void>('open_task_workspace', { taskId }),
+  exportTaskRecord: (taskId: number) => invoke<string | null>('export_task_record', { taskId }),
+  getPreferences: () => invoke<Record<string, string>>('get_preferences'),
+  setPreference: (key: string, value: string) => invoke<void>('set_preference', { key, value }),
+  getRuntimeSettings: (projectId: number | null) => invoke<RuntimeSettings>('get_runtime_settings', { projectId }),
+  setRuntimeSettings: (projectId: number | null, settings: RuntimeOverrides) => invoke<void>('set_runtime_settings', { projectId, settings }),
 };

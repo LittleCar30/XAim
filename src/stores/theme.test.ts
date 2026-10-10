@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { applyTheme, loadTheme, THEME_KEY, useThemeStore } from './theme'
 
+vi.mock('@/services/ipc', () => ({ ipc: { setPreference: vi.fn().mockResolvedValue(undefined) } }))
+
 beforeEach(() => {
   localStorage.clear()
   useThemeStore.setState({ theme: 'light' })

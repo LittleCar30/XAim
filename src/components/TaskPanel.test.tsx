@@ -1,5 +1,5 @@
-import { act, render, screen, within } from '@testing-library/react'
-import { beforeEach, expect, it } from 'vitest'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import TaskPanel from './TaskPanel'
 import { useTaskStore } from '@/stores/task'
@@ -7,6 +7,75 @@ import { resetStores, task } from '@/test/fixtures'
 import { useConversationStore } from '@/stores/conversation'
 
 beforeEach(resetStores)
+afterEach(() => vi.unstubAllGlobals())
+
+it('copies the original input and saved output as plain text, preserving whitespace', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  const prompt = '修复函数\n  保留缩进'
+  const content = '已完成。\n\n```ts\n  return 0\n```'
+  useConversationStore.setState({ selectedId: task.id, record: {
+    task: { ...task, prompt }, patches: [], verifies: [], steps: [{
+      id: 1, taskId: task.id, stepType: 'event',
+      content: JSON.stringify({ type: 'message', taskId: task.id, content }), createdAt: 2500,
+    }],
+  } })
+  render(<TaskPanel />)
+  fireEvent.click(screen.getByRole('button', { name: '复制输入' }))
+  await waitFor(() => expect(within(screen.getByLabelText('输入信息')).getByText('已复制')).toBeInTheDocument())
+  expect(writeText).toHaveBeenNthCalledWith(1, prompt)
+  fireEvent.click(screen.getByRole('button', { name: '复制输出' }))
+  await waitFor(() => expect(within(screen.getByLabelText('输出信息')).getByText('已复制')).toBeInTheDocument())
+  expect(writeText).toHaveBeenNthCalledWith(2, content)
+})
+
+it('shows creation and completion times below each message and prefers the saved duration', () => {
+  useConversationStore.setState({ selectedId: task.id, record: {
+    task: { ...task, durationMs: 65000 }, patches: [], verifies: [], steps: [],
+  } })
+  render(<TaskPanel />)
+  expect(screen.getByLabelText('输入信息').querySelector('time')).toHaveAttribute('datetime', new Date(task.createdAt).toISOString())
+  expect(screen.getByLabelText('输出信息').querySelector('time')).toHaveAttribute('datetime', new Date(task.finishedAt!).toISOString())
+  expect(within(screen.getByLabelText('输出信息')).getByText('总耗时 1m 05s')).toBeInTheDocument()
+})
+
+it('shows total duration immediately on completion, falling back to task timestamps', () => {
+  useTaskStore.setState({ currentTask: { ...task, status: 'generating', finishedAt: null, durationMs: null } })
+  render(<TaskPanel />)
+  expect(screen.queryByText(/总耗时/)).not.toBeInTheDocument()
+  const now = Date.now()
+  act(() => {
+    useTaskStore.getState().setCurrentTask({ ...task, status: 'generating', createdAt: now - 65000, finishedAt: null, durationMs: null })
+    useTaskStore.getState().handleEvent({ type: 'done', taskId: task.id, status: 'done' })
+  })
+  expect(screen.getByText('总耗时 1m 05s')).toBeInTheDocument()
+})
+
+it('copies the latest visible streaming output without earlier rounds', async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  useTaskStore.setState({ currentTask: { ...task, status: 'generating', finishedAt: null, durationMs: null }, events: [
+    { type: 'modelText', taskId: task.id, round: 1, delta: 'earlier', status: 'complete' },
+    { type: 'modelText', taskId: task.id, round: 2, delta: '当前', status: 'streaming' },
+    { type: 'modelText', taskId: task.id, round: 2, delta: '回复', status: 'streaming' },
+  ] })
+  render(<TaskPanel />)
+  fireEvent.click(screen.getByRole('button', { name: '复制输出' }))
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith('当前回复'))
+  expect(screen.queryByText(/总耗时/)).not.toBeInTheDocument()
+})
+
+it('reports clipboard errors and lets the user retry', async () => {
+  const writeText = vi.fn().mockRejectedValueOnce(new Error('denied')).mockResolvedValue(undefined)
+  vi.stubGlobal('navigator', { clipboard: { writeText } })
+  useTaskStore.setState({ currentTask: task })
+  render(<TaskPanel />)
+  fireEvent.click(screen.getByRole('button', { name: '复制输入' }))
+  expect(await screen.findByText('复制失败，请重试')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '复制输入' }))
+  await waitFor(() => expect(screen.getByText('输入已复制')).toBeInTheDocument())
+  expect(screen.queryByText('复制失败，请重试')).not.toBeInTheDocument()
+})
 
 it('shows incremental text for the current round and retains interrupted output', () => {
   useTaskStore.setState({ currentTask: { ...task, status: 'generating' } })

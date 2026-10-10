@@ -54,6 +54,7 @@ pub struct OrchestratorConfig {
     pub allowed_commands: Vec<String>,
     pub tool_loop: LoopConfig,
     pub task_timeout_sec: u64,
+    pub workspace_root: Option<PathBuf>,
 }
 
 impl Default for OrchestratorConfig {
@@ -69,6 +70,7 @@ impl Default for OrchestratorConfig {
             allowed_commands: Vec::new(),
             tool_loop: LoopConfig::default(),
             task_timeout_sec: 1800,
+            workspace_root: None,
         }
     }
 }
@@ -93,6 +95,30 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
+    /// Restored file review never needs a model connection or API key.
+    pub fn for_review(store: Arc<Store>) -> Self {
+        Self::with_sink(
+            store,
+            OrchestratorConfig::default(),
+            Arc::new(DiscardSink),
+            Arc::new(ReviewOnlyProvider),
+        )
+    }
+
+    pub fn for_review_with_app(app: AppHandle, store: Arc<Store>) -> Self {
+        Self::with_sink(
+            store,
+            OrchestratorConfig::default(),
+            Arc::new(ChannelSink(Some(app))),
+            Arc::new(ReviewOnlyProvider),
+        )
+    }
+    fn snapshot(&self, root: &Path, task_id: i64) -> Result<TaskWorkspace> {
+        match &self.config.workspace_root {
+            Some(parent) => TaskWorkspace::managed_snapshot(root, parent, task_id),
+            None => TaskWorkspace::snapshot(root),
+        }
+    }
     /// 生产构造：从模型配置创建 provider，事件经 Tauri 通道推送。
     pub fn new(app: AppHandle, store: Arc<Store>, config: OrchestratorConfig) -> Result<Self> {
         let provider: Arc<dyn ModelProvider> =
@@ -157,6 +183,10 @@ impl Orchestrator {
                 "项目目录不存在: {}",
                 project.path
             )));
+        }
+
+        if let Some(parent) = &self.config.workspace_root {
+            TaskWorkspace::validate_parent(&root, parent)?;
         }
 
         // 1. 创建任务记录（Idle），随后第一步转入 Parsing。
@@ -347,7 +377,7 @@ impl Orchestrator {
                 .await;
         }
         // Compatibility path also operates entirely in a private snapshot.
-        let workspace = TaskWorkspace::snapshot(root)?;
+        let workspace = self.snapshot(root, task_id)?;
         let isolated_ctx = ToolContext {
             project_root: workspace.root().into(),
             ..ctx.clone()
@@ -641,7 +671,7 @@ impl Orchestrator {
                 &mut status,
                 TaskStatus::Indexing,
                 "保存工作区基线",
-                async { TaskWorkspace::snapshot(root) },
+                async { self.snapshot(root, task_id) },
             )
             .await?;
         self.run_step(
@@ -940,6 +970,39 @@ impl Orchestrator {
 
 /// 生产事件出口：事件经 Tauri 全局通道推送；无句柄时静默丢弃。
 struct ChannelSink(Option<AppHandle>);
+
+struct ReviewOnlyProvider;
+struct DiscardSink;
+
+impl EventSink for DiscardSink {
+    fn emit(&self, _event: XaimEvent) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for ReviewOnlyProvider {
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<crate::model::provider::CompletionResponse> {
+        Err(XaimError::Config(
+            "历史任务只支持审阅和撤销，请新建任务继续生成".into(),
+        ))
+    }
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<String>> + Send>>> {
+        Err(XaimError::Config("历史任务不能调用模型".into()))
+    }
+    fn name(&self) -> &str {
+        "review-only"
+    }
+    fn max_context(&self) -> usize {
+        0
+    }
+}
 
 impl EventSink for ChannelSink {
     fn emit(&self, event: XaimEvent) -> Result<()> {

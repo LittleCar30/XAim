@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Project, Task, TaskStep, Patch, FileNode, ModelConfig, Config, StorageInfo, RuntimeSettings, RuntimeOverrides } from '../types';
+import type { Project, Task, TaskStep, Patch, FileNode, ModelConfig, Config, StorageInfo, RuntimeSettings, RuntimeOverrides, ExecutionSettings, ExecutionMode, GitNetwork, PermissionRequest, PermissionDecision } from '../types';
 
 /**
  * Tauri IPC 封装层：前端统一经由 `ipc` 对象调用后端命令，
@@ -18,6 +18,11 @@ export const ipc = {
   runTask: (projectId: number, prompt: string, allowVerification?: boolean, parentTaskId?: number, allowCommands?: boolean) =>
     invoke<number>('run_task', { projectId, prompt, ...(allowVerification !== undefined ? { allowVerification } : {}), ...(parentTaskId !== undefined ? { parentTaskId } : {}), ...(allowCommands !== undefined ? { allowCommands } : {}) }),
   cancelTask: (taskId: number) => invoke<void>('cancel_task', { taskId }),
+  getExecutionSettings: (projectId: number) => invoke<ExecutionSettings>('get_execution_settings', { projectId }),
+  setExecutionSettings: (projectId: number, mode: ExecutionMode, gitNetwork: GitNetwork) => invoke<ExecutionSettings>('set_execution_settings', { projectId, mode, gitNetwork }),
+  revokeExecutionGrant: (projectId: number, scopeId: string) => invoke<ExecutionSettings>('revoke_execution_grant', { projectId, scopeId }),
+  getPendingPermission: () => invoke<PermissionRequest | null>('get_pending_permission'),
+  resolveExecutionPermission: (taskId: number, requestId: string, decision: PermissionDecision) => invoke<void>('resolve_execution_permission', { taskId, requestId, decision }),
   getTask: (taskId: number) => invoke<Task>('get_task', { taskId }),
   listTasks: (projectId: number) => invoke<Task[]>('list_tasks', { projectId }),
   listTaskSteps: (taskId: number) => invoke<TaskStep[]>('list_task_steps', { taskId }),

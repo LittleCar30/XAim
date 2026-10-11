@@ -5,10 +5,11 @@ import { ipc } from '@/services/ipc'
 import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
 import type { TaskStatus } from '@/types'
-import { ArrowUp, CircleHelp, Loader2, Square } from 'lucide-react'
+import { ArrowUp, Loader2, Square } from 'lucide-react'
 import { useConversationStore } from '@/stores/conversation'
 import { useConfigStore } from '@/stores/config'
 import ModelPicker from '@/components/ModelPicker'
+import ExecutionPermissions from '@/components/ExecutionPermissions'
 import { savePreference } from '@/services/preferences'
 
 const HISTORY_KEY = 'xaim.prompt-history'
@@ -50,17 +51,16 @@ export default function InputBar() {
   const setCurrentTask = useTaskStore((s) => s.setCurrentTask)
   const configLoading = useConfigStore((s) => s.loading)
   const events = useTaskStore((s) => s.events)
+  const pendingPermission = useTaskStore((s) => s.pendingPermission)
   const selectedId = useConversationStore((s) => s.selectedId)
   const selectedTask = useConversationStore((s) => s.record?.task)
   const awaitingConfirmation = (selectedId !== null ? selectedTask : currentTask)?.status === 'waitingConfirm'
+  const retryTask = selectedId !== null ? selectedTask : currentTask
 
   const [value, setValue] = useState('')
   const [history, setHistory] = useState<string[]>(loadHistory)
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
   const [sending, setSending] = useState(false)
-  const [allowVerification, setAllowVerification] = useState(false)
-  const [allowCommands, setAllowCommands] = useState(false)
-  const [checkHelpOpen, setCheckHelpOpen] = useState(false)
   const [error, setError] = useState<{ message: string; taskId?: number } | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
@@ -77,14 +77,13 @@ export default function InputBar() {
     el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_HEIGHT)}px`
   }, [value])
 
-  const send = async () => {
+  const send = async (retryPrompt?: string) => {
     const project = currentProject
-    const prompt = value.trim()
+    const prompt = (retryPrompt ?? value).trim()
     if (sending || running || configLoading || conversationLoading || project === null || prompt === '') return
     setSending(true)
     setError(null)
     const parentTask = useConversationStore.getState().record?.task ?? useTaskStore.getState().currentTask
-    const commandsApproved = allowCommands
     let executionStarted = false
     try {
       if (parentTask && parentTask.id > 0) await useConversationStore.getState().loadTurns(parentTask.id)
@@ -97,14 +96,9 @@ export default function InputBar() {
         conversationId: parentTask?.conversationId ?? parentTask?.id ?? null, parentTaskId: parentTask?.id ?? null,
         createdAt: Date.now(), finishedAt: null, durationMs: null, tokenInput: 0, tokenOutput: 0, cost: null })
       executionStarted = true
-      const verificationApproved = allowVerification
-      setAllowVerification(false)
-      setAllowCommands(false)
       const taskId = parentTask && parentTask.id > 0
-        ? commandsApproved ? await ipc.runTask(project.id, prompt, verificationApproved, parentTask.id, true)
-        : await ipc.runTask(project.id, prompt, verificationApproved, parentTask.id)
-        : commandsApproved ? await ipc.runTask(project.id, prompt, verificationApproved, undefined, true)
-        : await ipc.runTask(project.id, prompt, verificationApproved)
+        ? await ipc.runTask(project.id, prompt, undefined, parentTask.id)
+        : await ipc.runTask(project.id, prompt)
       const [task, patches] = await Promise.all([ipc.getTask(taskId), ipc.listPatches(taskId)])
       // Event patches have temporary IDs; actions need the persisted database IDs.
       useTaskStore.setState({ patches })
@@ -123,7 +117,7 @@ export default function InputBar() {
         setCurrentTask({ ...task, status: 'failed', finishedAt: Date.now() })
       }
     } finally {
-      if (commandsApproved && executionStarted && useProjectStore.getState().currentProject?.id === project.id) {
+      if (executionStarted && useProjectStore.getState().currentProject?.id === project.id) {
         await useProjectStore.getState().loadFileTree(project.id).catch((error) => console.warn('[xaim] 文件树刷新失败:', error))
       }
       setSending(false)
@@ -177,9 +171,10 @@ export default function InputBar() {
   return (
     <div className="conversation-composer">
       {running && (
-        <p className="mb-2 text-[11px] text-slate-500">{awaitingConfirmation ? '等待确认本次代码变更' : '任务运行中，输入暂时禁用…'}</p>
+        <p className="mb-2 text-[11px] text-slate-500">{pendingPermission ? '等待执行授权，确认后继续当前任务' : awaitingConfirmation ? '等待确认本次代码变更' : '任务运行中，输入暂时禁用…'}</p>
       )}
       {awaitingConfirmation && !running && <p className="mb-2 text-[11px] text-slate-500">变更待审阅</p>}
+      {!disabled && retryTask && ['blocked', 'failed'].includes(retryTask.status) && <button className="mb-2 text-xs text-slate-500" onClick={() => void send(retryTask.prompt)}>重试本次任务</button>}
       {error && !errorInConversation && <p role="alert" className="mb-2 text-[11px] text-rose-400">{error.message}</p>}
       <div className="composer-surface">
         <textarea
@@ -200,11 +195,7 @@ export default function InputBar() {
           }
           className="composer-input"
         />
-        <div className="composer-bottom justify-end gap-2"><div className="composer-check-control">
-          <label className="flex items-center gap-1.5 text-xs text-slate-500"><input type="checkbox" checked={allowVerification} disabled={running || sending} onChange={(event) => setAllowVerification(event.target.checked)} />运行项目检查</label>
-          <label className="flex items-center gap-1.5 text-xs text-slate-500"><input type="checkbox" checked={allowCommands} disabled={running || sending} onChange={(event) => setAllowCommands(event.target.checked)} />运行开发命令</label>
-          <button type="button" className="check-help-button" aria-label="了解运行项目检查" aria-expanded={checkHelpOpen} aria-controls="project-check-help" onClick={() => setCheckHelpOpen((open) => !open)}><CircleHelp size={14} /></button>
-        </div><ModelPicker disabled={running || sending} /><div className="flex gap-2">
+        <div className="composer-bottom justify-end gap-2"><ExecutionPermissions running={running || sending} /><ModelPicker disabled={running || sending} /><div className="flex gap-2">
         {running && !awaitingConfirmation && currentTask && currentTask.id >= 0 && <button className="icon-button" aria-label="停止任务" title="停止任务" onClick={() => void ipc.cancelTask(currentTask.id).catch((e) => setError({ message: toMessage(e) }))}><Square size={14} /></button>}
         <button
           type="button"
@@ -224,12 +215,6 @@ export default function InputBar() {
         </button>
         </div>
         </div>
-        {checkHelpOpen && <div id="project-check-help" className="project-check-help">
-          <strong>仅授权本次任务</strong>
-          <p>运行项目已有的类型检查、lint、测试或构建；失败时 Agent 会尝试修复。未勾选仍可生成变更，但检查会标记为未运行或无法验证。</p>
-          <p>检查不代表应用代码。脚本在源码副本中运行，仍可访问本机和网络，请在信任项目时启用。</p>
-          <p>运行开发命令允许本轮安装依赖、执行自定义测试和脚本、启动服务。仓库克隆会直接交付到原项目的空目录；其他命令在任务副本中运行。命令以你的系统权限执行，可访问本机和网络。服务可在后续对话中停止，最长运行一小时，退出应用会停止。</p>
-        </div>}
       </div>
     </div>
   )

@@ -53,6 +53,7 @@ pub struct LoopConfig {
     pub context_tokens: usize,
     pub allow_verification: bool,
     pub allow_commands: bool,
+    pub permissions: Option<Arc<super::permissions::PermissionSession>>,
     pub verification_source: Option<std::path::PathBuf>,
     pub deadline: Option<Instant>,
 }
@@ -69,6 +70,7 @@ impl Default for LoopConfig {
             context_tokens: 128_000,
             allow_verification: false,
             allow_commands: false,
+            permissions: None,
             verification_source: None,
             deadline: None,
         }
@@ -315,7 +317,7 @@ fn verification_commands(root: &std::path::Path) -> Vec<(VerifyKind, String)> {
     .collect()
 }
 
-async fn verify(
+pub(crate) async fn verify(
     ctx: &ToolContext,
     config: &LoopConfig,
     cancel: &AtomicBool,
@@ -334,7 +336,35 @@ async fn verify(
         })?;
         return Ok(vec![json!({"status":"unavailable","output":output})]);
     }
-    let environment = if config.allow_verification {
+    let mut approved = Vec::new();
+    for (_, command) in &commands {
+        let allowed = if let Some(session) = &config.permissions {
+            let scope = super::permissions::scope(
+                "verify",
+                &json!({"command":command}),
+                &ctx.project_root,
+                &session.git_network,
+            )?;
+            match session
+                .authorize(
+                    scope,
+                    "需要运行项目检查以验证候选修改",
+                    cancel,
+                    config.deadline,
+                    record,
+                )
+                .await
+            {
+                Ok(()) => true,
+                Err(XaimError::Blocked(_)) => false,
+                Err(e) => return Err(e),
+            }
+        } else {
+            config.allow_verification
+        };
+        approved.push(allowed);
+    }
+    let environment = if approved.iter().any(|v| *v) {
         Some(
             crate::verify::environment::VerificationEnvironment::prepare(
                 &ctx.project_root,
@@ -350,10 +380,10 @@ async fn verify(
             serde_json::to_value(environment.metrics())?,
         )?;
     }
-    for (kind, command) in commands {
+    for ((kind, command), allowed) in commands.into_iter().zip(approved) {
         let started = Instant::now();
         let dependency_error = environment.as_ref().and_then(|e| e.unavailable(&command));
-        let (status, passed, output) = if !config.allow_verification {
+        let (status, passed, output) = if !allowed {
             (
                 "unavailable",
                 false,
@@ -557,7 +587,10 @@ pub async fn run(
     let symbols = crate::tools::symbols::SessionSymbols::default();
     let mut snapshot = TaskSnapshot::new(task);
     snapshot.save(workspace, &record)?;
-    if !config.allow_commands && snapshot.needs_command_permission(config.allow_verification) {
+    if config.permissions.is_none()
+        && !config.allow_commands
+        && snapshot.needs_command_permission(config.allow_verification)
+    {
         return stop_blocked(
             "本轮未授权开发命令与仓库操作，请启用输入栏的运行开发命令后继续",
             &mut snapshot,
@@ -1008,14 +1041,26 @@ pub async fn run(
                         snapshot.pending = args["pending"].as_array().into_iter().flatten().filter_map(|v|v.as_str().map(str::to_owned)).take(16).collect();
                         return stop_blocked(reason, &mut snapshot, workspace, &record);
                     },
-                    Ok(_) if !config.allow_commands && matches!(call.function.name.as_str(), "run_command" | "start_process" | "clone_repository") => crate::types::ToolResult {
+                    Ok(_) if config.permissions.is_none() && !config.allow_commands && matches!(call.function.name.as_str(), "run_command" | "start_process" | "clone_repository") => crate::types::ToolResult {
                         name:call.function.name.clone(),success:false,output:String::new(),error:Some("未授权工具：本轮未授权开发命令与仓库操作。项目约定不能授予执行权限；必要操作请 report_blocked".into()),duration_ms:Some(0),
                     },
                     Ok(args) if matches!(call.function.name.as_str(), "run_command" | "start_process" | "read_process" | "stop_process" | "clone_repository") => {
                         let args_evidence: Value = serde_json::from_str(&operations::redact(&args.to_string()))?;
                         let project = config.verification_source.as_deref().unwrap_or(ctx.project_root.as_path());
                         let started = Instant::now();
-                        let outcome: Result<Value> = match call.function.name.as_str() {
+                        let authorization = if let Some(session) = &config.permissions {
+                            if matches!(call.function.name.as_str(), "run_command" | "start_process" | "clone_repository") {
+                                let root = if call.function.name == "clone_repository" || args["program"] == "git" { project } else { workspace.root() };
+                                match super::permissions::scope(&call.function.name, &args, root, &session.git_network) {
+                                    Ok(scope) => session.authorize(scope, if call.function.name == "clone_repository" { "需要下载仓库以完成当前任务" } else { "需要执行开发操作以继续当前任务" }, &cancel, config.deadline, &record).await,
+                                    Err(e) => Err(e),
+                                }
+                            } else { Ok(()) }
+                        } else { Ok(()) };
+                        let outcome: Result<Value> = match authorization {
+                        Err(error) => Err(error),
+                        Ok(()) if cancel.load(Ordering::SeqCst) => Err(XaimError::Cancelled),
+                        Ok(()) => match call.function.name.as_str() {
                             "run_command" => match serde_json::from_value(args) {
                                 Ok(command) => {
                                     // Git queries need the original repository metadata;
@@ -1043,7 +1088,8 @@ pub async fn run(
                                 }
                                 match serde_json::from_value(args) {
                                     Ok(clone) => {
-                                        let outcome = operations::clone_repository(clone, project, &cancel, config.deadline).await;
+                                        let network = config.permissions.as_ref().map(|s| s.git_network.clone()).unwrap_or_default();
+                                        let outcome = operations::clone_repository_with_network(clone, project, &cancel, config.deadline, &network).await;
                                         if let Ok(value) = &outcome {
                                             // Persist delivery evidence before copying/indexing source,
                                             // so an adoption error cannot hide a completed operation.
@@ -1060,7 +1106,7 @@ pub async fn run(
                                 if name == "stop_process" { operations::stop_process(id, project).await }
                                 else { operations::read_process(id, project, false) }
                             },
-                        };
+                        }};
                         let result = match outcome {
                             Ok(value) => {
                                 if call.function.name == "start_process" { task_processes.register(&value); }
@@ -1681,6 +1727,158 @@ mod tests {
         .unwrap();
         assert_eq!(report["completionConfirmed"], false);
         assert!(!report["pending"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn desktop_command_waits_for_exact_approval_and_denial_never_executes() {
+        use super::super::permissions::{Decision, PermissionSession};
+        for allow in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let marker = root.path().join("executed.txt");
+            let command = format!(
+                "require('fs').writeFileSync({}, 'executed'); console.log('actual result')",
+                serde_json::to_string(&marker.to_string_lossy()).unwrap()
+            );
+            let (_, store, project, provider, sink) = setup(
+                root.path(),
+                vec![
+                    call(
+                        "command",
+                        "run_command",
+                        json!({"program":"node","args":["-e",command]}),
+                    ),
+                    done(),
+                ],
+                LoopConfig::default(),
+            );
+            let session = Arc::new(PermissionSession::new(store.clone(), project).unwrap());
+            let agent = Orchestrator::with_sink(
+                store.clone(),
+                OrchestratorConfig {
+                    tool_loop: LoopConfig {
+                        permissions: Some(session.clone()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                sink.clone(),
+                provider,
+            );
+            let response = async {
+                loop {
+                    if let Some(request) = session.pending() {
+                        assert_eq!(request.scope.tool, "run_command");
+                        assert!(!marker.exists(), "must not execute before approval");
+                        session
+                            .resolve(
+                                request.task_id,
+                                &request.id,
+                                if allow {
+                                    Decision::Once
+                                } else {
+                                    Decision::Deny
+                                },
+                            )
+                            .unwrap();
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            };
+            let (result, _) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(agent.run_task(project, "执行命令显示结果".into()), response)
+            })
+            .await
+            .unwrap();
+            if allow {
+                let task = result.unwrap();
+                assert_eq!(
+                    store::task::get_task(&store.conn(), task)
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    crate::types::TaskStatus::Done
+                );
+                assert_eq!(std::fs::read_to_string(&marker).unwrap(), "executed");
+                assert!(sink.0.lock().unwrap().iter().any(|e| matches!(e, XaimEvent::ToolFinished { result, .. } if result.name == "run_command" && result.success)));
+            } else {
+                assert!(matches!(result, Err(XaimError::Cancelled)));
+                assert!(!marker.exists());
+                assert!(!sink.0.lock().unwrap().iter().any(|e| matches!(e, XaimEvent::ToolFinished { result, .. } if result.name == "run_command")));
+            }
+            assert!(session.pending().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_verification_requests_permission_before_running_project_script() {
+        use super::super::permissions::{Decision, PermissionSession};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"test":"node check.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("check.js"), "console.log('approved check'); require('fs').writeFileSync('check-side-effect.txt', 'test');").unwrap();
+        let (_, store, project, provider, sink) = setup(
+            root.path(),
+            vec![
+                call(
+                    "file",
+                    "create_file",
+                    json!({"path":"result.txt","content":"result"}),
+                ),
+                done(),
+            ],
+            LoopConfig::default(),
+        );
+        let session = Arc::new(PermissionSession::new(store.clone(), project).unwrap());
+        let agent = Orchestrator::with_sink(
+            store.clone(),
+            OrchestratorConfig {
+                tool_loop: LoopConfig {
+                    permissions: Some(session.clone()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            sink.clone(),
+            provider,
+        );
+        let response = async {
+            loop {
+                if let Some(request) = session.pending() {
+                    assert_eq!(request.scope.tool, "verify");
+                    assert_eq!(request.scope.command, "npm test");
+                    assert!(!sink
+                        .0
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|e| matches!(e, XaimEvent::Verify { passed: true, .. })));
+                    session
+                        .resolve(request.task_id, &request.id, Decision::Once)
+                        .unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let (result, _) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(agent.run_task(project, "Create result".into()), response)
+        })
+        .await
+        .unwrap();
+        let task = result.unwrap();
+        assert_eq!(
+            store::task::get_task(&store.conn(), task)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::WaitingConfirm
+        );
+        assert!(sink.0.lock().unwrap().iter().any(|e| matches!(e, XaimEvent::Verify { passed:true, output, .. } if output.contains("approved check"))));
+        assert!(!root.path().join("check-side-effect.txt").exists());
     }
 
     #[tokio::test]

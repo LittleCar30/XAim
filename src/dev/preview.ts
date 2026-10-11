@@ -166,6 +166,11 @@ export function setupPreview(): void {
   }
 
   const previewIpc: typeof ipc = {
+    getExecutionSettings: async () => ({ mode: 'ask', grants: [], gitNetwork: { mode: 'system', url: '' } }),
+    setExecutionSettings: async () => { throw new Error('请在桌面应用中保存项目执行权限') },
+    revokeExecutionGrant: async () => { throw new Error('请在桌面应用中管理执行授权') },
+    getPendingPermission: async () => null,
+    resolveExecutionPermission: async () => { throw new Error('预览不会执行真实程序') },
     getStorageInfo: async () => { throw new Error('请在桌面应用中管理本地数据') },
     openDataFolder: async () => { throw new Error('浏览器预览无法打开本地数据目录') },
     pickStorageFolder: async () => { throw new Error('浏览器预览无法选择本地数据目录') },

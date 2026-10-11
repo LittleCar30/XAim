@@ -403,8 +403,8 @@ export default function Settings({ onBack }: SettingsProps) {
           <div hidden={category !== 'execution'} className="settings-group">
             <RuntimeSettings />
             <Section title="项目检查说明">
-              <p className="settings-help">在对话输入框勾选“运行项目检查”，可允许本次任务运行项目已配置的类型检查、lint、测试或构建。程序自动检测检查命令，检查在源码副本中执行。</p>
-              <p className="settings-help">不勾选也能生成代码，检查会标记为未运行或无法验证。检查失败时会尝试修复，最多三轮；依赖缺失不会自动安装。纯分析任务无需代码检查。授权只生效一次，应用代码仍需单独确认。</p>
+              <p className="settings-help">对话输入框的“项目执行权限”统一管理项目检查与开发命令。默认按需询问，实际执行前展示具体操作；也可选择不执行程序，或按项目记住明确批准的范围。</p>
+              <p className="settings-help">关闭执行权限仍能生成代码，检查会标记为无法验证。检查失败时会尝试修复，最多三轮；纯分析任务无需代码检查。已保存的授权可查看和撤销，应用代码仍需单独确认。</p>
               <p className="settings-help">项目脚本以当前用户权限运行，可以访问本机和网络；请在信任项目时启用。</p>
             </Section>
           </div>

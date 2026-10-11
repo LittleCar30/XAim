@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::{BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mockito::{Mock, ServerGuard};
@@ -24,11 +25,16 @@ const PROMPT: &str = "Fix add so that it returns the sum of a and b";
 const DIFF: &str = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-pub fn add(a: i32, b: i32) -> i32 { a - b }\n+pub fn add(a: i32, b: i32) -> i32 { a + b }\n";
 
 #[derive(Default)]
-struct CollectSink(Mutex<Vec<Value>>);
+struct CollectSink(Mutex<Vec<Value>>, AtomicBool);
 
 impl EventSink for CollectSink {
     fn emit(&self, event: XaimEvent) -> Result<()> {
-        self.0.lock().unwrap().push(serde_json::to_value(event)?);
+        let value = serde_json::to_value(event)?;
+        if self.1.load(Ordering::SeqCst) {
+            write_message(json!({"event":value}));
+        } else {
+            self.0.lock().unwrap().push(value);
+        }
         Ok(())
     }
 }
@@ -210,6 +216,45 @@ impl Harness {
                 .ok_or_else(|| XaimError::Config(format!("Missing {key}")))
         };
         match command {
+            "get_execution_settings" => Ok(serde_json::to_value(crate::config::execution::load(
+                &self.state.store,
+                id("projectId")?,
+            )?)?),
+            "set_execution_settings" => {
+                Ok(serde_json::to_value(crate::config::execution::configure(
+                    &self.state.store,
+                    id("projectId")?,
+                    serde_json::from_value(args["mode"].clone())?,
+                    serde_json::from_value(args["gitNetwork"].clone())?,
+                )?)?)
+            }
+            "revoke_execution_grant" => {
+                Ok(serde_json::to_value(crate::config::execution::revoke(
+                    &self.state.store,
+                    id("projectId")?,
+                    args["scopeId"].as_str().unwrap(),
+                )?)?)
+            }
+            "get_pending_permission" => Ok(serde_json::to_value(
+                self.state
+                    .running_orchestrator()
+                    .and_then(|agent| agent.permissions().and_then(|session| session.pending())),
+            )?),
+            "resolve_execution_permission" => {
+                let agent = self
+                    .state
+                    .running_orchestrator()
+                    .ok_or_else(|| XaimError::Config("No running task".into()))?;
+                agent
+                    .permissions()
+                    .ok_or_else(|| XaimError::Config("No permission session".into()))?
+                    .resolve(
+                        id("taskId")?,
+                        args["requestId"].as_str().unwrap(),
+                        serde_json::from_value(args["decision"].clone())?,
+                    )?;
+                Ok(Value::Null)
+            }
             "open_project" => {
                 let path = args["path"]
                     .as_str()
@@ -299,6 +344,13 @@ impl Harness {
                 config.step_timeout_sec = 60;
                 config.tool_loop.allow_verification =
                     args["allowVerification"].as_bool().unwrap_or(false);
+                if self.sink.1.load(Ordering::SeqCst) {
+                    config.tool_loop.permissions =
+                        Some(Arc::new(crate::agent::permissions::PermissionSession::new(
+                            Arc::new(self.state.store.clone()),
+                            id("projectId")?,
+                        )?));
+                }
                 let provider = Arc::from(crate::model::create_provider(&config.model)?);
                 let orchestrator = Orchestrator::with_sink(
                     Arc::new(self.state.store.clone()),
@@ -445,17 +497,30 @@ fn write_message(message: Value) {
     output.flush().unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Started by pnpm test:e2e; requires the JSON stdin bridge client"]
 async fn frontend_bridge() {
     assert_eq!(std::env::var("XAIM_E2E_BRIDGE").as_deref(), Ok("1"));
-    let harness = Harness::new().await;
+    let harness = Arc::new(Harness::new().await);
+    harness.sink.1.store(true, Ordering::SeqCst);
+    let mut running = Vec::new();
     write_message(json!({"ready": true, "projectPath": harness.fixture.path()}));
     for line in std::io::stdin().lock().lines() {
         let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
         let command = request["command"].as_str().unwrap();
         if command == "shutdown" {
             break;
+        }
+        if command == "run_task" {
+            let harness = harness.clone();
+            running.push(tokio::spawn(async move {
+                let response = match harness.dispatch("run_task", &request["args"]).await {
+                    Ok(result) => json!({"id":request["id"],"result":result,"events":[]}),
+                    Err(error) => json!({"id":request["id"],"error":error.to_string(),"events":[]}),
+                };
+                write_message(response);
+            }));
+            continue;
         }
         let response = match harness.dispatch(command, &request["args"]).await {
             Ok(result) => {
@@ -466,6 +531,9 @@ async fn frontend_bridge() {
             }
         };
         write_message(response);
+    }
+    for task in running {
+        task.await.unwrap();
     }
     project::close(&harness.state).await.unwrap();
 }

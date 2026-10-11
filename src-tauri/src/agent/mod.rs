@@ -2,6 +2,7 @@
 
 pub mod instructions;
 pub mod orchestrator;
+pub mod permissions;
 pub mod planner;
 pub mod state;
 pub mod task_context;

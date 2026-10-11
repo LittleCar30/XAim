@@ -164,6 +164,10 @@ impl Orchestrator {
         (id != 0).then_some(id)
     }
 
+    pub fn permissions(&self) -> Option<&Arc<super::permissions::PermissionSession>> {
+        self.config.tool_loop.permissions.as_ref()
+    }
+
     /// 在隔离副本中执行任务，有差异进入 WaitingConfirm，无需修改时进入 Done。
     /// 原生工具协议是默认路径；文本补丁路径仅用于兼容 provider。
     ///
@@ -552,11 +556,39 @@ impl Orchestrator {
                 &mut status,
                 TaskStatus::Verifying,
                 "评估候选",
-                evaluate_candidates_with_model(applicable, ctx, provider, &review_model),
+                async {
+                    // The legacy candidate scorer executes project scripts internally.
+                    // Desktop sessions instead select a candidate, then run the same
+                    // permission-gated verifier as native tool tasks.
+                    if self.config.tool_loop.permissions.is_some() {
+                        applicable
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| XaimError::PatchConflict("没有可用候选".into()))
+                    } else {
+                        evaluate_candidates_with_model(applicable, ctx, provider, &review_model)
+                            .await
+                    }
+                },
             )
             .await?;
         patch::apply_diff(&best.diff, root)?;
         self.save_changes(task_id, &workspace.changes()?)?;
+        if self.config.tool_loop.permissions.is_some() {
+            let mut config = self.config.tool_loop.clone();
+            config.deadline = Some(deadline);
+            tool_loop::verify(
+                ctx,
+                &config,
+                &self.cancel_flag,
+                &Recorder {
+                    task_id,
+                    store: &self.store,
+                    sink: self.sink.as_ref(),
+                },
+            )
+            .await?;
+        }
 
         // 8. 记录最优补丁并等待确认（WaitingConfirm）
         self.run_step(

@@ -18,6 +18,15 @@ pub const EVENT_CHANNEL: &str = "xaim://event";
     rename_all_fields = "camelCase"
 )]
 pub enum XaimEvent {
+    PermissionRequested {
+        task_id: i64,
+        request: crate::agent::permissions::PermissionRequest,
+    },
+    PermissionResolved {
+        task_id: i64,
+        request_id: String,
+        decision: crate::agent::permissions::Decision,
+    },
     /// 任务步骤推进。
     Step {
         task_id: i64,

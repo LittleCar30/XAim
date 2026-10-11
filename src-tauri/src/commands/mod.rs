@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod data;
+pub mod execution;
 pub mod model;
 pub mod project;
 pub mod task;

@@ -84,6 +84,10 @@ beforeAll(async () => {
       if (!line.startsWith('XAIM_E2E ')) { output += `${line}\n`; return }
       const message = JSON.parse(line.slice('XAIM_E2E '.length))
       if (message.ready) { projectPath = message.projectPath; clearTimeout(timer); resolve(); return }
+      if (message.event) {
+        act(() => { for (const handler of transport.handlers) handler({ event: 'xaim://event', id: 0, payload: message.event }) })
+        return
+      }
       const response = message as Response
       const item = pending.get(response.id)
       if (!item) return
@@ -154,9 +158,18 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
 
   const prompt = 'Fix add so that it returns the sum of a and b'
   fireEvent.change(screen.getByRole('textbox', { name: '任务输入' }), { target: { value: prompt } })
-  fireEvent.click(screen.getByRole('checkbox', { name: '运行项目检查' }))
   fireEvent.click(screen.getByRole('button', { name: '发送' }))
+  for (let check = 0; check < 4; check++) {
+    await waitFor(() => expect(screen.getByRole('dialog', { name: '执行授权' })).toBeInTheDocument(), { timeout: 60_000 })
+    expect(useTaskStore.getState().pendingPermission?.scope.tool).toBe('verify')
+    const requestId = useTaskStore.getState().pendingPermission?.id
+    fireEvent.click(screen.getByRole('button', { name: '按项目记住' }))
+    await waitFor(() => expect(useTaskStore.getState().pendingPermission?.id).not.toBe(requestId), { timeout: 10_000 })
+  }
   await waitFor(() => expect(useTaskStore.getState().currentTask?.status).toBe('waitingConfirm'), { timeout: 60_000 })
+  const permissions = await ipc.getExecutionSettings(useProjectStore.getState().currentProject!.id)
+  expect(permissions.mode).toBe('project')
+  expect(permissions.grants).toHaveLength(4)
   expect(screen.getByText('等待确认', { selector: 'header > span' })).toBeInTheDocument()
   fireEvent.click(screen.getByRole('button', { name: /src\/lib.rs.*候选/ }))
   expect(await screen.findByTestId('original')).toHaveTextContent('a - b')

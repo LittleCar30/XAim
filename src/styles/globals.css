@@ -313,3 +313,20 @@
   .composer-check-control { flex-basis: 100%; }
   .settings-page > header { padding-inline: 12px; }
 }
+
+.execution-permissions { position: relative; margin-right: auto; }
+.execution-entry { display: flex; align-items: center; gap: 6px; font-size: 12px; color: rgb(var(--slate-500)); }
+.execution-panel, .execution-request { position: absolute; bottom: calc(100% + 18px); left: 0; z-index: 40; width: min(520px, calc(100vw - 60px)); max-height: 60vh; overflow: auto; padding: 18px; border: 1px solid rgb(var(--slate-700)); border-radius: 12px; background: rgb(var(--slate-900)); color: rgb(var(--slate-200)); box-shadow: 0 8px 28px #0003; font-size: 12px; }
+.execution-panel strong, .execution-request strong { display: block; font-size: 14px; margin-bottom: 10px; }
+.execution-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0; }
+.execution-panel select, .execution-proxy input { border: 1px solid rgb(var(--slate-700)); border-radius: 6px; padding: 6px; background: rgb(var(--slate-900)); min-width: 0; }
+.execution-panel p, .execution-request p { margin: 10px 0; color: rgb(var(--slate-500)); line-height: 1.6; }
+.execution-proxy { display: flex; gap: 8px; }
+.execution-proxy input { flex: 1; }
+.execution-request dl { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; }
+.execution-request dd, .execution-grants code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.execution-request dt { color: rgb(var(--slate-500)); }
+.execution-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.execution-actions button, .execution-proxy button, .execution-grants button { padding: 6px 10px; border: 1px solid rgb(var(--slate-700)); border-radius: 6px; }
+.execution-grants li { border-top: 1px solid rgb(var(--slate-700)); padding: 12px 0; }
+.execution-grants span { display: block; margin-top: 6px; color: rgb(var(--slate-500)); }

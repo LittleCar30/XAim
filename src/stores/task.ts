@@ -12,10 +12,12 @@ import type {
   ToolResult,
   VerifyResult,
   XaimEvent,
+  PermissionRequest,
 } from '@/types'
 
 /** 当前任务的状态与操作：由 ipc 与后端事件流共同驱动。 */
 export interface TaskState {
+  pendingPermission: PermissionRequest | null
   /** 当前任务；未运行任务时为 null。 */
   currentTask: Task | null
   /** 当前任务的步骤流水。 */
@@ -63,6 +65,7 @@ export interface TaskState {
 }
 
 export const useTaskStore = create<TaskState>()((set, get) => ({
+  pendingPermission: null,
   currentTask: null,
   steps: [],
   patches: [],
@@ -117,6 +120,12 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
     set((state) => ({ events: [...state.events, event] }))
 
     switch (event.type) {
+      case 'permissionRequested':
+        if (get().currentTask?.id === event.taskId) set({ pendingPermission: event.request })
+        break
+      case 'permissionResolved':
+        if (get().pendingPermission?.id === event.requestId) set({ pendingPermission: null })
+        break
       case 'step':
         // 事件流不含步骤行 id，以列表内位置代替；stepType=步骤名，content=状态。
         get().addStep({
@@ -190,6 +199,7 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
         const { currentTask } = get()
         if (!currentTask || currentTask.id !== event.taskId) break
         set({
+          pendingPermission: null,
           currentTask: {
             ...currentTask,
             status: event.status as TaskStatus,
@@ -201,6 +211,7 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
       case 'repair':
       case 'error':
         if (event.type === 'error' && get().currentTask?.id === event.taskId) {
+          set({ pendingPermission: null })
           const blocked = event.message.startsWith('任务受阻:')
           set({ currentTask: { ...get().currentTask!, status: blocked ? 'blocked' : 'failed', finishedAt: Date.now() } })
         }
@@ -210,6 +221,7 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
 
   reset: () =>
     set({
+      pendingPermission: null,
       currentTask: null,
       steps: [],
       patches: [],

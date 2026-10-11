@@ -42,8 +42,16 @@ pub async fn run_task(
         .effective;
     config.task_timeout_sec = runtime.task_timeout_sec.unwrap_or(1800);
     config.tool_loop.max_turns = runtime.max_turns.unwrap_or(32);
-    config.tool_loop.allow_verification = allow_verification.unwrap_or(false);
-    config.tool_loop.allow_commands = allow_commands.unwrap_or(false);
+    // Legacy booleans are no longer an authorization boundary on desktop.
+    // Every execution goes through the private project permission session.
+    let _ = (allow_verification, allow_commands);
+    config.tool_loop.permissions = Some(Arc::new(
+        crate::agent::permissions::PermissionSession::new(
+            Arc::new(state.store.clone()),
+            project_id,
+        )
+        .map_err(String::from)?,
+    ));
     config.parent_task_id = parent_task_id;
     let orchestrator =
         Orchestrator::new(app, Arc::new(state.store.clone()), config).map_err(String::from)?;

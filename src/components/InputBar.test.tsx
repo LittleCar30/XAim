@@ -10,12 +10,14 @@ import { useTaskStore } from '@/stores/task'
 import { useConversationStore } from '@/stores/conversation'
 import { patch, project, resetStores, task } from '@/test/fixtures'
 
-vi.mock('@/services/ipc', () => ({ ipc: { runTask: vi.fn(), getTask: vi.fn(), listPatches: vi.fn(), listTaskSteps: vi.fn(), listConversationTasks: vi.fn(), setPreference: vi.fn(), getFileTree: vi.fn() } }))
+vi.mock('@/services/ipc', () => ({ ipc: { runTask: vi.fn(), getTask: vi.fn(), listPatches: vi.fn(), listTaskSteps: vi.fn(), listConversationTasks: vi.fn(), setPreference: vi.fn(), getFileTree: vi.fn(), getExecutionSettings: vi.fn(), setExecutionSettings: vi.fn(), revokeExecutionGrant: vi.fn(), getPendingPermission: vi.fn(), resolveExecutionPermission: vi.fn() } }))
 const mocked = vi.mocked(ipc, true)
 
 describe('InputBar', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    mocked.getExecutionSettings.mockResolvedValue({ mode: 'ask', grants: [], gitNetwork: { mode: 'system', url: '' } })
+    mocked.getPendingPermission.mockResolvedValue(null)
     mocked.listConversationTasks.mockResolvedValue([])
     mocked.listTaskSteps.mockResolvedValue([])
     resetStores()
@@ -47,7 +49,7 @@ describe('InputBar', () => {
     expect(mocked.runTask).not.toHaveBeenCalled()
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(input).toHaveValue(''))
-    expect(mocked.runTask).toHaveBeenCalledWith(7, 'fix login', false)
+    expect(mocked.runTask).toHaveBeenCalledWith(7, 'fix login')
     expect(mocked.getTask).toHaveBeenCalledWith(42)
     expect(useTaskStore.getState().currentTask).toEqual(task)
     expect(mocked.listPatches).toHaveBeenCalledWith(42)
@@ -87,37 +89,19 @@ describe('InputBar', () => {
     expect(screen.getByRole('button', { name: '发送' })).toBeEnabled()
   })
 
-  it('consumes verification approval for only one task', async () => {
-    useProjectStore.setState({ currentProject: project })
-    mocked.runTask.mockRejectedValue('offline')
-    render(<InputBar />)
-    const checkbox = screen.getByRole('checkbox', { name: '运行项目检查' })
-    expect(checkbox).not.toBeChecked()
-    fireEvent.click(checkbox)
-    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'check code' } })
-    fireEvent.click(screen.getByRole('button', { name: '发送' }))
-    await waitFor(() => expect(screen.getByRole('button', { name: '发送' })).toBeEnabled())
-    expect(mocked.runTask).toHaveBeenLastCalledWith(project.id, 'check code', true)
-    expect(checkbox).not.toBeChecked()
-    fireEvent.click(screen.getByRole('button', { name: '发送' }))
-    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledTimes(2))
-    expect(mocked.runTask).toHaveBeenLastCalledWith(project.id, 'check code', false)
-  })
-
-  it('passes development command approval once and refreshes delivered files', async () => {
+  it('uses project permissions and refreshes delivered files without per-turn checkboxes', async () => {
     useProjectStore.setState({ currentProject: project })
     mocked.runTask.mockResolvedValue(task.id)
     mocked.getTask.mockResolvedValue({ ...task, status: 'done' })
     mocked.listPatches.mockResolvedValue([])
     render(<InputBar />)
-    const checkbox = screen.getByRole('checkbox', { name: '运行开发命令' })
-    fireEvent.click(checkbox)
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '项目执行权限' })).toBeInTheDocument()
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '克隆仓库' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue(''))
-    expect(mocked.runTask).toHaveBeenCalledWith(project.id, '克隆仓库', false, undefined, true)
+    expect(mocked.runTask).toHaveBeenCalledWith(project.id, '克隆仓库')
     expect(mocked.getFileTree).toHaveBeenCalledWith(project.id)
-    expect(checkbox).not.toBeChecked()
   })
 
   it('allows continuation after a blocked task and does not offer to apply partial edits', () => {
@@ -127,6 +111,17 @@ describe('InputBar', () => {
     expect(screen.getByText('受阻')).toBeInTheDocument()
     expect(screen.getByRole('textbox')).toBeEnabled()
     expect(screen.queryByRole('button', { name: /应用/ })).not.toBeInTheDocument()
+  })
+
+  it('retries the displayed blocked conversation with its original goal', async () => {
+    useProjectStore.setState({ currentProject: project })
+    useTaskStore.setState({ currentTask: { ...task, id: 90, prompt: 'unrelated', status: 'blocked' } })
+    const selected = { ...task, prompt: '下载这个仓库', status: 'blocked' as const }
+    useConversationStore.setState({ selectedId: task.id, record: { task: selected, patches: [], verifies: [], steps: [] } })
+    mocked.runTask.mockRejectedValue('connection still unavailable')
+    render(<InputBar />)
+    fireEvent.click(screen.getByRole('button', { name: '重试本次任务' }))
+    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledWith(project.id, '下载这个仓库', undefined, task.id))
   })
 
   it('shows a backend failure only once and preserves cancellation status', async () => {
@@ -171,7 +166,7 @@ describe('InputBar', () => {
     expect(input).toBeEnabled()
     fireEvent.change(input, { target: { value: '再增加一个文件' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
-    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledWith(project.id, '再增加一个文件', false, task.id))
+    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledWith(project.id, '再增加一个文件', undefined, task.id))
     await waitFor(() => expect(useTaskStore.getState().currentTask?.id).toBe(43))
   })
 
@@ -208,6 +203,6 @@ describe('InputBar', () => {
     render(<InputBar />)
     fireEvent.change(screen.getByRole('textbox'), { target: { value: '继续介绍' } })
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
-    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledWith(project.id, '继续介绍', false, task.id))
+    await waitFor(() => expect(mocked.runTask).toHaveBeenCalledWith(project.id, '继续介绍', undefined, task.id))
   })
 })

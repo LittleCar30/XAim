@@ -291,6 +291,8 @@ export interface XaimErrorEvent {
 
 /** 后端事件流载荷的判别联合，按 `type` 字段区分。 */
 export type XaimEvent =
+  | { type: 'permissionRequested'; taskId: number; request: PermissionRequest }
+  | { type: 'permissionResolved'; taskId: number; requestId: string; decision: PermissionDecision }
   | { type: 'modelText'; taskId: number; round: number; delta: string; status: 'started' | 'streaming' | 'complete' | 'interrupted' }
   | { type: 'modelResponse'; taskId: number; round: number; finishReason: string; durationMs: number; toolCalls: number }
   | { type: 'toolFinished'; taskId: number; callId: string; result: ToolResult }
@@ -303,6 +305,30 @@ export type XaimEvent =
   | XaimTokenEvent
   | XaimDoneEvent
   | XaimErrorEvent
+
+export type ExecutionMode = 'disabled' | 'ask' | 'project'
+export type PermissionDecision = 'once' | 'remember' | 'deny'
+export interface GitNetwork { mode: 'system' | 'direct' | 'custom'; url: string }
+export interface ExecutionScope {
+  id: string
+  tool: string
+  command: string
+  location: string
+  network: string
+  impact: string
+}
+export interface ExecutionSettings {
+  mode: ExecutionMode
+  grants: ExecutionScope[]
+  gitNetwork: GitNetwork
+}
+export interface PermissionRequest {
+  id: string
+  taskId: number
+  projectId: number
+  purpose: string
+  scope: ExecutionScope
+}
 
 // ---------------------------------------------------------------------------
 // 旧占位类型：组件 / store 仍在引用，待迁移到上面的核心领域类型后移除。

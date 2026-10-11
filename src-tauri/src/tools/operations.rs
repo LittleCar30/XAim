@@ -107,7 +107,7 @@ pub(crate) fn prepare_dependencies(args: &CommandArgs, root: &Path, project: &Pa
     Ok(())
 }
 
-fn validate(args: &CommandArgs, root: &Path) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn validate(args: &CommandArgs, root: &Path) -> Result<(PathBuf, PathBuf)> {
     if args.args.len() > 128
         || args
             .args
@@ -507,8 +507,12 @@ pub async fn clone_repository(
     cancel: &AtomicBool,
     deadline: Option<Instant>,
 ) -> Result<Value> {
+    clone_repository_with_network(args, project, cancel, deadline, &Default::default()).await
+}
+
+pub(crate) fn validate_clone_url(address: &str) -> Result<()> {
     let url =
-        reqwest::Url::parse(&args.url).map_err(|_| XaimError::Security("仓库 URL 无效".into()))?;
+        reqwest::Url::parse(address).map_err(|_| XaimError::Security("仓库 URL 无效".into()))?;
     if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -520,7 +524,19 @@ pub async fn clone_repository(
             "仅支持不含凭据的公开 HTTPS 仓库 URL".into(),
         ));
     }
-    clone_to_project(args, project, cancel, deadline).await
+    Ok(())
+}
+
+pub async fn clone_repository_with_network(
+    args: CloneArgs,
+    project: &Path,
+    cancel: &AtomicBool,
+    deadline: Option<Instant>,
+    network: &crate::config::execution::GitNetwork,
+) -> Result<Value> {
+    validate_clone_url(&args.url)?;
+    network.validate()?;
+    clone_to_project(args, project, cancel, deadline, network).await
 }
 
 async fn git(
@@ -528,13 +544,19 @@ async fn git(
     root: &Path,
     cancel: &AtomicBool,
     deadline: Option<Instant>,
+    network: &crate::config::execution::GitNetwork,
 ) -> Result<Value> {
     if cancel.load(Ordering::SeqCst) {
         return Err(XaimError::Cancelled);
     }
     // Internal Git commands bypass the model's read-only Git argument policy.
     let start = Instant::now();
-    let child = command(&crate::verify::runner::resolve_program("git"), args, root)
+    // Proxy options must precede the subcommand; this configuration is local to
+    // the process and inherited by submodule/LFS children where applicable.
+    let mut git_command = command(&crate::verify::runner::resolve_program("git"), &[], root);
+    super::git_network::configure_remote(&mut git_command, network, args);
+    let child = git_command
+        .args(args)
         .spawn()
         .map_err(|e| XaimError::Blocked(format!("无法运行 Git: {e}")))?;
     let (code, stdout, stderr) = wait(
@@ -546,7 +568,7 @@ async fn git(
     .await?;
     if code != Some(0) {
         return Err(XaimError::Blocked(format!(
-            "Git 操作失败（退出码 {code:?}）: {}",
+            "Git 操作失败（退出码 {code:?}）: {}\n如为连接错误，请检查项目执行权限中的 Git 网络设置，选择系统代理或自定义代理后重试。",
             redact(&stderr)
         )));
     }
@@ -558,6 +580,7 @@ async fn clone_to_project(
     project: &Path,
     cancel: &AtomicBool,
     deadline: Option<Instant>,
+    network: &crate::config::execution::GitNetwork,
 ) -> Result<Value> {
     let project = project.canonicalize()?;
     let target = if args.path == "." {
@@ -592,7 +615,7 @@ async fn clone_to_project(
         clone.push("--recurse-submodules".into());
     }
     clone.extend(["--".into(), args.url.clone(), git_path(&repo_dir)]);
-    git(&clone, &project, cancel, deadline).await?;
+    git(&clone, &project, cancel, deadline, network).await?;
     let mut pointers = lfs_pointers(&repo_dir)?;
     if pointers > 0 {
         git(
@@ -600,9 +623,17 @@ async fn clone_to_project(
             &repo_dir,
             cancel,
             deadline,
+            network,
         )
         .await?;
-        git(&["lfs".into(), "pull".into()], &repo_dir, cancel, deadline).await?;
+        git(
+            &["lfs".into(), "pull".into()],
+            &repo_dir,
+            cancel,
+            deadline,
+            network,
+        )
+        .await?;
         pointers = lfs_pointers(&repo_dir)?;
         if pointers > 0 {
             return Err(XaimError::Blocked(
@@ -616,6 +647,7 @@ async fn clone_to_project(
         &repo_dir,
         cancel,
         deadline,
+        network,
     )
     .await?;
     if args.recursive
@@ -782,6 +814,47 @@ fn lfs_pointers(root: &Path) -> Result<usize> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[tokio::test]
+    #[ignore = "Requires public GitHub access through the user's system proxy"]
+    async fn online_clone_uses_system_proxy_and_delivers_complete_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let args = CloneArgs {
+            url: "https://github.com/nyoungo/dsfree2api.git".into(),
+            path: "repo".into(),
+            recursive: false,
+        };
+        let approval = crate::agent::permissions::scope(
+            "clone_repository",
+            &serde_json::json!({"url":args.url,"path":args.path}),
+            root.path(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(approval.tool, "clone_repository");
+        let result = clone_repository(
+            args,
+            root.path(),
+            &AtomicBool::new(false),
+            Some(Instant::now() + Duration::from_secs(60)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["delivered"], true);
+        assert!(result["head"].as_str().is_some_and(|head| !head.is_empty()));
+        assert!(root.path().join("repo/.git").is_dir());
+        assert!(root.path().join("repo/README.md").is_file());
+        assert!(root.path().join("repo/go.mod").is_file());
+    }
+
+    async fn clone_to_project(
+        args: CloneArgs,
+        project: &Path,
+        cancel: &AtomicBool,
+        deadline: Option<Instant>,
+    ) -> Result<Value> {
+        super::clone_to_project(args, project, cancel, deadline, &Default::default()).await
+    }
 
     fn cmd(program: &str, args: &[&str]) -> CommandArgs {
         CommandArgs {

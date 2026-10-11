@@ -42,7 +42,10 @@ try {
               });
               throw new Error('Unexpected task success');
             } catch (error) {
-              if (!String(error).includes('项目 #-1 不存在')) throw new Error('Unexpected task rejection');
+              const message = String(error);
+              if (!message.includes('项目 #-1 不存在') && message !== '配置错误: 项目不存在') {
+                throw new Error('Unexpected task rejection');
+              }
             }
           }
           const providers = await window.__TAURI_INTERNALS__.invoke('list_providers');

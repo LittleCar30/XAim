@@ -768,28 +768,39 @@ async fn rename_new_when_ready(
     cancel: &AtomicBool,
     deadline: Option<Instant>,
 ) -> Result<()> {
-    #[cfg(windows)]
-    let started = Instant::now();
-    loop {
+    #[cfg(not(windows))]
+    {
         if cancel.load(Ordering::SeqCst) {
             return Err(XaimError::Cancelled);
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(XaimError::Timeout("交付仓库目录超过执行时限".into()));
         }
-        match rename_new(source, target) {
-            Ok(()) => return Ok(()),
-            // Windows can briefly retain directory handles after Git's helper
-            // processes exit. Every retry still uses the atomic create-only API.
-            #[cfg(windows)]
-            Err(error)
-                if matches!(error.raw_os_error(), Some(5 | 32 | 33))
-                    && !target.exists()
-                    && started.elapsed() < Duration::from_secs(2) =>
-            {
-                tokio::time::sleep(Duration::from_millis(25)).await;
+        rename_new(source, target).map_err(XaimError::Io)
+    }
+    #[cfg(windows)]
+    {
+        let started = Instant::now();
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(XaimError::Cancelled);
             }
-            Err(error) => return Err(XaimError::Io(error)),
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Err(XaimError::Timeout("交付仓库目录超过执行时限".into()));
+            }
+            match rename_new(source, target) {
+                Ok(()) => return Ok(()),
+                // Windows can briefly retain directory handles after Git's helper
+                // processes exit. Every retry still uses the atomic create-only API.
+                Err(error)
+                    if matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                        && !target.exists()
+                        && started.elapsed() < Duration::from_secs(2) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => return Err(XaimError::Io(error)),
+            }
         }
     }
 }

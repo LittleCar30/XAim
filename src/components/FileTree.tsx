@@ -203,7 +203,7 @@ export default function FileTree() {
   const { selectedId, record } = useConversationStore()
   const task = selectedId !== null ? record?.task : liveTask
   const patches = useMemo(() => selectedId !== null ? record?.patches ?? [] : livePatches, [selectedId, record, livePatches])
-  const pendingPaths = useMemo(() => new Set(task && ['waitingConfirm', 'failed'].includes(task.status)
+  const pendingPaths = useMemo(() => new Set(task && ['waitingConfirm', 'failed', 'blocked'].includes(task.status)
     ? patches.filter((p) => !p.applied && !p.diff.includes('+++ /dev/null')).map((p) => p.filePath) : []), [patches, task])
   const fileTree = useMemo(() => {
     if (!projectTree || pendingPaths.size === 0) return projectTree

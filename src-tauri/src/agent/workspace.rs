@@ -228,6 +228,36 @@ impl TaskWorkspace {
         &self.directory
     }
 
+    /// A delivered repository becomes the new baseline, not a text patch.
+    /// Call only before any candidate edits; Git metadata stays in the original.
+    pub fn adopt_import(&mut self, source: &Path) -> Result<()> {
+        if !self.changes()?.files.is_empty() {
+            return Err(XaimError::Blocked(
+                "已有待审阅编辑，请在新一轮中克隆仓库".into(),
+            ));
+        }
+        let baseline = collect(source)?;
+        // Prepare every file before touching the live candidate. Import failure
+        // must not leave a partially copied repository masquerading as edits.
+        let stage = tempfile::tempdir_in(self.directory.parent().unwrap())?;
+        let staged = stage.path().join("files");
+        fs::create_dir(&staged)?;
+        for (path, content) in &baseline {
+            let target = safe_path(&staged, path)?;
+            fs::create_dir_all(target.parent().unwrap())?;
+            fs::write(&target, content)?;
+            fs::set_permissions(&target, fs::metadata(source.join(path))?.permissions())?;
+        }
+        let backup = stage.path().join("previous");
+        fs::rename(&self.directory, &backup)?;
+        if let Err(error) = fs::rename(&staged, &self.directory) {
+            fs::rename(&backup, &self.directory)?;
+            return Err(error.into());
+        }
+        self.baseline = baseline;
+        Ok(())
+    }
+
     pub fn source_stats(&self) -> (usize, u64) {
         (
             self.baseline.len(),
@@ -244,6 +274,18 @@ impl TaskWorkspace {
             .filter(|path| self.baseline.get(*path) != current.get(*path))
             .cloned()
             .collect())
+    }
+
+    pub fn source_fingerprint(&self) -> Result<blake3::Hash> {
+        let current = collect(self.root())?;
+        let mut hash = blake3::Hasher::new();
+        for (path, bytes) in current {
+            hash.update(&(path.len() as u64).to_le_bytes());
+            hash.update(path.as_bytes());
+            hash.update(&(bytes.len() as u64).to_le_bytes());
+            hash.update(&bytes);
+        }
+        Ok(hash.finalize())
     }
 
     pub fn changes(&self) -> Result<ChangeSet> {

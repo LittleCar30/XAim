@@ -17,7 +17,7 @@ export default function ConversationSidebar({ onNavigate }: { onNavigate?: () =>
   const currentTask = useTaskStore((s) => s.currentTask)
   const selectedId = useConversationStore((s) => s.selectedId)
   const select = useConversationStore((s) => s.select)
-  const busy = currentTask !== null && !['idle', 'waitingConfirm', 'done', 'applied', 'failed', 'cancelled', 'rolledBack'].includes(currentTask.status)
+  const busy = currentTask !== null && !['idle', 'waitingConfirm', 'done', 'applied', 'failed', 'blocked', 'cancelled', 'rolledBack'].includes(currentTask.status)
   const refresh = useCallback(async () => {
     if (!project) return
     const version = ++refreshVersion.current

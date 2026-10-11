@@ -29,7 +29,7 @@ export default function FilePreview({ path, onClose }: FilePreviewProps) {
   const { selectedId, record } = useConversationStore()
   const task = selectedId !== null ? record?.task : live
   const patches = selectedId !== null ? record?.patches ?? [] : livePatches
-  const pendingTaskId = task && ['waitingConfirm', 'failed', 'cancelled'].includes(task.status)
+  const pendingTaskId = task && ['waitingConfirm', 'failed', 'blocked', 'cancelled'].includes(task.status)
     && patches.some((p) => !p.applied && p.filePath === path) ? task.id : null
   const [content, setContent] = useState<string | null>(null)
   const [truncated, setTruncated] = useState(false)

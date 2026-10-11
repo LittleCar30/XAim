@@ -37,6 +37,152 @@ pub struct TaskSnapshot {
     pub reported_pending: bool,
     pub verification: Vec<Value>,
     pub verified_revision: Option<usize>,
+    #[serde(default)]
+    pub operations: Vec<Value>,
+    #[serde(default)]
+    pub required_operation: Option<String>,
+    #[serde(default)]
+    pub required_operations: Vec<String>,
+}
+
+fn operation_goals(goal: &str) -> Vec<String> {
+    let lower = goal.to_ascii_lowercase();
+    let discussion = [
+        "解释",
+        "说明",
+        "介绍",
+        "告诉我",
+        "如何",
+        "怎么",
+        "explain ",
+        "describe ",
+        "how ",
+    ]
+    .iter()
+    .any(|w| lower.trim_start_matches('请').starts_with(w));
+    if (discussion || is_analysis_goal(goal))
+        && !["然后", "并运行", "并执行", "then "]
+            .iter()
+            .any(|w| lower.contains(w))
+    {
+        return vec![];
+    }
+    // Implementing an operation tool is a coding task, not an instruction to use it.
+    if [
+        "实现",
+        "编写",
+        "功能",
+        "按钮",
+        "implement",
+        "write a",
+        "create a",
+        "生成脚本",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
+    {
+        return vec![];
+    }
+    let mut goals = Vec::new();
+    if goal.contains("克隆") || lower.starts_with("clone ") || lower.starts_with("git clone ") {
+        goals.push("clone_repository".into());
+    }
+    for (kind, words) in [
+        (
+            "install",
+            vec!["安装依赖", "安装项目依赖", "install dependencies"],
+        ),
+        (
+            "test",
+            vec!["运行测试", "执行测试", "run tests", "run the tests"],
+        ),
+        (
+            "build",
+            vec!["构建项目", "build project", "build the project"],
+        ),
+        (
+            "start_process",
+            vec!["启动", "start server", "start the server"],
+        ),
+        ("run_command", vec!["执行命令", "运行脚本", "execute "]),
+    ] {
+        if words.iter().any(|word| lower.contains(word)) {
+            goals.push(kind.into());
+        }
+    }
+    goals
+}
+
+fn matches_operation(kind: &str, evidence: &Value) -> bool {
+    let tool = evidence["tool"].as_str().unwrap_or_default();
+    if kind == "clone_repository" {
+        return tool == kind;
+    }
+    if kind == "start_process" {
+        return matches!(tool, "read_process" | "stop_process");
+    }
+    if tool == "run_verify" {
+        return matches!(kind, "test" | "build")
+            && evidence["result"].as_array().is_some_and(|checks| {
+                checks
+                    .iter()
+                    .any(|c| c["kind"].as_str().is_some_and(|name| name.contains(kind)))
+            });
+    }
+    if tool != "run_command" {
+        return false;
+    }
+    if kind == "run_command" {
+        return true;
+    }
+    let result = &evidence["result"];
+    let program = result["program"].as_str().unwrap_or_default();
+    let args: Vec<&str> = result["args"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    match kind {
+        "install" => {
+            (matches!(program, "npm" | "pnpm" | "yarn")
+                && args
+                    .first()
+                    .is_some_and(|a| matches!(*a, "install" | "ci" | "add")))
+                || (program.contains("python")
+                    && args.windows(3).any(|w| w == ["-m", "pip", "install"]))
+                || (program == "cargo" && args.first() == Some(&"fetch"))
+        }
+        "test" | "build" => {
+            let script = if args
+                .first()
+                .is_some_and(|a| matches!(*a, "run" | "run-script"))
+            {
+                args.get(1)
+            } else {
+                args.first()
+            };
+            (matches!(program, "npm" | "pnpm" | "yarn" | "cargo" | "go")
+                && script.is_some_and(|s| *s == kind || s.starts_with(&format!("{kind}:"))))
+                || (kind == "test"
+                    && (program == "pytest"
+                        || program.contains("python")
+                            && args
+                                .windows(2)
+                                .any(|w| w == ["-m", "pytest"] || w == ["-m", "unittest"])
+                        || matches!(
+                            program,
+                            "node" | "python" | "python3" | "sh" | "bash" | "powershell" | "pwsh"
+                        ) && args.iter().any(|a| {
+                            a.ends_with("test.js")
+                                || a.ends_with("test.py")
+                                || a.ends_with("test.sh")
+                                || a.ends_with("test.ps1")
+                        })))
+                || (kind == "build" && program == "make")
+        }
+        _ => false,
+    }
 }
 
 fn is_analysis_goal(goal: &str) -> bool {
@@ -107,9 +253,62 @@ fn is_analysis_goal(goal: &str) -> bool {
 }
 
 impl TaskSnapshot {
+    pub fn operation_satisfied(&self) -> bool {
+        if !self.required_operations.is_empty() {
+            return self.required_operations.iter().all(|kind| {
+                if kind == "start_process" {
+                    let Some(started) = self
+                        .operations
+                        .iter()
+                        .rev()
+                        .find(|v| v["tool"] == "start_process")
+                    else {
+                        return false;
+                    };
+                    return started["success"] == true
+                        && self
+                            .operations
+                            .iter()
+                            .rev()
+                            .find(|v| {
+                                matches!(v["tool"].as_str(), Some("read_process" | "stop_process"))
+                                    && v["result"]["process_id"] == started["result"]["process_id"]
+                            })
+                            .is_some_and(|v| {
+                                v["success"] == true && v["result"]["status"]["state"] == "running"
+                            });
+                }
+                self.operations
+                    .iter()
+                    .rev()
+                    .find(|v| matches_operation(kind, v))
+                    .is_some_and(|v| {
+                        v["success"] == true
+                            && (kind != "start_process"
+                                || v["result"]["status"]["state"] == "running")
+                    })
+            });
+        }
+        self.task_kind != "operation"
+            || self
+                .operations
+                .iter()
+                .rev()
+                .find(|v| matches!(v["tool"].as_str(), Some("clone_repository" | "run_command")))
+                .is_some_and(|v| v["success"] == true)
+    }
+
+    pub fn needs_command_permission(&self, allow_verification: bool) -> bool {
+        self.required_operations
+            .iter()
+            .any(|kind| !allow_verification || !matches!(kind.as_str(), "test" | "build"))
+    }
+
     pub fn new(goal: &str) -> Self {
         Self {
-            task_kind: if is_analysis_goal(goal) {
+            task_kind: if !operation_goals(goal).is_empty() {
+                "operation".into()
+            } else if is_analysis_goal(goal) {
                 "analysis".into()
             } else {
                 "coding".into()
@@ -132,6 +331,9 @@ impl TaskSnapshot {
             reported_pending: false,
             verification: vec![],
             verified_revision: None,
+            operations: vec![],
+            required_operation: operation_goals(goal).first().cloned(),
+            required_operations: operation_goals(goal),
         }
     }
 
@@ -146,7 +348,7 @@ impl TaskSnapshot {
         if success {
             let key = format!("{name}{}", path.map_or(String::new(), |p| format!(":{p}")));
             *self.completed_operations.entry(key).or_default() += 1;
-            if changed && matches!(name, "create_file" | "append_file" | "edit_file") {
+            if changed {
                 self.revision += 1;
                 self.ready_for_review = false;
                 self.verified_revision = None;
@@ -181,7 +383,10 @@ impl TaskSnapshot {
                 .chain(&report.pending)
                 .any(|s| s.chars().count() > 2048)
             || report.summary.chars().count() > 32_000
-            || !matches!(report.task_kind.as_str(), "" | "analysis" | "coding")
+            || !matches!(
+                report.task_kind.as_str(),
+                "" | "analysis" | "coding" | "operation"
+            )
             || (report.ready_for_review
                 && (!report.pending.is_empty()
                     || report.completed.is_empty()
@@ -193,7 +398,7 @@ impl TaskSnapshot {
         }
         self.reported_completed = report.completed;
         self.reported_pending = !report.pending.is_empty();
-        if !report.task_kind.is_empty() {
+        if !report.task_kind.is_empty() && self.required_operation.is_none() {
             self.task_kind = report.task_kind;
         }
         self.pending = report.pending;
@@ -259,26 +464,28 @@ impl TaskSnapshot {
         reason: &str,
     ) -> Result<String> {
         let changes = self.save(workspace, record)?;
-        let verification_status = if self.task_kind == "analysis" && self.revision == 0 {
-            "not_required"
-        } else if self.verified_revision != Some(self.revision) {
-            "not_run"
-        } else if self.verification.iter().any(|r| r["status"] == "failed") {
-            "failed"
-        } else if self.verification.is_empty()
-            || self
-                .verification
-                .iter()
-                .any(|r| r["status"] == "unavailable")
-        {
-            "unavailable"
-        } else {
-            "passed"
-        };
+        let verification_status =
+            if matches!(self.task_kind.as_str(), "analysis" | "operation") && self.revision == 0 {
+                "not_required"
+            } else if self.verified_revision != Some(self.revision) {
+                "not_run"
+            } else if self.verification.iter().any(|r| r["status"] == "failed") {
+                "failed"
+            } else if self.verification.is_empty()
+                || self
+                    .verification
+                    .iter()
+                    .any(|r| r["status"] == "unavailable")
+            {
+                "unavailable"
+            } else {
+                "passed"
+            };
         let report = json!({"reason":reason,"phase":self.phase,"files":self.files,
             "diff":changes.diff(),"verificationStatus":verification_status,
             "verification":self.verification,"pending":self.pending,
-            "completionConfirmed":self.ready_for_review});
+            "operations":self.operations,
+            "completionConfirmed":self.ready_for_review && self.operation_satisfied()});
         store::cache::set_cache(
             &record.store.conn(),
             &format!("task:{}:report", record.task_id),
@@ -406,6 +613,50 @@ pub fn forecast(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn operation_requirements_need_matching_latest_evidence() {
+        let mut snapshot = TaskSnapshot::new("克隆仓库，安装依赖并运行测试，然后启动服务");
+        assert_eq!(
+            snapshot.required_operations,
+            ["clone_repository", "install", "test", "start_process"]
+        );
+        snapshot.operations.push(json!({"tool":"run_command","success":true,"result":{"program":"node","args":["--version"]}}));
+        assert!(!snapshot.operation_satisfied());
+        snapshot.operations.extend([
+            json!({"tool":"clone_repository","success":true}),
+            json!({"tool":"run_command","success":true,"result":{"program":"npm","args":["ci"]}}),
+            json!({"tool":"run_command","success":true,"result":{"program":"npm","args":["test"]}}),
+            json!({"tool":"start_process","success":true,"result":{"process_id":"service"}}),
+        ]);
+        assert!(!snapshot.operation_satisfied());
+        snapshot.operations.push(
+            json!({"tool":"read_process","success":true,"result":{"process_id":"service","status":{"state":"running"}}}),
+        );
+        assert!(snapshot.operation_satisfied());
+        snapshot.operations.push(json!({"tool":"run_command","success":false,"result":{"program":"npm","args":["test"]}}));
+        assert!(!snapshot.operation_satisfied());
+    }
+
+    #[test]
+    fn discussing_operations_does_not_require_execution_permission() {
+        for goal in [
+            "解释如何克隆仓库",
+            "介绍如何安装依赖和启动服务",
+            "实现克隆工具",
+            "explain how to run tests",
+            "解释如何构建项目",
+        ] {
+            assert!(
+                TaskSnapshot::new(goal).required_operations.is_empty(),
+                "{goal}"
+            );
+        }
+        assert!(!TaskSnapshot::new("运行测试").needs_command_permission(true));
+        assert!(TaskSnapshot::new("安装依赖并运行测试").needs_command_permission(true));
+        assert!(!TaskSnapshot::new("使用工具克隆仓库")
+            .required_operations
+            .is_empty());
+    }
     use super::*;
     use crate::model::provider::{FunctionCall, ToolCall};
 

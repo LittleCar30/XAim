@@ -696,7 +696,7 @@ impl Orchestrator {
         )
         .await?;
         let snapshot_started = Instant::now();
-        let workspace = self
+        let mut workspace = self
             .run_step(
                 task_id,
                 &mut status,
@@ -756,7 +756,7 @@ impl Orchestrator {
                         prompt,
                         &model,
                         self.provider.as_ref(),
-                        &workspace,
+                        &mut workspace,
                         &isolated_ctx,
                         &loop_config,
                         self.cancel_flag.clone(),
@@ -926,7 +926,7 @@ impl Orchestrator {
         }
         let inherited = if matches!(
             parent.status,
-            TaskStatus::WaitingConfirm | TaskStatus::Failed
+            TaskStatus::WaitingConfirm | TaskStatus::Failed | TaskStatus::Blocked
         ) {
             let saved = store::cache::get_cache(&conn, &format!("task:{parent_id}:changes"))?.or(
                 store::cache::get_cache(&conn, &format!("task:{parent_id}:partial_changes"))?,
@@ -1057,6 +1057,8 @@ impl Orchestrator {
         let cancelled = matches!(error, XaimError::Cancelled);
         let terminal = if cancelled {
             TaskStatus::Cancelled
+        } else if matches!(error, XaimError::Blocked(_)) {
+            TaskStatus::Blocked
         } else {
             TaskStatus::Failed
         };
@@ -1163,6 +1165,7 @@ fn status_label(status: &TaskStatus) -> &'static str {
     match status {
         TaskStatus::Done => "done",
         TaskStatus::Failed => "failed",
+        TaskStatus::Blocked => "blocked",
         TaskStatus::Cancelled => "cancelled",
         TaskStatus::RolledBack => "rolledBack",
         _ => "unknown",

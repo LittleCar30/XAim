@@ -12,7 +12,7 @@ use xaim_lib::state::AppState;
 
 fn main() {
     init_logging();
-    tauri::Builder::default()
+    let application = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -68,8 +68,13 @@ fn main() {
             xaim_lib::config::runtime::get_runtime_settings,
             xaim_lib::config::runtime::set_runtime_settings,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running tauri application");
+    application.run(|_, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            xaim_lib::tools::operations::shutdown();
+        }
+    });
 }
 
 /// 初始化日志：默认 info 级输出到终端，可用 `RUST_LOG` 覆盖

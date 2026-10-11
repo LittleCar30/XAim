@@ -10,7 +10,7 @@ import { useTaskStore } from '@/stores/task'
 import { useConversationStore } from '@/stores/conversation'
 import { patch, project, resetStores, task } from '@/test/fixtures'
 
-vi.mock('@/services/ipc', () => ({ ipc: { runTask: vi.fn(), getTask: vi.fn(), listPatches: vi.fn(), listTaskSteps: vi.fn(), listConversationTasks: vi.fn(), setPreference: vi.fn() } }))
+vi.mock('@/services/ipc', () => ({ ipc: { runTask: vi.fn(), getTask: vi.fn(), listPatches: vi.fn(), listTaskSteps: vi.fn(), listConversationTasks: vi.fn(), setPreference: vi.fn(), getFileTree: vi.fn() } }))
 const mocked = vi.mocked(ipc, true)
 
 describe('InputBar', () => {
@@ -102,6 +102,31 @@ describe('InputBar', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送' }))
     await waitFor(() => expect(mocked.runTask).toHaveBeenCalledTimes(2))
     expect(mocked.runTask).toHaveBeenLastCalledWith(project.id, 'check code', false)
+  })
+
+  it('passes development command approval once and refreshes delivered files', async () => {
+    useProjectStore.setState({ currentProject: project })
+    mocked.runTask.mockResolvedValue(task.id)
+    mocked.getTask.mockResolvedValue({ ...task, status: 'done' })
+    mocked.listPatches.mockResolvedValue([])
+    render(<InputBar />)
+    const checkbox = screen.getByRole('checkbox', { name: '运行开发命令' })
+    fireEvent.click(checkbox)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '克隆仓库' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue(''))
+    expect(mocked.runTask).toHaveBeenCalledWith(project.id, '克隆仓库', false, undefined, true)
+    expect(mocked.getFileTree).toHaveBeenCalledWith(project.id)
+    expect(checkbox).not.toBeChecked()
+  })
+
+  it('allows continuation after a blocked task and does not offer to apply partial edits', () => {
+    useProjectStore.setState({ currentProject: project })
+    useTaskStore.setState({ currentTask: { ...task, status: 'blocked' }, patches: [patch] })
+    render(<><TaskPanel /><InputBar /></>)
+    expect(screen.getByText('受阻')).toBeInTheDocument()
+    expect(screen.getByRole('textbox')).toBeEnabled()
+    expect(screen.queryByRole('button', { name: /应用/ })).not.toBeInTheDocument()
   })
 
   it('shows a backend failure only once and preserves cancellation status', async () => {

@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 任务生命周期状态（共 15 个），JSON 取值形如 "idle"、"applyingPatch"、"waitingConfirm"。
+/// 任务生命周期状态（共 16 个），JSON 取值形如 "idle"、"applyingPatch"、"waitingConfirm"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskStatus {
@@ -25,6 +25,7 @@ pub enum TaskStatus {
     Applied,
     Done,
     Failed,
+    Blocked,
     RolledBack,
     Cancelled,
 }
@@ -265,7 +266,7 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
-    fn task_status_has_15_camel_case_variants() {
+    fn task_status_has_16_camel_case_variants() {
         let cases = [
             (TaskStatus::Idle, "idle"),
             (TaskStatus::Parsing, "parsing"),
@@ -280,10 +281,11 @@ mod tests {
             (TaskStatus::Applied, "applied"),
             (TaskStatus::Done, "done"),
             (TaskStatus::Failed, "failed"),
+            (TaskStatus::Blocked, "blocked"),
             (TaskStatus::RolledBack, "rolledBack"),
             (TaskStatus::Cancelled, "cancelled"),
         ];
-        assert_eq!(cases.len(), 15);
+        assert_eq!(cases.len(), 16);
         for (status, expected) in cases {
             assert_eq!(json!(status), json!(expected));
             let back: TaskStatus = serde_json::from_value(json!(expected)).unwrap();

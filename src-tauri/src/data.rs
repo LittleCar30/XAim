@@ -485,7 +485,7 @@ pub fn recover_interrupted_tasks(store: &Store) -> Result<usize> {
     let conn = store.conn();
     let tx = conn.unchecked_transaction()?;
     let ids: Vec<i64> = {
-        let mut query = tx.prepare("SELECT id FROM tasks WHERE status NOT IN ('done','failed','cancelled','rolledBack','waitingConfirm','applied')")?;
+        let mut query = tx.prepare("SELECT id FROM tasks WHERE status NOT IN ('done','failed','blocked','cancelled','rolledBack','waitingConfirm','applied')")?;
         let rows = query
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -669,6 +669,7 @@ mod tests {
         let statuses = [
             TaskStatus::Done,
             TaskStatus::WaitingConfirm,
+            TaskStatus::Blocked,
             TaskStatus::Generating,
             TaskStatus::Cancelled,
         ];
@@ -689,10 +690,11 @@ mod tests {
         set_retention(&store, 0).unwrap();
         assert_eq!(cleanup(&paths, &store).unwrap(), 0);
         set_retention(&store, 30).unwrap();
-        assert_eq!(cleanup(&paths, &store).unwrap(), 2);
+        assert_eq!(cleanup(&paths, &store).unwrap(), 3);
         assert!(task_workspace(&paths, ids[0]).is_err());
         assert!(task_workspace(&paths, ids[1]).is_ok());
-        assert!(task_workspace(&paths, ids[2]).is_ok());
+        assert!(task_workspace(&paths, ids[2]).is_err());
+        assert!(task_workspace(&paths, ids[3]).is_ok());
         assert!(store::task::get_task(&store.conn(), ids[0])
             .unwrap()
             .is_some());

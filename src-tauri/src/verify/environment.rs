@@ -90,8 +90,50 @@ fn copy_dependencies(
     Ok(())
 }
 
+/// Commands share the candidate source but need matching existing dependencies.
+pub(crate) fn prepare_command_dependencies(candidate: &Path, original: &Path) -> Result<()> {
+    if candidate.join("node_modules").exists() || !original.join("node_modules").is_dir() {
+        return Ok(());
+    }
+    if !same_manifests(
+        candidate,
+        original,
+        &[
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+            "pnpm-workspace.yaml",
+        ],
+    ) {
+        return Ok(());
+    }
+    let stage = tempfile::tempdir_in(candidate)?;
+    copy_dependencies(
+        &original.join("node_modules"),
+        &stage.path().join("node_modules"),
+        &mut 0,
+        &mut 0,
+        &original.canonicalize()?,
+        0,
+    )?;
+    fs::rename(
+        stage.path().join("node_modules"),
+        candidate.join("node_modules"),
+    )?;
+    Ok(())
+}
+
 impl VerificationEnvironment {
     pub fn prepare(candidate: &Path, original: Option<&Path>) -> Result<Self> {
+        // Dependencies installed by authorized commands in this task take
+        // precedence over stale dependencies in the original project.
+        let original = original.or_else(|| {
+            (candidate.join("node_modules").is_dir()
+                || candidate.join(".venv").is_dir()
+                || candidate.join("venv").is_dir())
+            .then_some(candidate)
+        });
         let started = Instant::now();
         let workspace = TaskWorkspace::snapshot(candidate)?;
         let (source_files, source_bytes) = workspace.source_stats();
@@ -107,6 +149,12 @@ impl VerificationEnvironment {
         let mut python_status = None;
         let mut python = None;
         if let Some(original) = original {
+            let source = original;
+            let original = if candidate.join("node_modules").is_dir() {
+                candidate
+            } else {
+                source
+            };
             if candidate.join("package.json").is_file() {
                 if !same_manifests(
                     candidate,
@@ -151,6 +199,11 @@ impl VerificationEnvironment {
                     }
                 }
             }
+            let original = if candidate.join(".venv").is_dir() || candidate.join("venv").is_dir() {
+                candidate
+            } else {
+                source
+            };
             if same_manifests(
                 candidate,
                 original,
@@ -229,6 +282,42 @@ impl VerificationEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_and_python_choose_dependency_sources_independently() {
+        let original = tempfile::tempdir().unwrap();
+        fs::write(original.path().join("package.json"), "{}").unwrap();
+        fs::create_dir(original.path().join("node_modules")).unwrap();
+        fs::write(original.path().join("node_modules/dependency"), "original").unwrap();
+        let candidate = TaskWorkspace::snapshot(original.path()).unwrap();
+        let python = candidate.root().join(if cfg!(windows) {
+            ".venv/Scripts/python.exe"
+        } else {
+            ".venv/bin/python"
+        });
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(&python, "fixture").unwrap();
+        let env =
+            VerificationEnvironment::prepare(candidate.root(), Some(original.path())).unwrap();
+        assert_eq!(
+            fs::read_to_string(env.root().join("node_modules/dependency")).unwrap(),
+            "original"
+        );
+        assert_eq!(env.python.as_deref(), Some(python.as_path()));
+        fs::create_dir(candidate.root().join("node_modules")).unwrap();
+        fs::write(
+            candidate.root().join("node_modules/dependency"),
+            "installed",
+        )
+        .unwrap();
+        let env =
+            VerificationEnvironment::prepare(candidate.root(), Some(original.path())).unwrap();
+        assert_eq!(
+            fs::read_to_string(env.root().join("node_modules/dependency")).unwrap(),
+            "installed"
+        );
+        assert_eq!(env.python.as_deref(), Some(python.as_path()));
+    }
     #[test]
     fn dependencies_are_copied_only_for_matching_manifests_and_checks_are_isolated() {
         let original = tempfile::tempdir().unwrap();

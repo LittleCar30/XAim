@@ -3,5 +3,5 @@
 pub mod detect;
 pub mod environment;
 pub mod parser;
-mod process;
+pub(crate) mod process;
 pub mod runner;

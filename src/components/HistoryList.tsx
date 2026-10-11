@@ -18,7 +18,7 @@ const ROLLBACK_ABLE: TaskStatus[] = ['applied', 'done']
 
 /** 任务是否已到终态（用于触发历史刷新）。 */
 function isTerminal(status: TaskStatus): boolean {
-  return ['applied', 'done', 'failed', 'rolledBack', 'cancelled'].includes(status)
+  return ['applied', 'done', 'failed', 'blocked', 'rolledBack', 'cancelled'].includes(status)
 }
 
 function ChevronIcon({ open }: { open: boolean }) {

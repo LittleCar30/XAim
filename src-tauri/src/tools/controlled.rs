@@ -28,7 +28,7 @@ pub fn definitions() -> Vec<Value> {
             json!({"completed":{"type":"array","items":{"type":"string"},"maxItems":16},
                 "pending":{"type":"array","items":{"type":"string"},"maxItems":16},
                 "ready_for_review":{"type":"boolean"},"summary":{"type":"string","maxLength":32000},
-                "task_kind":{"type":"string","enum":["analysis","coding"]}}),
+                "task_kind":{"type":"string","enum":["analysis","coding","operation"]}}),
             vec!["completed", "pending", "ready_for_review", "summary"],
         ),
         schema(

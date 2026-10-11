@@ -15,6 +15,7 @@ export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   applied: '已应用',
   done: '已完成',
   failed: '失败',
+  blocked: '受阻',
   rolledBack: '已回滚',
   cancelled: '已取消',
 }
@@ -22,7 +23,7 @@ export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
 /** 状态徽标配色：进行中蓝、成功绿、失败红、空闲灰。 */
 export function taskStatusBadgeCls(status: TaskStatus): string {
   if (status === 'applied' || status === 'done') return 'bg-emerald-500/15 text-emerald-400'
-  if (status === 'failed' || status === 'cancelled' || status === 'rolledBack')
+  if (status === 'failed' || status === 'blocked' || status === 'cancelled' || status === 'rolledBack')
     return 'bg-rose-500/15 text-rose-400'
   if (status === 'idle') return 'bg-slate-500/15 text-slate-400'
   return 'bg-sky-500/15 text-sky-400'

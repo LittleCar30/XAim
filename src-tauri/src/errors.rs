@@ -35,6 +35,9 @@ pub enum XaimError {
     /// 任务被用户取消，属正常控制流。
     #[error("任务已取消")]
     Cancelled,
+    /// A required capability, authorization or environment is unavailable.
+    #[error("任务受阻: {0}")]
+    Blocked(String),
     /// 操作超出时限。
     #[error("操作超时: {0}")]
     Timeout(String),

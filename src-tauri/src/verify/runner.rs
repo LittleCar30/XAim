@@ -73,7 +73,7 @@ fn effective_timeout(timeout_sec: u64) -> u64 {
 /// 命中 `.cmd`/`.bat` 垫片才能被直接 spawn；未命中时原样返回，由系统
 /// 按 PATH 兜底。非 Windows 交由系统解析即可。
 #[cfg(windows)]
-fn resolve_program(program: &str) -> PathBuf {
+pub(crate) fn resolve_program(program: &str) -> PathBuf {
     if program.contains('\\') || program.contains('/') || Path::new(program).extension().is_some() {
         return PathBuf::from(program);
     }
@@ -95,7 +95,7 @@ fn resolve_program(program: &str) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn resolve_program(program: &str) -> PathBuf {
+pub(crate) fn resolve_program(program: &str) -> PathBuf {
     PathBuf::from(program)
 }
 

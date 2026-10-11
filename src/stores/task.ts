@@ -201,7 +201,8 @@ export const useTaskStore = create<TaskState>()((set, get) => ({
       case 'repair':
       case 'error':
         if (event.type === 'error' && get().currentTask?.id === event.taskId) {
-          set({ currentTask: { ...get().currentTask!, status: 'failed', finishedAt: Date.now() } })
+          const blocked = event.message.startsWith('任务受阻:')
+          set({ currentTask: { ...get().currentTask!, status: blocked ? 'blocked' : 'failed', finishedAt: Date.now() } })
         }
         break
     }

@@ -8,8 +8,8 @@
 //!      → ApplyingPatch → Verifying → WaitingConfirm → Applied → Done
 //!                          ↕ Repairing（验证失败时进入修复循环）
 //! 无文件变更的完成任务：Verifying → Done（无需应用补丁）
-//! 任意非终态 → Failed | Cancelled | RolledBack
-//! 终态：Done、Failed、RolledBack、Cancelled（无出边）
+//! 任意非终态 → Failed | Blocked | Cancelled | RolledBack
+//! 终态：Done、Failed、Blocked、RolledBack、Cancelled（无出边）
 //! ```
 
 pub use crate::types::TaskStatus;
@@ -19,14 +19,17 @@ impl TaskStatus {
     ///
     /// 规则：
     /// - 终态不接受任何转移；
-    /// - 任意非终态可以直接进入 Failed、Cancelled 或 RolledBack；
+    /// - 任意非终态可以直接进入 Failed、Blocked、Cancelled 或 RolledBack；
     /// - 其余仅允许主流程中的相邻状态（见模块文档）。
     pub fn can_transition_to(&self, next: &TaskStatus) -> bool {
         if self.is_terminal() {
             return false;
         }
         match next {
-            TaskStatus::Failed | TaskStatus::Cancelled | TaskStatus::RolledBack => true,
+            TaskStatus::Failed
+            | TaskStatus::Blocked
+            | TaskStatus::Cancelled
+            | TaskStatus::RolledBack => true,
             _ => self.next_in_flow().contains(next),
         }
     }
@@ -35,7 +38,11 @@ impl TaskStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            TaskStatus::Done | TaskStatus::Failed | TaskStatus::RolledBack | TaskStatus::Cancelled
+            TaskStatus::Done
+                | TaskStatus::Failed
+                | TaskStatus::Blocked
+                | TaskStatus::RolledBack
+                | TaskStatus::Cancelled
         )
     }
 
@@ -60,6 +67,7 @@ impl TaskStatus {
             TaskStatus::Applied => &[TaskStatus::Done],
             TaskStatus::Done
             | TaskStatus::Failed
+            | TaskStatus::Blocked
             | TaskStatus::RolledBack
             | TaskStatus::Cancelled => &[],
         }
@@ -115,8 +123,8 @@ mod tests {
         assert!(task.duration_ms.unwrap() >= 0);
     }
 
-    /// 全部 15 个状态，顺序与规范一致。
-    const ALL: [S; 15] = [
+    /// 全部 16 个状态，顺序与规范一致。
+    const ALL: [S; 16] = [
         S::Idle,
         S::Parsing,
         S::Indexing,
@@ -130,6 +138,7 @@ mod tests {
         S::Applied,
         S::Done,
         S::Failed,
+        S::Blocked,
         S::RolledBack,
         S::Cancelled,
     ];
@@ -148,7 +157,7 @@ mod tests {
         S::Applied,
     ];
 
-    const TERMINAL: [S; 4] = [S::Done, S::Failed, S::RolledBack, S::Cancelled];
+    const TERMINAL: [S; 5] = [S::Done, S::Failed, S::Blocked, S::RolledBack, S::Cancelled];
 
     /// 规范中的主流程转移表（不含通配的 Failed/Cancelled/RolledBack）。
     fn in_flow_allows(from: S, to: S) -> bool {
@@ -175,7 +184,8 @@ mod tests {
     /// 规范定义的完整合法转移集合，与实现相互独立，作为测试基准。
     fn spec_allows(from: S, to: S) -> bool {
         in_flow_allows(from, to)
-            || (!TERMINAL.contains(&from) && matches!(to, S::Failed | S::Cancelled | S::RolledBack))
+            || (!TERMINAL.contains(&from)
+                && matches!(to, S::Failed | S::Blocked | S::Cancelled | S::RolledBack))
     }
 
     #[test]
@@ -224,7 +234,7 @@ mod tests {
         }
     }
 
-    /// 穷举 15×15 状态矩阵：合法集合之外的转移（跳步、回退、自环、终态出边）必须全部被拒绝。
+    /// 穷举 16×16 状态矩阵：合法集合之外的转移（跳步、回退、自环、终态出边）必须全部被拒绝。
     #[test]
     fn full_transition_matrix_matches_spec() {
         for from in ALL {

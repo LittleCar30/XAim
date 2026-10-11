@@ -11,6 +11,7 @@ const TERMINAL_STATUSES: TaskStatus[] = [
   'applied',
   'done',
   'failed',
+  'blocked',
   'rolledBack',
   'cancelled',
 ]

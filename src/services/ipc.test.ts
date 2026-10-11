@@ -9,6 +9,12 @@ const mockedInvoke = vi.mocked(invoke)
 describe('ipc service', () => {
   beforeEach(() => vi.clearAllMocks())
 
+  it('passes per-turn command permission separately from verification and conversation', async () => {
+    mockedInvoke.mockResolvedValue(42)
+    await ipc.runTask(7, '克隆仓库', false, 41, true)
+    expect(mockedInvoke).toHaveBeenCalledWith('run_task', { projectId: 7, prompt: '克隆仓库', allowVerification: false, parentTaskId: 41, allowCommands: true })
+  })
+
   it('maps project and file commands to Tauri IPC', async () => {
     mockedInvoke.mockResolvedValue(undefined)
     await ipc.pickProjectFolder()

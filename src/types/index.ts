@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 /**
- * 任务生命周期状态（15 个），与 Rust TaskStatus 枚举的 camelCase 序列化值一致。
+ * 任务生命周期状态（16 个），与 Rust TaskStatus 枚举的 camelCase 序列化值一致。
  */
 export type TaskStatus =
   | 'idle'
@@ -28,6 +28,7 @@ export type TaskStatus =
   | 'applied'
   | 'done'
   | 'failed'
+  | 'blocked'
   | 'rolledBack'
   | 'cancelled'
 

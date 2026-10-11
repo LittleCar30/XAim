@@ -32,6 +32,7 @@ pub async fn run_task(
     prompt: String,
     allow_verification: Option<bool>,
     parent_task_id: Option<i64>,
+    allow_commands: Option<bool>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<i64, String> {
@@ -42,6 +43,7 @@ pub async fn run_task(
     config.task_timeout_sec = runtime.task_timeout_sec.unwrap_or(1800);
     config.tool_loop.max_turns = runtime.max_turns.unwrap_or(32);
     config.tool_loop.allow_verification = allow_verification.unwrap_or(false);
+    config.tool_loop.allow_commands = allow_commands.unwrap_or(false);
     config.parent_task_id = parent_task_id;
     let orchestrator =
         Orchestrator::new(app, Arc::new(state.store.clone()), config).map_err(String::from)?;

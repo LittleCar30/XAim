@@ -4,6 +4,7 @@
 | --- | --- |
 | [项目入口](../README.md) | 快速开始、能力与边界 |
 | [执行内核](agent-runtime.md) | 工具循环、上下文、版本保护、验证与预算 |
+| [开发操作](development-operations.md) | 实际克隆、依赖安装、命令授权、服务管理与受阻状态 |
 | [开发与构建](development.md) | 环境、命令、CI、安装包、集成测试与覆盖率 |
 | [数据存储](data-storage.md) | SQLite、配置、凭据、备份恢复与任务工作区 |
 | [模型设置](model-settings.md) | 模型接入、配置同步与限制 |

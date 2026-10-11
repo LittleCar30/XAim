@@ -2,6 +2,7 @@
 
 pub mod controlled;
 pub mod exec;
+pub mod operations;
 pub mod patch;
 pub mod read;
 pub mod registry;

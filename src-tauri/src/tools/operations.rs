@@ -287,16 +287,18 @@ pub async fn execute(
     }
     let (program, cwd) = validate(&args, root)?;
     let start = Instant::now();
-    let child = command(&program, &args.args, &cwd).spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            XaimError::Blocked(format!("{} 未安装或不可执行", args.program))
-        } else {
-            XaimError::Io(e)
-        }
-    })?;
+    let (child, tree) = crate::verify::process::spawn(&mut command(&program, &args.args, &cwd))
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                XaimError::Blocked(format!("{} 未安装或不可执行", args.program))
+            } else {
+                XaimError::Io(e)
+            }
+        })?;
     let seconds = args.timeout_sec.unwrap_or(300).clamp(1, 3600);
-    let result = wait(
+    let result = wait_attached(
         child,
+        tree,
         cancel,
         deadline
             .unwrap_or(start + Duration::from_secs(seconds))
@@ -308,16 +310,6 @@ pub async fn execute(
         json!({"program":args.program,"args":args.args.iter().map(|s| redact(s)).collect::<Vec<_>>(),"cwd":args.cwd,
         "exitCode":result.0,"stdout":redact(&result.1),"stderr":redact(&result.2),"durationMs":start.elapsed().as_millis() as u64,"success":result.0==Some(0)}),
     )
-}
-
-async fn wait(
-    child: Child,
-    cancel: &AtomicBool,
-    deadline: Instant,
-    buffer: Option<Arc<Mutex<Vec<u8>>>>,
-) -> Result<(Option<i32>, String, String)> {
-    let tree = ProcessTree::attach(&child)?;
-    wait_attached(child, tree, cancel, deadline, buffer).await
 }
 
 async fn wait_attached(
@@ -377,10 +369,8 @@ pub async fn start(args: CommandArgs, root: &Path, project: &Path) -> Result<Val
             "已有 8 个开发进程，请先停止不需要的进程".into(),
         ));
     }
-    let child = command(&program, &args.args, &cwd)
-        .spawn()
+    let (child, tree) = crate::verify::process::spawn(&mut command(&program, &args.args, &cwd))
         .map_err(|e| XaimError::Blocked(format!("无法启动 {}: {e}", args.program)))?;
-    let tree = ProcessTree::attach(&child)?;
     let pid = child.id();
     let id = uuid::Uuid::new_v4().to_string();
     let managed = Arc::new(ManagedProcess {
@@ -536,7 +526,62 @@ pub async fn clone_repository_with_network(
 ) -> Result<Value> {
     validate_clone_url(&args.url)?;
     network.validate()?;
-    clone_to_project(args, project, cancel, deadline, network).await
+    clone_to_project(args, project, cancel, deadline, network, &|_| Ok(())).await
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneProgress {
+    pub stage: &'static str,
+    pub status: &'static str,
+    pub duration_ms: u64,
+    pub error: Option<String>,
+}
+
+type CloneObserver<'a> = &'a (dyn Fn(CloneProgress) -> Result<()> + Send + Sync);
+
+fn clone_begin(stage: &'static str, observer: CloneObserver<'_>) -> Result<Instant> {
+    observer(CloneProgress {
+        stage,
+        status: "running",
+        duration_ms: 0,
+        error: None,
+    })?;
+    Ok(Instant::now())
+}
+
+fn clone_finish<T>(
+    stage: &'static str,
+    started: Instant,
+    result: Result<T>,
+    observer: CloneObserver<'_>,
+) -> Result<T> {
+    observer(CloneProgress {
+        stage,
+        status: if result.is_ok() { "done" } else { "failed" },
+        duration_ms: started.elapsed().as_millis() as u64,
+        error: result.as_ref().err().map(|e| redact(&e.to_string())),
+    })?;
+    result.map_err(|error| match error {
+        XaimError::Cancelled | XaimError::Timeout(_) => error,
+        _ => XaimError::RepositoryOperation {
+            stage: stage.into(),
+            message: redact(&error.to_string()),
+        },
+    })
+}
+
+pub async fn clone_repository_observed(
+    args: CloneArgs,
+    project: &Path,
+    cancel: &AtomicBool,
+    deadline: Option<Instant>,
+    network: &crate::config::execution::GitNetwork,
+    observer: CloneObserver<'_>,
+) -> Result<Value> {
+    validate_clone_url(&args.url)?;
+    network.validate()?;
+    clone_to_project(args, project, cancel, deadline, network, observer).await
 }
 
 async fn git(
@@ -555,12 +600,12 @@ async fn git(
     // the process and inherited by submodule/LFS children where applicable.
     let mut git_command = command(&crate::verify::runner::resolve_program("git"), &[], root);
     super::git_network::configure_remote(&mut git_command, network, args);
-    let child = git_command
-        .args(args)
-        .spawn()
+    git_command.args(args);
+    let (child, tree) = crate::verify::process::spawn(&mut git_command)
         .map_err(|e| XaimError::Blocked(format!("无法运行 Git: {e}")))?;
-    let (code, stdout, stderr) = wait(
+    let (code, stdout, stderr) = wait_attached(
         child,
+        tree,
         cancel,
         deadline.unwrap_or(start + Duration::from_secs(600)),
         None,
@@ -581,75 +626,99 @@ async fn clone_to_project(
     cancel: &AtomicBool,
     deadline: Option<Instant>,
     network: &crate::config::execution::GitNetwork,
+    observer: CloneObserver<'_>,
 ) -> Result<Value> {
-    let project = project.canonicalize()?;
-    let target = if args.path == "." {
-        project.clone()
-    } else {
-        safe_path(&project, &args.path)?
-    };
-    let in_place = target == project;
-    if in_place {
-        if std::fs::read_dir(&target)?.next().is_some() {
+    let started = clone_begin("检查目标目录", observer)?;
+    let preflight = (|| -> Result<_> {
+        let project = project.canonicalize()?;
+        let target = if args.path == "." {
+            project.clone()
+        } else {
+            safe_path(&project, &args.path)?
+        };
+        let in_place = target == project;
+        if in_place {
+            if std::fs::read_dir(&target)?.next().is_some() {
+                return Err(XaimError::Blocked(
+                    "原项目根目录非空，不能原地克隆；请选择尚不存在的子目录".into(),
+                ));
+            }
+        } else if target.exists() {
             return Err(XaimError::Blocked(
-                "原项目根目录非空，不能原地克隆；请选择尚不存在的子目录".into(),
+                "克隆目标已存在，不会覆盖或重置已有目录".into(),
             ));
         }
-    } else if target.exists() {
-        return Err(XaimError::Blocked(
-            "克隆目标已存在，不会覆盖或重置已有目录".into(),
-        ));
-    }
-    let parent = target
-        .parent()
-        .ok_or_else(|| XaimError::Security("克隆目标无效".into()))?;
-    if !parent.is_dir() {
-        return Err(XaimError::Blocked("目标父目录不存在".into()));
-    }
-    let stage = tempfile::Builder::new()
-        .prefix(".xaim-clone-")
-        .tempdir_in(parent)?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| XaimError::Security("克隆目标无效".into()))?;
+        if !parent.is_dir() {
+            return Err(XaimError::Blocked("目标父目录不存在".into()));
+        }
+        let stage = tempfile::Builder::new()
+            .prefix(".xaim-clone-")
+            .tempdir_in(parent)?;
+        Ok((project, target, in_place, stage))
+    })();
+    let (project, target, in_place, stage) =
+        clone_finish("检查目标目录", started, preflight, observer)?;
     let repo_dir = stage.path().join("repository");
     let mut clone = vec!["clone".into(), "--no-local".into()];
     if args.recursive {
         clone.push("--recurse-submodules".into());
     }
     clone.extend(["--".into(), args.url.clone(), git_path(&repo_dir)]);
-    git(&clone, &project, cancel, deadline, network).await?;
-    let mut pointers = lfs_pointers(&repo_dir)?;
+    let started = clone_begin("下载仓库", observer)?;
+    let download = git(&clone, &project, cancel, deadline, network).await;
+    clone_finish("下载仓库", started, download, observer)?;
+    let started = clone_begin("检查 LFS 文件", observer)?;
+    let mut pointers = clone_finish("检查 LFS 文件", started, lfs_pointers(&repo_dir), observer)?;
     if pointers > 0 {
-        git(
-            &["lfs".into(), "install".into(), "--local".into()],
-            &repo_dir,
-            cancel,
-            deadline,
-            network,
-        )
-        .await?;
-        git(
-            &["lfs".into(), "pull".into()],
-            &repo_dir,
-            cancel,
-            deadline,
-            network,
-        )
-        .await?;
-        pointers = lfs_pointers(&repo_dir)?;
-        if pointers > 0 {
-            return Err(XaimError::Blocked(
-                "仓库仍包含未拉取的 LFS 内容，未交付目标目录".into(),
-            ));
+        let started = clone_begin("拉取 LFS 内容", observer)?;
+        let lfs_result = async {
+            git(
+                &["lfs".into(), "install".into(), "--local".into()],
+                &repo_dir,
+                cancel,
+                deadline,
+                network,
+            )
+            .await?;
+            git(
+                &["lfs".into(), "pull".into()],
+                &repo_dir,
+                cancel,
+                deadline,
+                network,
+            )
+            .await?;
+            let pointers = lfs_pointers(&repo_dir)?;
+            if pointers > 0 {
+                return Err(XaimError::Blocked(
+                    "仓库仍包含未拉取的 LFS 内容，未交付目标目录".into(),
+                ));
+            }
+            Ok(pointers)
         }
+        .await;
+        pointers = clone_finish("拉取 LFS 内容", started, lfs_result, observer)?;
     }
-    let evidence = repository_evidence(&repo_dir, &args.url)?;
-    let submodules = git(
+    let started = clone_begin("核对仓库", observer)?;
+    let evidence = clone_finish(
+        "核对仓库",
+        started,
+        repository_evidence(&repo_dir, &args.url),
+        observer,
+    )?;
+    let started = clone_begin("检查子模块", observer)?;
+    let submodule_result = git(
         &["submodule".into(), "status".into()],
         &repo_dir,
         cancel,
         deadline,
         network,
     )
-    .await?;
+    .await;
+    let submodules = clone_finish("检查子模块", started, submodule_result, observer)?;
     if args.recursive
         && submodules["stdout"]
             .as_str()
@@ -666,25 +735,63 @@ async fn clone_to_project(
     }
     // Create-only delivery on the same filesystem. A race must never overwrite
     // an existing directory, including one created while Git was downloading.
-    if in_place {
-        if std::fs::read_dir(&target)?.next().is_some() {
-            return Err(XaimError::Blocked(
-                "克隆期间目标目录已变化，拒绝覆盖".into(),
-            ));
+    let started = clone_begin("交付仓库目录", observer)?;
+    let delivery = async {
+        if in_place {
+            if std::fs::read_dir(&target)?.next().is_some() {
+                return Err(XaimError::Blocked(
+                    "克隆期间目标目录已变化，拒绝覆盖".into(),
+                ));
+            }
+            std::fs::remove_dir(&target)?;
         }
-        std::fs::remove_dir(&target)?;
-    }
-    let delivered = rename_new(&repo_dir, &target);
-    if let Err(e) = delivered {
-        if in_place && !target.exists() {
-            let _ = std::fs::create_dir(&target);
+        let delivered = rename_new_when_ready(&repo_dir, &target, cancel, deadline).await;
+        if let Err(e) = delivered {
+            if in_place && !target.exists() {
+                let _ = std::fs::create_dir(&target);
+            }
+            return Err(e);
         }
-        return Err(XaimError::Io(e));
+        Ok(())
     }
+    .await;
+    clone_finish("交付仓库目录", started, delivery, observer)?;
     Ok(
         json!({"success":true,"delivered":true,"url":args.url,"path":args.path,"absolutePath":target,
         "head":evidence["head"],"empty":evidence["empty"],"submodules":submodules["stdout"],"recursive":args.recursive,"lfsPointers":pointers}),
     )
+}
+
+async fn rename_new_when_ready(
+    source: &Path,
+    target: &Path,
+    cancel: &AtomicBool,
+    deadline: Option<Instant>,
+) -> Result<()> {
+    #[cfg(windows)]
+    let started = Instant::now();
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(XaimError::Cancelled);
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(XaimError::Timeout("交付仓库目录超过执行时限".into()));
+        }
+        match rename_new(source, target) {
+            Ok(()) => return Ok(()),
+            // Windows can briefly retain directory handles after Git's helper
+            // processes exit. Every retry still uses the atomic create-only API.
+            #[cfg(windows)]
+            Err(error)
+                if matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                    && !target.exists()
+                    && started.elapsed() < Duration::from_secs(2) =>
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(XaimError::Io(error)),
+        }
+    }
 }
 
 /// Atomically refuse replacing a destination, including an empty directory
@@ -853,7 +960,15 @@ mod tests {
         cancel: &AtomicBool,
         deadline: Option<Instant>,
     ) -> Result<Value> {
-        super::clone_to_project(args, project, cancel, deadline, &Default::default()).await
+        super::clone_to_project(
+            args,
+            project,
+            cancel,
+            deadline,
+            &Default::default(),
+            &|_| Ok(()),
+        )
+        .await
     }
 
     fn cmd(program: &str, args: &[&str]) -> CommandArgs {
@@ -1018,6 +1133,176 @@ mod tests {
         let sig = git2::Signature::now("Test", "test@example.com").unwrap();
         repo.commit(Some("HEAD"), &sig, &sig, "fixture", &tree, &[])
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn packed_clone_delivers_into_watched_nonempty_unicode_project() {
+        let source = tempfile::tempdir().unwrap();
+        local_repo(source.path());
+        assert!(std::process::Command::new("git")
+            .args(["gc", "--prune=now"])
+            .current_dir(source.path())
+            .status()
+            .unwrap()
+            .success());
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("中文项目");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("keep.txt"), "existing source").unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        let watcher = crate::index::watcher::start_watcher(project.clone(), tx).unwrap();
+        let consumer = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let progress = Mutex::new(Vec::new());
+        let result = super::clone_to_project(
+            CloneArgs {
+                url: source.path().to_string_lossy().into_owned(),
+                path: "repo".into(),
+                recursive: false,
+            },
+            &project,
+            &AtomicBool::new(false),
+            None,
+            &Default::default(),
+            &|p| {
+                progress.lock().unwrap().push(p);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["delivered"], true);
+        assert!(result["head"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(project.join("repo/.git").is_dir());
+        assert_eq!(
+            fs::read(project.join("repo/asset.bin")).unwrap(),
+            [0, 255, 1, 128]
+        );
+        assert_eq!(
+            fs::read_to_string(project.join("keep.txt")).unwrap(),
+            "existing source"
+        );
+        assert_eq!(
+            progress.lock().unwrap().last().unwrap().stage,
+            "交付仓库目录"
+        );
+        assert_eq!(progress.lock().unwrap().last().unwrap().status, "done");
+        drop(watcher);
+        consumer.abort();
+    }
+
+    #[tokio::test]
+    async fn clone_preflight_reports_phase_and_keeps_existing_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("keep.txt"), "keep").unwrap();
+        let events = Mutex::new(Vec::new());
+        let result = super::clone_to_project(
+            CloneArgs {
+                url: "https://example.com/repo".into(),
+                path: ".".into(),
+                recursive: false,
+            },
+            root.path(),
+            &AtomicBool::new(false),
+            None,
+            &Default::default(),
+            &|p| {
+                events.lock().unwrap().push(p);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(XaimError::RepositoryOperation { stage, .. }) if stage == "检查目标目录")
+        );
+        assert_eq!(events.lock().unwrap().len(), 2);
+        assert_eq!(events.lock().unwrap().last().unwrap().status, "failed");
+        assert_eq!(
+            fs::read_to_string(root.path().join("keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(windows)]
+    fn hold_directory(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2)
+            .custom_flags(0x02000000)
+            .open(path)
+            .unwrap()
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn delivery_retries_transient_windows_handles_and_never_overwrites_racing_target() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let target = root.path().join("target");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("asset"), "source").unwrap();
+        let held = hold_directory(&source);
+        assert!(rename_new(&source, &target).is_err());
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(held);
+        });
+        rename_new_when_ready(&source, &target, &AtomicBool::new(false), None)
+            .await
+            .unwrap();
+        release.join().unwrap();
+        assert_eq!(fs::read_to_string(target.join("asset")).unwrap(), "source");
+
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("asset"), "preserved").unwrap();
+        let held = hold_directory(&source);
+        let race = target.with_file_name("racing-target");
+        let created = race.clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            fs::create_dir(&created).unwrap();
+            fs::write(created.join("keep"), "unrelated").unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+        assert!(
+            rename_new_when_ready(&source, &race, &AtomicBool::new(false), None)
+                .await
+                .is_err()
+        );
+        release.join().unwrap();
+        assert_eq!(
+            fs::read_to_string(source.join("asset")).unwrap(),
+            "preserved"
+        );
+        assert_eq!(fs::read_to_string(race.join("keep")).unwrap(), "unrelated");
+
+        let held = hold_directory(&source);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = cancel.clone();
+        let trigger = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            signal.store(true, Ordering::SeqCst);
+        });
+        let cancelled = root.path().join("cancelled");
+        assert!(matches!(
+            rename_new_when_ready(&source, &cancelled, &cancel, None).await,
+            Err(XaimError::Cancelled)
+        ));
+        trigger.await.unwrap();
+        assert!(!cancelled.exists());
+        assert!(matches!(
+            rename_new_when_ready(
+                &source,
+                &cancelled,
+                &AtomicBool::new(false),
+                Some(Instant::now() + Duration::from_millis(40))
+            )
+            .await,
+            Err(XaimError::Timeout(_))
+        ));
+        drop(held);
+        assert!(source.join("asset").exists());
     }
 
     #[tokio::test]

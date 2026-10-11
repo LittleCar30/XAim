@@ -11,6 +11,9 @@ pub enum XaimError {
     /// 文件系统读写失败。
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
+    /// An operation failed at a known stage; this is not an approval denial.
+    #[error("仓库操作失败 [{stage}]: {message}")]
+    RepositoryOperation { stage: String, message: String },
     /// SQLite 存储层失败。
     #[error("数据库错误: {0}")]
     Db(#[from] rusqlite::Error),

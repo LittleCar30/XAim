@@ -150,15 +150,14 @@ pub async fn run_verify(
 
     let mut command = Command::new(&program);
     super::process::configure(&mut command);
-    let spawned = command
+    command
         .args(&tokens[1..])
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
-    let mut child = match spawned {
+        .kill_on_drop(true);
+    let (mut child, process_tree) = match super::process::spawn(&mut command) {
         Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::warn!(kind = kind_label, command = cmd, "验证程序不存在");
@@ -169,7 +168,6 @@ pub async fn run_verify(
         }
         Err(e) => return Err(e.into()),
     };
-    let process_tree = super::process::ProcessTree::attach(&child)?;
 
     // 先取走管道交给独立读取任务：缓冲归任务所有，超时杀死进程后
     // 已产出的输出仍可回收。管道由上方 Stdio::piped() 保证存在。

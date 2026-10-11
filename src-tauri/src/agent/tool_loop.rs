@@ -33,6 +33,8 @@ const SYSTEM: &str = r#"你是 XAim 编程 Agent。根据用户任务使用工�
 不访问凭据，不通过文件工具修改 .git，不为使验证通过而删除测试或削弱检查。
 run_command 使用 program 与 args 实际执行安装依赖、自定义检查和诊断；start_process/read_process/stop_process 管理开发服务。必须依据工具结果说明成功或失败，命令文本或脚本文件不代表操作已执行。
 clone_repository 在本轮授权下将完整公开仓库交付到原项目，. 表示空的原项目根；应先克隆再编辑。不能通过通用命令克隆或修改 Git 状态。
+目录非空时保留已有文件，通常可选择原项目内尚不存在的仓库名子目录；用户明确要求根目录时说明限制，不擅自删除。可恢复的工具错误应根据具体阶段纠正后重试，不能重复同一失败参数。
+开发操作结果中的 authorizationWaitMs 是等待审批时间，executionDurationMs 才是执行耗时。authorizationGranted=true 表示程序已经授权；IO 错误（包括 os error 5）不能解释为用户未授权，也不能凭总耗时推断下载进度。只依据程序记录的阶段、退出码和结果说明原因；无法确定的原因明确标为未知。
 必要授权或能力缺失时调用 report_blocked，准确保留原始待办并停止。不得为制造差异而生成替代脚本，也不得将尚未执行的操作改成分析任务并声明完成。
 遵循用户的原始要求和现有项目约定。完成后用简短正文总结变更与限制。
 可用 update_task_state 简短记录完成事项和待办；全部要求完成后声明 ready_for_review=true，程序直接验证和汇总，不需要额外一轮正文。
@@ -1057,6 +1059,9 @@ pub async fn run(
                                 }
                             } else { Ok(()) }
                         } else { Ok(()) };
+                        let authorization_granted = authorization.is_ok();
+                        let authorization_ms = started.elapsed().as_millis() as u64;
+                        let execution_started = Instant::now();
                         let outcome: Result<Value> = match authorization {
                         Err(error) => Err(error),
                         Ok(()) if cancel.load(Ordering::SeqCst) => Err(XaimError::Cancelled),
@@ -1089,7 +1094,11 @@ pub async fn run(
                                 match serde_json::from_value(args) {
                                     Ok(clone) => {
                                         let network = config.permissions.as_ref().map(|s| s.git_network.clone()).unwrap_or_default();
-                                        let outcome = operations::clone_repository_with_network(clone, project, &cancel, config.deadline, &network).await;
+                                        let outcome = operations::clone_repository_observed(clone, project, &cancel, config.deadline, &network, &|progress| {
+                                            record.diagnostic("repositoryOperation", json!({"callId":call.id,"progress":progress}))?;
+                                            record.event(XaimEvent::Step { task_id: record.task_id,
+                                                name: format!("{label}：{}", progress.stage), status: progress.status.into() })
+                                        }).await;
                                         if let Ok(value) = &outcome {
                                             // Persist delivery evidence before copying/indexing source,
                                             // so an adoption error cannot hide a completed operation.
@@ -1107,21 +1116,26 @@ pub async fn run(
                                 else { operations::read_process(id, project, false) }
                             },
                         }};
+                        let execution_ms = execution_started.elapsed().as_millis() as u64;
+                        let timing = json!({"authorizationGranted":authorization_granted,"authorizationWaitMs":authorization_ms,"executionDurationMs":execution_ms});
                         let result = match outcome {
-                            Ok(value) => {
+                            Ok(mut value) => {
+                                if let Some(object) = value.as_object_mut() {
+                                    object.extend(timing.as_object().unwrap().clone());
+                                }
                                 if call.function.name == "start_process" { task_processes.register(&value); }
                                 let success = value["success"] != false;
                                 snapshot.operations.push(json!({"tool":call.function.name,"success":success,"result":value}));
-                                crate::types::ToolResult {name:call.function.name.clone(), success, output:serde_json::to_string(&value)?, error:(!success).then(||"开发命令退出码非零，请根据实际输出修复或报告受阻".into()),duration_ms:Some(started.elapsed().as_millis() as i64)}
+                                crate::types::ToolResult {name:call.function.name.clone(), success, output:serde_json::to_string(&value)?, error:(!success).then(||"开发命令退出码非零，请根据实际输出修复或报告受阻".into()),duration_ms:Some(execution_ms as i64)}
                             },
                             Err(XaimError::Cancelled) => return Err(XaimError::Cancelled),
                             Err(XaimError::Blocked(reason)) => return stop_blocked(&reason, &mut snapshot, workspace, &record),
                             Err(error) => {
-                                snapshot.operations.push(json!({"tool":call.function.name,"success":false,"result":args_evidence,"error":error.to_string()}));
-                                crate::types::ToolResult {name:call.function.name.clone(),success:false,output:String::new(),error:Some(error.to_string()),duration_ms:Some(started.elapsed().as_millis() as i64)}
+                                snapshot.operations.push(json!({"tool":call.function.name,"success":false,"result":args_evidence,"timing":timing,"error":error.to_string()}));
+                                crate::types::ToolResult {name:call.function.name.clone(),success:false,output:timing.to_string(),error:Some(error.to_string()),duration_ms:Some(execution_ms as i64)}
                             },
                         };
-                        record.diagnostic("developmentOperation", json!({"tool":call.function.name,"success":result.success,"output":result.output,"error":result.error,"durationMs":result.duration_ms}))?;
+                        record.diagnostic("developmentOperation", json!({"tool":call.function.name,"success":result.success,"output":result.output,"error":result.error,"durationMs":result.duration_ms,"authorizationWaitMs":authorization_ms,"executionDurationMs":execution_ms,"authorizationGranted":authorization_granted,"totalDurationMs":started.elapsed().as_millis() as u64}))?;
                         result
                     },
                     Ok(args)
@@ -1769,6 +1783,7 @@ mod tests {
                     if let Some(request) = session.pending() {
                         assert_eq!(request.scope.tool, "run_command");
                         assert!(!marker.exists(), "must not execute before approval");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         session
                             .resolve(
                                 request.task_id,
@@ -1801,6 +1816,20 @@ mod tests {
                 );
                 assert_eq!(std::fs::read_to_string(&marker).unwrap(), "executed");
                 assert!(sink.0.lock().unwrap().iter().any(|e| matches!(e, XaimEvent::ToolFinished { result, .. } if result.name == "run_command" && result.success)));
+                let events = sink.0.lock().unwrap();
+                let command = events
+                    .iter()
+                    .find_map(|e| match e {
+                        XaimEvent::ToolFinished { result, .. } if result.name == "run_command" => {
+                            Some(result)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                let output: Value = serde_json::from_str(&command.output).unwrap();
+                assert_eq!(output["authorizationGranted"], true);
+                assert!(output["authorizationWaitMs"].as_u64().unwrap() >= 100);
+                assert_eq!(output["executionDurationMs"].as_i64(), command.duration_ms);
             } else {
                 assert!(matches!(result, Err(XaimError::Cancelled)));
                 assert!(!marker.exists());
@@ -1962,6 +1991,59 @@ mod tests {
             .tools
             .iter()
             .any(|v| v["function"]["name"] == "clone_repository"));
+    }
+
+    #[tokio::test]
+    async fn clone_target_error_returns_authorized_phase_evidence_to_model() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("keep.txt"), "keep").unwrap();
+        let (agent, _, project, provider, sink) = setup(
+            root.path(),
+            vec![
+                call(
+                    "clone",
+                    "clone_repository",
+                    json!({"url":"https://example.com/repo","path":"."}),
+                ),
+                call("inspect", "list_dir", json!({"path":"."})),
+                call(
+                    "blocked",
+                    "report_blocked",
+                    json!({"reason":"需要选择子目录","pending":["克隆仓库到子目录"]}),
+                ),
+            ],
+            LoopConfig {
+                allow_commands: true,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            agent.run_task(project, "下载仓库".into()).await,
+            Err(XaimError::Blocked(_))
+        ));
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            3,
+            "model must receive the recoverable failure"
+        );
+        let events = sink.0.lock().unwrap();
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                XaimEvent::ToolFinished { result, .. } if result.name == "clone_repository" => {
+                    Some(result)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.error.as_deref().unwrap().contains("检查目标目录"));
+        let timing: Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(timing["authorizationGranted"], true);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("keep.txt")).unwrap(),
+            "keep"
+        );
     }
 
     #[tokio::test]

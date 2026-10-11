@@ -19,8 +19,8 @@ Tauri 2 · Rust（edition 2021，stable，由 `rust-toolchain.toml` 选择；未
 | `pnpm tauri dev` | 启动桌面开发窗口（自动拉起 Vite） |
 | `pnpm dev` | 仅前端，浏览器访问 http://127.0.0.1:5173 |
 | `pnpm build` | 类型检查 + 前端产物构建（输出 `dist/`） |
-| `pnpm tauri build` | 打包桌面安装程序 |
-| `pnpm tauri build --target x86_64-pc-windows-msvc` | 打包 Windows x64 MSI 和 NSIS 安装程序 |
+| `node node_modules/@tauri-apps/cli/tauri.js build -- --locked` | 使用冻结 Cargo 锁文件打包桌面安装程序 |
+| `node node_modules/@tauri-apps/cli/tauri.js build --target x86_64-pc-windows-msvc --bundles msi nsis --ci -- --locked` | 打包 Windows x64 MSI 和 NSIS 安装程序 |
 | `pnpm lint` | ESLint 检查 |
 | `pnpm typecheck` | `tsc --noEmit` 严格类型检查 |
 | `pnpm test` | Vitest 单元测试 |
@@ -28,7 +28,7 @@ Tauri 2 · Rust（edition 2021，stable，由 `rust-toolchain.toml` 选择；未
 
 ## Windows 安装包
 
-在 Windows 上执行 `pnpm tauri build --target x86_64-pc-windows-msvc`。
+在 Windows 上执行上表的 Windows x64 打包命令。直接调用 Tauri CLI 可保留传给 Cargo 的 `-- --locked`，避免 pnpm 12 转发参数时丢失分隔符。
 安装包输出到 `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/`：
 
 - `msi/XAim_0.1.0_x64_en-US.msi`

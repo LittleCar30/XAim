@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use eventsource_stream::Eventsource;
+use eventsource_stream::{EventStreamError, Eventsource};
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
@@ -321,8 +321,10 @@ impl OpenAiProvider {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|s| s.starts_with("application/json"));
+        // One token can arrive in its own JSON/SSE envelope. Budget for the
+        // framing too, particularly when reasoning uses many tiny deltas.
         let limit = (max_tokens as usize)
-            .saturating_mul(64)
+            .saturating_mul(512)
             .clamp(65_536, 16 * 1024 * 1024);
         let size = Arc::new(AtomicUsize::new(0));
         let counted = size.clone();
@@ -359,7 +361,12 @@ impl OpenAiProvider {
             let mut first = true;
             let mut first_text = true;
             while let Some(event) = sse.next().await {
-                let event = event.map_err(|_| XaimError::Model("工具 SSE 读取失败，未执行本轮工具".into()))?;
+                let event = event.map_err(|error| match error {
+                    EventStreamError::Transport(XaimError::Http(error)) => XaimError::Http(error.without_url()),
+                    EventStreamError::Transport(error) => error,
+                    EventStreamError::Utf8(_) => XaimError::Model("工具 SSE 响应无效：UTF-8 无效，未执行本轮工具".into()),
+                    EventStreamError::Parser(_) => XaimError::Model("工具 SSE 响应无效：SSE 格式无效，未执行本轮工具".into()),
+                })?;
                 let data = event.data.trim();
                 if data.is_empty() { continue; }
                 if first {
@@ -377,8 +384,20 @@ impl OpenAiProvider {
             }
             assembled.finish(self.deepseek)
         }.await;
-        observation.finish(serde_json::json!({"stage":if outcome.is_ok() {"streamEnd"} else {"streamError"},
-            "durationMs":observation.elapsed_ms(),"bytes":size.load(Ordering::Relaxed),"success":outcome.is_ok()}));
+        let error_kind = match &outcome {
+            Ok(_) => None,
+            Err(XaimError::Http(_)) => Some("transport"),
+            Err(XaimError::Model(message)) if message.starts_with("工具响应超过接收上限") => {
+                Some("receive_limit")
+            }
+            Err(XaimError::Model(_)) => Some("protocol"),
+            Err(_) => Some("internal"),
+        };
+        observation.finish(
+            serde_json::json!({"stage":if outcome.is_ok() {"streamEnd"} else {"streamError"},
+            "durationMs":observation.elapsed_ms(),"bytes":size.load(Ordering::Relaxed),
+            "receiveLimitBytes":limit,"errorKind":error_kind,"success":outcome.is_ok()}),
+        );
         outcome
     }
 }

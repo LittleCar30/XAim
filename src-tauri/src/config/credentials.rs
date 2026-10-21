@@ -4,6 +4,10 @@ use crate::types::Config;
 
 const PREFIX: &str = "xaim-vault-v1:";
 
+pub(crate) fn is_reference(key: &str) -> bool {
+    key.trim().starts_with(PREFIX)
+}
+
 pub fn seal(config: &Config) -> Result<Config> {
     let mut stored = config.clone();
     for model in std::iter::once(&mut stored.model)
@@ -26,7 +30,11 @@ pub fn seal(config: &Config) -> Result<Config> {
     Ok(stored)
 }
 
-pub fn unseal(mut config: Config) -> Config {
+pub fn unseal(config: Config) -> Config {
+    unseal_with(config, get)
+}
+
+fn unseal_with(mut config: Config, resolve: impl Fn(&str) -> Result<Option<String>>) -> Config {
     for model in std::iter::once(&mut config.model)
         .chain(config.model_profiles.iter_mut().map(|p| &mut p.config))
     {
@@ -35,7 +43,7 @@ pub fn unseal(mut config: Config) -> Config {
             .as_deref()
             .and_then(|key| key.strip_prefix(PREFIX))
         {
-            match get(id) {
+            match resolve(id) {
                 Ok(secret) => model.api_key = secret,
                 Err(error) => {
                     tracing::warn!(%error, "无法读取系统凭据，请重新填写 API Key");
@@ -65,13 +73,23 @@ fn put(id: &str, secret: &str) -> Result<()> {
         .map_err(|error| XaimError::Config(format!("无法保存系统凭据：{error}")))
 }
 
-#[cfg(not(test))]
-fn get(id: &str) -> Result<Option<String>> {
+fn get_system(id: &str) -> Result<Option<String>> {
     match keyring::Entry::new(crate::data::APP_ID, id).and_then(|entry| entry.get_password()) {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(error) => Err(XaimError::Config(format!("无法读取系统凭据：{error}"))),
     }
+}
+
+#[cfg(not(test))]
+fn get(id: &str) -> Result<Option<String>> {
+    get_system(id)
+}
+
+/// Only explicit ignored live tests may access the user's real credential vault.
+#[cfg(test)]
+pub(crate) fn unseal_live(config: Config) -> Config {
+    unseal_with(config, get_system)
 }
 
 #[cfg(test)]

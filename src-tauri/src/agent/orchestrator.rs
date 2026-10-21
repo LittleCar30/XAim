@@ -738,16 +738,29 @@ impl Orchestrator {
             )
             .await?;
         let (source_files, source_bytes) = workspace.source_stats();
-        Recorder {
+        let limits = workspace.limits().clone();
+        let recorder = Recorder {
             task_id,
             store: &self.store,
             sink: self.sink.as_ref(),
-        }
-        .diagnostic(
+        };
+        recorder.diagnostic(
             "workspacePreparation",
             serde_json::json!({"durationMs":snapshot_started.elapsed().as_millis() as u64,
-                "sourceFiles":source_files,"sourceBytes":source_bytes}),
+                "sourceFiles":source_files,"sourceBytes":source_bytes,
+                "skippedFiles":limits.skipped_files,"skippedBytes":limits.skipped_bytes,
+                "skippedPaths":limits.paths}),
         )?;
+        if limits.skipped_files > 0 {
+            recorder.event(XaimEvent::Message {
+                task_id,
+                content: format!(
+                    "工作区基线已跳过 {} 个超出快照上限的文件（约 {} MB），它们保留在原项目，但本轮不参与编辑与差异审阅。",
+                    limits.skipped_files,
+                    limits.skipped_bytes / (1024 * 1024)
+                ),
+            })?;
+        }
         self.run_step(
             task_id,
             &mut status,
@@ -2056,13 +2069,16 @@ mod tests {
             )
             .unwrap();
         let config: crate::types::Config = serde_json::from_str(&config_json).unwrap();
-        let prompt: String = conn
-            .query_row(
+        let config = crate::config::credentials::unseal_live(config);
+        // A public, reproducible fixture can override the private task replay.
+        let prompt: String = std::env::var("XAIM_LIVE_PROMPT").unwrap_or_else(|_| {
+            conn.query_row(
                 "SELECT prompt FROM tasks ORDER BY id DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
-            .unwrap();
+            .unwrap()
+        });
         drop(conn);
         let root = tempfile::tempdir().unwrap();
         let log_database = std::env::var("XAIM_LIVE_LOG_DATABASE")
@@ -2082,7 +2098,8 @@ mod tests {
             "live-test",
         )
         .unwrap();
-        let runtime = crate::commands::task::orchestrator_config_from(config.clone()).unwrap();
+        let mut runtime = crate::commands::task::orchestrator_config_from(config.clone()).unwrap();
+        runtime.task_timeout_sec = runtime.task_timeout_sec.min(300);
         let provider = crate::model::create_provider(&runtime.model).unwrap();
         let sink = Arc::new(CollectSink::default());
         let orchestrator =

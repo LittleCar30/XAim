@@ -297,11 +297,22 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
             }
             let target = safe_path(root, &args.path)?;
             fs::create_dir_all(target.parent().unwrap())?;
-            // create_new is atomic and cannot overwrite an existing file.
+            // create_new is atomic and cannot overwrite an existing file; a
+            // conflict is reported with the next step instead of a raw OS error.
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(target)?;
+                .open(target)
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        XaimError::PatchConflict(format!(
+                            "{}: 文件已存在，拒绝覆盖；请先 read_file 读取版本，再用 edit_file 修改，或改用 append_file",
+                            args.path
+                        ))
+                    } else {
+                        XaimError::Io(error)
+                    }
+                })?;
             file.write_all(args.content.as_bytes())?;
             Ok(ToolResult::ok(json!({"path":args.path,"hash":blake3::hash(args.content.as_bytes()).to_hex().to_string()}).to_string()))
         }
@@ -384,6 +395,32 @@ async fn execute(name: &str, args: Value, ctx: &ToolContext) -> Result<ToolResul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn create_file_reports_an_actionable_message_when_the_file_exists() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("page.html"), "<!DOCTYPE html>").unwrap();
+        let ctx = ToolContext {
+            project_root: root.path().into(),
+            store: std::sync::Arc::new(crate::store::Store::open_in_memory().unwrap()),
+            require_confirm: false,
+            allowed_commands: vec![],
+        };
+        let result = call(
+            "create_file",
+            json!({"path":"page.html","content":"new"}),
+            &ctx,
+        )
+        .await;
+        assert!(!result.success);
+        let message = result.error.unwrap_or_default();
+        assert!(message.contains("文件已存在"), "{message}");
+        assert!(message.contains("append_file"), "{message}");
+        assert_eq!(
+            fs::read_to_string(root.path().join("page.html")).unwrap(),
+            "<!DOCTYPE html>"
+        );
+    }
 
     #[tokio::test]
     async fn batch_reads_bound_escaped_output_keep_hashes_and_isolate_errors() {

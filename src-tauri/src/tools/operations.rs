@@ -143,7 +143,7 @@ pub(crate) fn validate(args: &CommandArgs, root: &Path) -> Result<(PathBuf, Path
         }
         p
     } else {
-        return Err(XaimError::Blocked(format!(
+        return Err(XaimError::Unsupported(format!(
             "开发命令 {} 尚未支持；请使用已接入的工具",
             args.program
         )));
@@ -162,7 +162,7 @@ pub(crate) fn validate(args: &CommandArgs, root: &Path) -> Result<(PathBuf, Path
                 .skip(1)
                 .any(|s| !matches!(s.as_str(), "-v" | "get-url" | "origin"))
         {
-            return Err(XaimError::Blocked(
+            return Err(XaimError::Unsupported(
                 "此工具仅允许 Git 查询；克隆请使用 clone_repository，commit/reset 等写操作尚未接入"
                     .into(),
             ));
@@ -187,7 +187,10 @@ pub(crate) fn validate(args: &CommandArgs, root: &Path) -> Result<(PathBuf, Path
         })?;
         let script = safe_path(&cwd, script)?;
         if !script.is_file() {
-            return Err(XaimError::Blocked("项目脚本不存在".into()));
+            return Err(XaimError::Unavailable(format!(
+                "项目脚本 {} 不存在；请先 list_dir 确认实际路径，或用已接入的工具完成目标",
+                script.display()
+            )));
         }
     }
     if (args.args.iter().any(|s| {
@@ -276,6 +279,20 @@ async fn capture<R: AsyncRead + Unpin>(
     output
 }
 
+/// Missing programs and invalid Windows executables can be worked around;
+/// authorization failures still stop the task.
+pub(crate) fn launch_error(program: &str, error: &std::io::Error) -> XaimError {
+    if error.kind() == std::io::ErrorKind::NotFound
+        || (cfg!(windows) && matches!(error.raw_os_error(), Some(193 | 216)))
+    {
+        XaimError::Unavailable(format!(
+            "开发命令 {program} 未安装或不可执行：{error}；请改用已接入的工具，或如实报告该环境缺失，不要编造执行结果"
+        ))
+    } else {
+        XaimError::Blocked(format!("无法启动 {program}: {error}"))
+    }
+}
+
 pub async fn execute(
     args: CommandArgs,
     root: &Path,
@@ -288,13 +305,7 @@ pub async fn execute(
     let (program, cwd) = validate(&args, root)?;
     let start = Instant::now();
     let (child, tree) = crate::verify::process::spawn(&mut command(&program, &args.args, &cwd))
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                XaimError::Blocked(format!("{} 未安装或不可执行", args.program))
-            } else {
-                XaimError::Io(e)
-            }
-        })?;
+        .map_err(|e| launch_error(&args.program, &e))?;
     let seconds = args.timeout_sec.unwrap_or(300).clamp(1, 3600);
     let result = wait_attached(
         child,
@@ -365,12 +376,12 @@ pub async fn start(args: CommandArgs, root: &Path, project: &Path) -> Result<Val
         .count()
         >= 8
     {
-        return Err(XaimError::Blocked(
-            "已有 8 个开发进程，请先停止不需要的进程".into(),
+        return Err(XaimError::Unavailable(
+            "已有 8 个开发进程，请先 stop_process 停止不需要的进程后重试".into(),
         ));
     }
     let (child, tree) = crate::verify::process::spawn(&mut command(&program, &args.args, &cwd))
-        .map_err(|e| XaimError::Blocked(format!("无法启动 {}: {e}", args.program)))?;
+        .map_err(|e| launch_error(&args.program, &e))?;
     let pid = child.id();
     let id = uuid::Uuid::new_v4().to_string();
     let managed = Arc::new(ManagedProcess {
@@ -932,6 +943,41 @@ fn lfs_pointers(root: &Path) -> Result<usize> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn missing_program_is_unavailable_but_other_launch_failures_block() {
+        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
+        let error = launch_error("go", &missing);
+        assert!(matches!(error, XaimError::Unavailable(_)), "{error:?}");
+        assert!(error.to_string().contains("未安装或不可执行"));
+
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let error = launch_error("go", &denied);
+        assert!(matches!(error, XaimError::Blocked(_)), "{error:?}");
+        assert!(error.to_string().contains("无法启动 go"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn invalid_windows_executable_is_recoverable() {
+        let error = launch_error("python3", &std::io::Error::from_raw_os_error(193));
+        assert!(matches!(error, XaimError::Unavailable(_)), "{error:?}");
+        assert!(error.to_string().contains("193"));
+    }
+
+    #[test]
+    fn missing_project_script_returns_to_the_model_instead_of_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        let args: CommandArgs = serde_json::from_value(serde_json::json!({
+            "program": "powershell",
+            "args": ["-File", "missing.ps1"],
+            "cwd": "."
+        }))
+        .unwrap();
+        let error = validate(&args, root.path()).unwrap_err();
+        assert!(matches!(error, XaimError::Unavailable(_)), "{error:?}");
+        assert!(error.to_string().contains("不存在"));
+    }
 
     #[tokio::test]
     #[ignore = "Requires public GitHub access through the user's system proxy"]

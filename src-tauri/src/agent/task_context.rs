@@ -45,6 +45,44 @@ pub struct TaskSnapshot {
     pub required_operations: Vec<String>,
 }
 
+/// Recognize explicit prohibitions immediately before an operation phrase.
+/// Check each occurrence so a later affirmative instruction still counts.
+fn has_unnegated_phrase(goal: &str, phrase: &str) -> bool {
+    goal.match_indices(phrase).any(|(offset, _)| {
+        let prefix = goal[..offset].trim_end();
+        ![
+            "do not",
+            "don't",
+            "don’t",
+            "must not",
+            "should not",
+            "never",
+            "no need to",
+            "don't need to",
+            "无需",
+            "不需要",
+            "不用",
+            "不必",
+            "不要",
+            "不得",
+            "禁止",
+            "请勿",
+            "勿",
+            "别",
+        ]
+        .iter()
+        .any(|negation| {
+            prefix.strip_suffix(negation).is_some_and(|before| {
+                !negation.is_ascii()
+                    || before
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| !c.is_ascii_alphanumeric())
+            })
+        })
+    })
+}
+
 fn operation_goals(goal: &str) -> Vec<String> {
     let lower = goal.to_ascii_lowercase();
     let discussion = [
@@ -84,7 +122,10 @@ fn operation_goals(goal: &str) -> Vec<String> {
         return vec![];
     }
     let mut goals = Vec::new();
-    if goal.contains("克隆") || lower.starts_with("clone ") || lower.starts_with("git clone ") {
+    if has_unnegated_phrase(&lower, "克隆")
+        || lower.starts_with("clone ")
+        || lower.starts_with("git clone ")
+    {
         goals.push("clone_repository".into());
     }
     for (kind, words) in [
@@ -106,7 +147,7 @@ fn operation_goals(goal: &str) -> Vec<String> {
         ),
         ("run_command", vec!["执行命令", "运行脚本", "execute "]),
     ] {
-        if words.iter().any(|word| lower.contains(word)) {
+        if words.iter().any(|word| has_unnegated_phrase(&lower, word)) {
             goals.push(kind.into());
         }
     }
@@ -656,6 +697,41 @@ mod tests {
         assert!(!TaskSnapshot::new("使用工具克隆仓库")
             .required_operations
             .is_empty());
+    }
+
+    #[test]
+    fn explicitly_negated_operations_are_constraints_instead_of_requirements() {
+        for goal in [
+            "Create index.html. Do not install dependencies.",
+            "Update index.html. Don't run the tests.",
+            "Never start the server.",
+            "No need to build the project.",
+            "创建页面，不要安装依赖。",
+            "更新页面，请勿运行测试。",
+            "不需要启动服务。",
+            "不要克隆仓库。",
+            "无需执行命令。",
+        ] {
+            let snapshot = TaskSnapshot::new(goal);
+            assert!(snapshot.required_operations.is_empty(), "{goal}");
+            assert!(!snapshot.needs_command_permission(false), "{goal}");
+        }
+        assert_eq!(
+            TaskSnapshot::new("不要安装依赖，运行测试。").required_operations,
+            ["test"]
+        );
+        assert_eq!(
+            TaskSnapshot::new("Do not install dependencies. Run tests.").required_operations,
+            ["test"]
+        );
+        assert_eq!(
+            TaskSnapshot::new("Do not run tests yet. Then run tests.").required_operations,
+            ["test"]
+        );
+        assert_eq!(
+            TaskSnapshot::new("不要克隆仓库，安装依赖。").required_operations,
+            ["install"]
+        );
     }
     use super::*;
     use crate::model::provider::{FunctionCall, ToolCall};

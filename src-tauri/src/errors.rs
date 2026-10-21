@@ -38,7 +38,9 @@ pub enum XaimError {
     /// 任务被用户取消，属正常控制流。
     #[error("任务已取消")]
     Cancelled,
-    /// A required capability, authorization or environment is unavailable.
+    /// A safety, authorization or policy refusal that must stop the task.
+    /// Conditions the model could work around belong to `Unavailable` or
+    /// `Unsupported`, which are returned to the model instead of ending it.
     #[error("任务受阻: {0}")]
     Blocked(String),
     /// 操作超出时限。
@@ -50,6 +52,13 @@ pub enum XaimError {
     /// 操作被安全策略拒绝（如路径越出项目目录）。
     #[error("安全限制: {0}")]
     Security(String),
+    /// 请求的工具或命令尚未实现；模型应改用其他受支持的方式，而不是终止任务。
+    #[error("不支持的操作: {0}")]
+    Unsupported(String),
+    /// 本机缺少所需程序或运行资源；模型应改用其他方式或如实报告缺失，
+    /// 而不是终止任务。
+    #[error("环境不可用: {0}")]
+    Unavailable(String),
     /// 未归类的内部错误。
     #[error("未知错误: {0}")]
     Unknown(String),
@@ -97,6 +106,14 @@ mod tests {
         assert_eq!(
             XaimError::Security("路径越出项目目录".to_string()).to_string(),
             "安全限制: 路径越出项目目录"
+        );
+        assert_eq!(
+            XaimError::Unsupported("find".to_string()).to_string(),
+            "不支持的操作: find"
+        );
+        assert_eq!(
+            XaimError::Unavailable("go 未安装或不可执行".to_string()).to_string(),
+            "环境不可用: go 未安装或不可执行"
         );
         assert_eq!(
             XaimError::Unknown("boom".to_string()).to_string(),

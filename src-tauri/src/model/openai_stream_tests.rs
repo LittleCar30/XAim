@@ -366,19 +366,93 @@ async fn oversized_event_without_delimiter_is_bounded() {
         .await;
     let provider = OpenAiProvider::new(server.url(), "test-key".into());
     let events = Mutex::new(Vec::new());
-    assert!(provider
+    let error = provider
         .interact_tools_observed(
             request(),
             None,
             &|e| events.lock().unwrap().push(e),
-            &|_| panic!("no complete delta expected")
+            &|_| panic!("no complete delta expected"),
         )
         .await
-        .is_err());
+        .unwrap_err();
+    assert!(error.to_string().contains("超过接收上限"), "{error}");
     assert!(events
         .lock()
         .unwrap()
         .iter()
-        .any(|e| e["stage"] == "streamError"));
+        .any(|e| e["stage"] == "streamError"
+            && e["errorKind"] == "receive_limit"
+            && e["receiveLimitBytes"] == 65_536));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn sse_framing_overhead_does_not_truncate_a_valid_reasoning_response() {
+    let mut server = mockito::Server::new_async().await;
+    let body = packet(json!({"reasoning_content":"r"}), None).repeat(4000) + &final_text();
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .with_header("content-type", "text/event-stream")
+        .with_body(body)
+        .expect(1)
+        .create_async()
+        .await;
+    let provider = OpenAiProvider::new(server.url(), "test-key".into());
+    let mut request = request();
+    request.max_tokens = 4096;
+    let response = provider
+        .interact_tools_observed(request, None, &|_| {}, &|_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(response.message.content.as_deref(), Some("done"));
+    assert!(response.message.reasoning_content.is_none());
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn invalid_utf8_is_a_protocol_error_without_echoing_response_bytes() {
+    let mut server = mockito::Server::new_async().await;
+    let mut body = b"private response bytes".to_vec();
+    body.push(0xff);
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .with_header("content-type", "text/event-stream")
+        .with_body(body)
+        .expect(1)
+        .create_async()
+        .await;
+    let provider = OpenAiProvider::new(server.url(), "test-key".into());
+    let error = provider
+        .interact_tools_observed(request(), None, &|_| {}, &|_| Ok(()))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("UTF-8"), "{error}");
+    assert!(!error.contains("private response bytes"));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn complete_stream_without_call_id_reaches_runtime_normalization() {
+    let mut server = mockito::Server::new_async().await;
+    let body = packet(
+        json!({"tool_calls":[{"index":0,"function":{"name":"list_dir","arguments":"{\"path\":\".\"}"}}]}),
+        Some("tool_calls"),
+    ) + "data: [DONE]\n\n";
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .with_header("content-type", "text/event-stream")
+        .with_body(body)
+        .expect(1)
+        .create_async()
+        .await;
+    let provider = OpenAiProvider::new(server.url(), "test-key".into());
+    let response = provider
+        .interact_tools_observed(request(), None, &|_| {}, &|_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(response.message.tool_calls.len(), 1);
+    assert!(response.message.tool_calls[0].id.is_empty());
+    assert_eq!(response.message.tool_calls[0].function.name, "list_dir");
     mock.assert_async().await;
 }

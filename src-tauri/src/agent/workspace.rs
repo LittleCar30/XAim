@@ -13,11 +13,23 @@ use crate::tools::patch::{generate_diff, resolve_in_root};
 const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_FILES: usize = 50_000;
+const MAX_REPORTED_SKIPS: usize = 32;
+
+/// Files the snapshot could not copy because of the per-file, count or total
+/// size limits. They stay in the original project and are excluded from the
+/// task copy so a single oversized binary cannot fail the whole task.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotLimits {
+    pub skipped_files: usize,
+    pub skipped_bytes: u64,
+    pub paths: Vec<String>,
+}
 
 pub struct TaskWorkspace {
     directory: PathBuf,
     _temporary: Option<tempfile::TempDir>,
     baseline: BTreeMap<String, Vec<u8>>,
+    limits: SnapshotLimits,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,12 +129,24 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn collect(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+fn record_skip(limits: &mut SnapshotLimits, path: &str, bytes: u64) {
+    limits.skipped_files += 1;
+    limits.skipped_bytes = limits.skipped_bytes.saturating_add(bytes);
+    if limits.paths.len() < MAX_REPORTED_SKIPS {
+        limits.paths.push(path.to_string());
+    }
+}
+
+/// Copy the text source tree into memory. A file over any hard limit is
+/// skipped and reported instead of failing the whole task, matching how
+/// mainstream agents ignore large binaries and build artifacts.
+fn collect(root: &Path) -> Result<(BTreeMap<String, Vec<u8>>, SnapshotLimits)> {
     fn walk(
         root: &Path,
         dir: &Path,
         files: &mut BTreeMap<String, Vec<u8>>,
         size: &mut usize,
+        limits: &mut SnapshotLimits,
     ) -> Result<()> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -134,29 +158,48 @@ fn collect(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
                 continue;
             }
             if metadata.is_dir() {
-                walk(root, &entry.path(), files, size)?;
+                walk(root, &entry.path(), files, size, limits)?;
             } else if metadata.is_file() {
-                if metadata.len() > MAX_FILE_BYTES || files.len() >= MAX_FILES {
-                    return Err(XaimError::Config("项目快照超过文件大小或数量上限".into()));
-                }
-                let content = fs::read(entry.path())?;
-                *size += content.len();
-                if *size > MAX_SNAPSHOT_BYTES {
-                    return Err(XaimError::Config("项目快照超过 256 MB 上限".into()));
-                }
                 let path = entry
                     .path()
                     .strip_prefix(root)
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/");
+                if metadata.len() > MAX_FILE_BYTES {
+                    record_skip(limits, &path, metadata.len());
+                    continue;
+                }
+                if files.len() >= MAX_FILES {
+                    record_skip(limits, &path, metadata.len());
+                    continue;
+                }
+                let content = fs::read(entry.path())?;
+                if (*size).saturating_add(content.len()) > MAX_SNAPSHOT_BYTES {
+                    record_skip(limits, &path, content.len() as u64);
+                    continue;
+                }
+                *size += content.len();
                 files.insert(path, content);
             }
         }
         Ok(())
     }
     let mut files = BTreeMap::new();
-    walk(root, root, &mut files, &mut 0)?;
+    let mut limits = SnapshotLimits::default();
+    walk(root, root, &mut files, &mut 0, &mut limits)?;
+    Ok((files, limits))
+}
+
+fn collect_candidate(root: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+    let (files, limits) = collect(root)?;
+    if limits.skipped_files > 0 {
+        return Err(XaimError::PatchConflict(format!(
+            "任务副本有 {} 个文件超过快照上限，无法完整核对变更；请缩小或移除本轮生成的大文件后重试。文件：{}",
+            limits.skipped_files,
+            limits.paths.join(", ")
+        )));
+    }
     Ok(files)
 }
 
@@ -178,7 +221,7 @@ impl TaskWorkspace {
     }
 
     pub fn snapshot(root: &Path) -> Result<Self> {
-        let baseline = collect(root)?;
+        let (baseline, limits) = collect(root)?;
         let directory = tempfile::Builder::new().prefix("xaim-task-").tempdir()?;
         for (path, content) in &baseline {
             let target = safe_path(directory.path(), path)?;
@@ -190,6 +233,7 @@ impl TaskWorkspace {
             directory: directory.path().to_path_buf(),
             _temporary: Some(directory),
             baseline,
+            limits,
         })
     }
 
@@ -201,7 +245,7 @@ impl TaskWorkspace {
             .tempdir_in(parent)?;
         let directory = container.path().join("files");
         fs::create_dir(&directory)?;
-        let baseline = collect(root)?;
+        let (baseline, limits) = collect(root)?;
         for (path, content) in &baseline {
             let target = safe_path(&directory, path)?;
             fs::create_dir_all(target.parent().unwrap())?;
@@ -221,11 +265,17 @@ impl TaskWorkspace {
             directory,
             _temporary: None,
             baseline,
+            limits,
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.directory
+    }
+
+    /// Files excluded from the task copy because of snapshot limits.
+    pub fn limits(&self) -> &SnapshotLimits {
+        &self.limits
     }
 
     /// A delivered repository becomes the new baseline, not a text patch.
@@ -236,7 +286,7 @@ impl TaskWorkspace {
                 "已有待审阅编辑，请在新一轮中克隆仓库".into(),
             ));
         }
-        let baseline = collect(source)?;
+        let (baseline, limits) = collect(source)?;
         // Prepare every file before touching the live candidate. Import failure
         // must not leave a partially copied repository masquerading as edits.
         let stage = tempfile::tempdir_in(self.directory.parent().unwrap())?;
@@ -255,6 +305,7 @@ impl TaskWorkspace {
             return Err(error.into());
         }
         self.baseline = baseline;
+        self.limits = limits;
         Ok(())
     }
 
@@ -267,7 +318,7 @@ impl TaskWorkspace {
 
     /// Side-effect attribution also supports binary generated files.
     pub fn changed_paths(&self) -> Result<Vec<String>> {
-        let current = collect(self.root())?;
+        let current = collect_candidate(self.root())?;
         let paths: BTreeSet<_> = self.baseline.keys().chain(current.keys()).collect();
         Ok(paths
             .into_iter()
@@ -277,7 +328,7 @@ impl TaskWorkspace {
     }
 
     pub fn source_fingerprint(&self) -> Result<blake3::Hash> {
-        let current = collect(self.root())?;
+        let current = collect_candidate(self.root())?;
         let mut hash = blake3::Hasher::new();
         for (path, bytes) in current {
             hash.update(&(path.len() as u64).to_le_bytes());
@@ -289,7 +340,7 @@ impl TaskWorkspace {
     }
 
     pub fn changes(&self) -> Result<ChangeSet> {
-        let current = collect(self.root())?;
+        let current = collect_candidate(self.root())?;
         let paths: BTreeSet<_> = self.baseline.keys().chain(current.keys()).collect();
         let mut files = vec![];
         for path in paths {
@@ -494,6 +545,54 @@ mod tests {
             fs::read_to_string(root.path().join("untracked.txt")).unwrap(),
             "later unrelated edit"
         );
+    }
+
+    #[test]
+    fn oversized_files_are_skipped_with_a_report_instead_of_failing() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("keep.txt"), "hello").unwrap();
+        let big = root.path().join("big.zip");
+        fs::File::create(&big)
+            .unwrap()
+            .set_len(40 * 1024 * 1024)
+            .unwrap();
+        let workspace = TaskWorkspace::snapshot(root.path()).unwrap();
+        assert!(workspace.root().join("keep.txt").is_file());
+        assert!(!workspace.root().join("big.zip").exists());
+        assert_eq!(workspace.limits().skipped_files, 1);
+        assert_eq!(workspace.limits().paths, vec!["big.zip".to_string()]);
+        assert!(workspace.changes().unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn oversized_candidate_is_never_reported_as_a_deleted_file() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("keep.txt"), "original").unwrap();
+        let workspace = TaskWorkspace::snapshot(root.path()).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.root().join("keep.txt"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+
+        assert!(workspace.changes().is_err());
+        assert!(workspace.changed_paths().is_err());
+        assert!(workspace.source_fingerprint().is_err());
+        assert_eq!(fs::read(root.path().join("keep.txt")).unwrap(), b"original");
+    }
+
+    #[test]
+    fn oversized_new_candidate_cannot_disappear_from_review() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = TaskWorkspace::snapshot(root.path()).unwrap();
+        fs::File::create(workspace.root().join("generated.txt"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+
+        assert!(workspace.changes().is_err());
+        assert!(workspace.source_fingerprint().is_err());
     }
 
     #[test]

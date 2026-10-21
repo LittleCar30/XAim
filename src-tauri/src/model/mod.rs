@@ -42,6 +42,11 @@ const OLLAMA_PLACEHOLDER_KEY: &str = "ollama";
 /// 配置里的 `base_url` 可覆盖默认地址（代理、私有化部署）。
 /// 云端 provider 要求非空 api key，Ollama 可留空。
 pub fn create_provider(config: &ModelConfig) -> Result<Box<dyn ModelProvider>> {
+    if crate::config::credentials::is_reference(&config.api_key) {
+        return Err(XaimError::Config(
+            "模型凭据尚未从系统凭据库加载，请通过配置加载入口读取，或重新填写 API Key".into(),
+        ));
+    }
     let base_url = resolve_base_url(config)?;
     match config.provider.as_str() {
         "openai" => Ok(Box::new(
@@ -227,6 +232,19 @@ mod tests {
             .expect("NewAPI 缺少 api key 应返回错误")
             .to_string();
         assert!(msg.contains("api key") && msg.contains("newapi"), "{msg}");
+    }
+
+    #[test]
+    fn unresolved_credential_references_never_reach_a_provider() {
+        for provider in ["openai", "newapi", "ollama"] {
+            let mut config = model_config(provider, "xaim-vault-v1:test-reference");
+            config.base_url = Some("https://example.com/v1".into());
+            let error = create_provider(&config)
+                .err()
+                .expect("unresolved credential must be rejected locally");
+            assert!(error.to_string().contains("凭据"));
+            assert!(!error.to_string().contains("test-reference"));
+        }
     }
 
     #[test]

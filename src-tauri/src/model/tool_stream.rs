@@ -109,7 +109,6 @@ impl ToolStream {
             // Length is handed to the existing truncation recovery, never executed.
             if reason != "length"
                 && (index != expected
-                    || call.id.is_empty()
                     || call.function.name.is_empty()
                     || serde_json::from_str::<serde_json::Value>(&call.function.arguments).is_err())
             {

@@ -50,7 +50,12 @@ async fn streamed_fixture(interrupted: bool) -> EvalReport {
                     json!({"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7}}));
             }
             response.into_bytes()
-        }).expect(2).create_async().await;
+        })
+        // A broken stream is retried up to three times before the round
+        // fails, so the interrupted fixture issues four attempts.
+        .expect(if interrupted { 5 } else { 2 })
+        .create_async()
+        .await;
     let provider = Arc::new(xaim_lib::model::openai::OpenAiProvider::new(
         server.url(),
         "test-key".into(),
@@ -88,7 +93,14 @@ async fn broken_stream_saves_completed_candidate_and_text_without_executing_new_
     assert_eq!(task.candidate_verify_status.as_deref(), Some("passed"));
     assert_eq!(
         (task.model_calls, task.input_tokens, task.output_tokens),
-        (2, 11, 7)
+        (5, 11, 7)
+    );
+    assert_eq!(
+        task.diagnostics
+            .iter()
+            .filter(|e| e["kind"] == "modelRetry")
+            .count(),
+        3
     );
     assert!(task.checkpoint["files"]
         .as_array()

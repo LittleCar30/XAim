@@ -11,7 +11,7 @@ use super::task_context::{forecast, TaskSnapshot};
 use super::workspace::{ChangeSet, TaskWorkspace};
 use crate::errors::{Result, XaimError};
 use crate::events::XaimEvent;
-use crate::model::provider::{ModelProvider, ToolMessage, ToolRequest};
+use crate::model::provider::{ModelProvider, ToolCall, ToolMessage, ToolRequest};
 use crate::repair::r#loop::EventSink;
 use crate::store::{self, Store};
 use crate::tools::{controlled, operations, r#trait::ToolContext};
@@ -43,6 +43,10 @@ clone_repository 在本轮授权下将完整公开仓库交付到原项目，. �
 程序进入收尾状态后，禁止美化、扩展功能和反复编辑，只能执行提供的检查工具；真实验证失败时才能针对性修复。
 你提出完成后程序还会执行最终验证；只有 status=failed 才需要继续修复，unavailable 不代表代码错误。
 无法运行验证时必须明确说明，不能声称验证通过。"#;
+
+/// A provider call that dies mid-stream or mid-connection is retried a few
+/// times before the task is marked failed, matching mainstream agents.
+const MAX_MODEL_RETRIES: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
@@ -573,8 +577,19 @@ pub async fn run(
             content: format!("项目约定加载提示：{warning}"),
         })?;
     }
+    let snapshot_notice = if workspace.limits().skipped_files > 0 {
+        format!(
+            "\n工作区快照不完整：以下文件因超出快照上限而未复制，仍保留在原项目。本轮不能读取或编辑这些文件，不要反复尝试或声称已分析它们：\n{}",
+            serde_json::to_string(workspace.limits())?
+        )
+    } else {
+        String::new()
+    };
     let mut messages = vec![
-        ToolMessage::text("system", format!("{SYSTEM}{}", guidance.prompt()?)),
+        ToolMessage::text(
+            "system",
+            format!("{SYSTEM}{}{snapshot_notice}", guidance.prompt()?),
+        ),
         ToolMessage::text(
             "user",
             if config.conversation_context.is_empty() {
@@ -601,7 +616,7 @@ pub async fn run(
         );
     }
     let mut finishing = false;
-    let mut finishing_requests = 0;
+    let mut finishing_responses = 0;
     let mut recent_output = 4096_u64;
     let mut input = 0_u64;
     let mut output = 0_u64;
@@ -616,6 +631,7 @@ pub async fn run(
     let mut unsupported_completion_warned = false;
     let mut recent_request_ms = 10_000_u64;
     let mut truncation_retried = false;
+    let mut model_retries = 0u32;
     let mut measured_prompt: Option<(usize, usize)> = None;
     for turn in 0..config.max_turns {
         if cancel.load(Ordering::SeqCst) {
@@ -698,7 +714,7 @@ pub async fn run(
         snapshot.remaining_tokens = remaining;
         snapshot.predicted_rounds = prediction.rounds;
         snapshot.save_metadata(&record)?;
-        if finishing && finishing_requests >= 2 {
+        if finishing && finishing_responses >= 2 {
             return stop_locally(
                 "预算收尾已结束，停止额外模型请求",
                 &mut snapshot,
@@ -741,7 +757,7 @@ pub async fn run(
             "程序预算状态：剩余 {remaining} token（包括后续输入），预计可执行 {} 轮，第 {} / {} 轮。剩余时间 {:?} 毫秒。{} 当前验证：{}",
             prediction.rounds, turn + 1, config.max_turns,
             remaining_ms,
-            if finishing { "已进入收尾，只允许必要检查；真实检查失败时才能修复，禁止美化。最多两轮，然后由程序保存成果。" }
+            if finishing { "已进入收尾，只允许必要检查；真实检查失败时才能修复，禁止美化。最多两次有效响应，传输失败仅有限重试，然后由程序保存成果。" }
             else { "优先完成原始目标；用 update_task_state 记录待办，完成后直接提交状态。" },
             serde_json::to_string(&snapshot.verification.iter().map(|r| {
                 let mut check = json!({"kind":r["kind"],"status":r["status"]});
@@ -811,9 +827,6 @@ pub async fn run(
             "modelParameters",
             json!({"round":turn + 1,"parameters":provider.interaction_request_metadata(&request)}),
         )?;
-        if finishing {
-            finishing_requests += 1;
-        }
         record.event(XaimEvent::Step {
             task_id: record.task_id,
             name: format!("执行第 {} 轮", turn + 1),
@@ -840,6 +853,13 @@ pub async fn run(
         .await;
         let response = match response {
             Ok(response) => {
+                model_retries = 0;
+                // A failed stream produced no executable response. Only a
+                // successful response consumes the finishing allowance;
+                // retries remain bounded separately by attempts and deadline.
+                if finishing {
+                    finishing_responses += 1;
+                }
                 streamed_text.finish(if response.finish_reason == "length" {
                     "interrupted"
                 } else {
@@ -854,8 +874,45 @@ pub async fn run(
                     json!({
                         "round":turn + 1,"durationMs":started.elapsed().as_millis() as u64,
                         "errorKind":match &error { XaimError::Http(_) => "transport", XaimError::Cancelled => "cancelled", XaimError::Timeout(_) => "deadline", _ => "provider_or_protocol" },
+                        "retryable":retryable_model_error(&error),
+                        "phase":snapshot.phase,"finishingResponses":finishing_responses,
                     }),
                 )?;
+                if retryable_model_error(&error)
+                    && model_retries < MAX_MODEL_RETRIES
+                    && !cancel.load(Ordering::SeqCst)
+                    && config.deadline.is_none_or(|d| {
+                        d.saturating_duration_since(Instant::now()) > Duration::from_secs(5)
+                    })
+                {
+                    model_retries += 1;
+                    let reason: String = operations::redact(&error.to_string())
+                        .chars()
+                        .take(400)
+                        .collect();
+                    record.diagnostic(
+                        "modelRetry",
+                        json!({"round":turn + 1,"attempt":model_retries,"reason":reason}),
+                    )?;
+                    record.event(XaimEvent::Step {
+                        task_id: record.task_id,
+                        name: format!("模型响应中断，第 {} 次重试", model_retries),
+                        status: "done".into(),
+                    })?;
+                    let delay = model_retry_delay(model_retries);
+                    cancellable_until(
+                        &cancel,
+                        config
+                            .deadline
+                            .unwrap_or_else(|| Instant::now() + delay + Duration::from_secs(1)),
+                        async {
+                            tokio::time::sleep(delay).await;
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 return Err(error);
             }
         };
@@ -977,14 +1034,11 @@ pub async fn run(
             if tool_count + calls.len() > config.max_tool_calls {
                 return Err(XaimError::Model("任务达到工具调用次数上限".into()));
             }
-            for call in &calls {
-                if call.kind != "function" || call.id.is_empty() || !ids.insert(call.id.clone()) {
-                    return Err(XaimError::Model(
-                        "工具调用类型或 ID 无效、重复；未执行本轮工具".into(),
-                    ));
-                }
-            }
-            messages.push(response.message.clone());
+            let mut calls = calls;
+            ensure_unique_call_ids(&mut calls, &mut ids, turn + 1)?;
+            let mut message = response.message.clone();
+            message.tool_calls = calls.clone();
+            messages.push(message);
             let mut repeated_exploration = true;
             for call in calls {
                 if cancel.load(Ordering::SeqCst) {
@@ -1089,9 +1143,8 @@ pub async fn run(
                             },
                             "clone_repository" => {
                                 if !workspace.changes()?.files.is_empty() {
-                                    return stop_blocked("已有待审阅编辑，请先处理编辑，再在新一轮克隆", &mut snapshot, workspace, &record);
-                                }
-                                match serde_json::from_value(args) {
+                                    Err(XaimError::PatchConflict("已有待审阅编辑，不能用克隆替换当前基线；请继续处理当前编辑。若克隆是必要目标，请 report_blocked 保存待办，在审阅编辑后的新一轮克隆".into()))
+                                } else { match serde_json::from_value(args) {
                                     Ok(clone) => {
                                         let network = config.permissions.as_ref().map(|s| s.git_network.clone()).unwrap_or_default();
                                         let outcome = operations::clone_repository_observed(clone, project, &cancel, config.deadline, &network, &|progress| {
@@ -1108,7 +1161,7 @@ pub async fn run(
                                         }
                                         outcome
                                     }, Err(e) => Err(e.into()),
-                                }
+                                } }
                             },
                             name => {
                                 let id = args["process_id"].as_str().unwrap_or_default();
@@ -1463,6 +1516,53 @@ pub async fn run(
     .await
 }
 
+/// Gateways sometimes reuse a simple id such as `call_1` on every round, or
+/// emit an empty or duplicate id inside one response. Rewrite those to fresh
+/// unique ids instead of aborting the task.
+fn ensure_unique_call_ids(
+    calls: &mut [ToolCall],
+    seen: &mut HashSet<String>,
+    round: usize,
+) -> Result<()> {
+    let mut generated = 0usize;
+    for (index, call) in calls.iter_mut().enumerate() {
+        if call.kind != "function" {
+            return Err(XaimError::Model("工具调用类型无效；未执行本轮工具".into()));
+        }
+        if !call.id.is_empty() && !seen.contains(&call.id) {
+            seen.insert(call.id.clone());
+            continue;
+        }
+        loop {
+            generated += 1;
+            let candidate = format!("call_xaim_{round}_{index}_{generated}");
+            if seen.insert(candidate.clone()) {
+                call.id = candidate;
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Transient transport and stream failures are worth replaying; protocol
+/// errors that prove the model acted incorrectly are not.
+fn retryable_model_error(error: &XaimError) -> bool {
+    match error {
+        XaimError::Http(error) => error.is_connect() || error.is_timeout() || error.is_body(),
+        XaimError::Model(message) => {
+            message.starts_with("工具 SSE 读取失败")
+                || message.starts_with("工具 SSE 响应无效：连接在结束标记前关闭")
+        }
+        _ => false,
+    }
+}
+
+fn model_retry_delay(attempt: u32) -> Duration {
+    let jitter = (uuid::Uuid::new_v4().as_u128() as u64) % 251;
+    Duration::from_millis((500u64 << (attempt - 1).min(4)) + jitter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1476,6 +1576,7 @@ mod tests {
     struct Script {
         responses: Mutex<VecDeque<ToolResponse>>,
         requests: Mutex<Vec<ToolRequest>>,
+        failures: Mutex<std::collections::BTreeMap<usize, String>>,
         delay: Duration,
     }
 
@@ -1510,6 +1611,459 @@ mod tests {
             1
         );
         assert!(!events.iter().any(|e| e["status"] == "complete"));
+    }
+
+    fn tool_call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "list_dir".into(),
+                arguments: "{\"path\":\".\"}".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn duplicate_call_ids_are_rewritten_instead_of_failing_the_round() {
+        let mut seen = HashSet::new();
+        let mut first = vec![tool_call("call_1"), tool_call("")];
+        ensure_unique_call_ids(&mut first, &mut seen, 1).unwrap();
+        assert_eq!(first[0].id, "call_1");
+        assert!(first[1].id.starts_with("call_xaim_1_1_"));
+        let mut second = vec![tool_call("call_1")];
+        ensure_unique_call_ids(&mut second, &mut seen, 2).unwrap();
+        assert_eq!(second[0].id, "call_xaim_2_0_1");
+        let mut wrong_kind = vec![ToolCall {
+            kind: "message".into(),
+            ..tool_call("x")
+        }];
+        assert!(ensure_unique_call_ids(&mut wrong_kind, &mut HashSet::new(), 3).is_err());
+    }
+
+    #[test]
+    fn transient_stream_errors_are_retryable_but_protocol_errors_are_not() {
+        assert!(retryable_model_error(&XaimError::Model(
+            "工具 SSE 读取失败，未执行本轮工具".into()
+        )));
+        assert!(retryable_model_error(&XaimError::Model(
+            "工具 SSE 响应无效：连接在结束标记前关闭，未执行本轮工具".into()
+        )));
+        assert!(!retryable_model_error(&XaimError::Model(
+            "工具调用类型无效；未执行本轮工具".into()
+        )));
+        assert!(!retryable_model_error(&XaimError::Blocked(
+            "missing".into()
+        )));
+        assert!(!retryable_model_error(&XaimError::Model(
+            "工具 SSE 响应无效：工具调用参数 JSON 无效".into()
+        )));
+        assert!(!retryable_model_error(&XaimError::Model(
+            "工具响应超过接收上限，未执行本轮工具".into()
+        )));
+        assert!(!retryable_model_error(&XaimError::Model(
+            "工具 SSE 响应无效：UTF-8 无效，未执行本轮工具".into()
+        )));
+    }
+
+    #[tokio::test]
+    async fn model_retry_allowance_resets_after_a_successful_response() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![call("read", "list_dir", json!({"path":"."})), done()],
+            LoopConfig::default(),
+        );
+        *provider.failures.lock().unwrap() = [1, 2, 3, 5]
+            .into_iter()
+            .map(|attempt| (attempt, "工具 SSE 读取失败，未执行本轮工具".into()))
+            .collect();
+
+        let id = agent
+            .run_task(project, "解释一下项目结构".into())
+            .await
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 6);
+        let attempts: Vec<_> = store::task::list_steps(&store.conn(), id)
+            .unwrap()
+            .into_iter()
+            .filter(|step| step.step_type == "diagnostic")
+            .filter_map(|step| serde_json::from_str::<Value>(&step.content).ok())
+            .filter(|value| value["kind"] == "modelRetry")
+            .map(|value| value["data"]["attempt"].as_u64().unwrap())
+            .collect();
+        assert_eq!(attempts, vec![1, 2, 3, 1]);
+    }
+
+    #[tokio::test]
+    async fn consecutive_model_failures_stop_after_bounded_retries() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, _, project, provider, _) =
+            setup(root.path(), vec![done()], LoopConfig::default());
+        *provider.failures.lock().unwrap() = (1..=8)
+            .map(|attempt| (attempt, "工具 SSE 读取失败，未执行本轮工具".into()))
+            .collect();
+
+        assert!(agent
+            .run_task(project, "解释一下项目结构".into())
+            .await
+            .is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn finishing_stream_failures_preserve_the_completion_allowance() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = call(
+            "write",
+            "create_file",
+            json!({"path":"result.txt","content":"ready"}),
+        );
+        first.usage = Usage::new(10_000, 32_000);
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![first, done()],
+            LoopConfig {
+                max_total_tokens: 60_000,
+                ..Default::default()
+            },
+        );
+        *provider.failures.lock().unwrap() = [2, 3]
+            .into_iter()
+            .map(|attempt| (attempt, "工具 SSE 读取失败，未执行本轮工具".into()))
+            .collect();
+
+        let task = agent.run_task(project, "Create file".into()).await.unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 4);
+        assert_eq!(
+            store::task::get_task(&store.conn(), task)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::WaitingConfirm
+        );
+        assert!(!root.path().join("result.txt").exists());
+        agent.confirm_task(task).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.txt")).unwrap(),
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_stream_failures_still_stop_after_bounded_retries() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = call(
+            "write",
+            "create_file",
+            json!({"path":"result.txt","content":"partial"}),
+        );
+        first.usage = Usage::new(10_000, 32_000);
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![first, done()],
+            LoopConfig {
+                max_total_tokens: 60_000,
+                ..Default::default()
+            },
+        );
+        *provider.failures.lock().unwrap() = (2..=8)
+            .map(|attempt| (attempt, "工具 SSE 读取失败，未执行本轮工具".into()))
+            .collect();
+
+        let error = agent
+            .run_task(project, "Create file".into())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("SSE"));
+        assert_eq!(provider.requests.lock().unwrap().len(), 5);
+        let task = store::task::list_tasks(&store.conn(), project, 1)
+            .unwrap()
+            .remove(0);
+        let patches = store::patch::list_patches_by_task(&store.conn(), task.id).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert!(patches[0].diff.contains("partial"));
+        assert!(!root.path().join("result.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn negative_operation_constraint_does_not_block_file_work() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![
+                call(
+                    "write",
+                    "create_file",
+                    json!({"path":"index.html","content":"<!doctype html><html><body>Ready</body></html>"}),
+                ),
+                done(),
+            ],
+            LoopConfig::default(),
+        );
+        let task = agent
+            .run_task(
+                project,
+                "Create index.html. Do not install dependencies.".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        assert_eq!(
+            store::task::get_task(&store.conn(), task)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::WaitingConfirm
+        );
+        assert_eq!(
+            store::patch::list_patches_by_task(&store.conn(), task)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!root.path().join("index.html").exists());
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_model_retry_backoff() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, _, project, provider, sink) =
+            setup(root.path(), vec![done()], LoopConfig::default());
+        provider
+            .failures
+            .lock()
+            .unwrap()
+            .insert(1, "工具 SSE 读取失败，未执行本轮工具".into());
+        let cancelled_at = Mutex::new(None);
+        let cancel = async {
+            loop {
+                let retrying = sink.0.lock().unwrap().iter().any(|event|
+                    matches!(event, XaimEvent::Step { name, .. } if name.contains("第 1 次重试"))
+                );
+                if retrying {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            *cancelled_at.lock().unwrap() = Some(Instant::now());
+            agent.cancel().await;
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(agent.run_task(project, "解释一下项目结构".into()), cancel)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(outcome, Err(XaimError::Cancelled)));
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        assert!(cancelled_at.lock().unwrap().unwrap().elapsed() < Duration::from_millis(350));
+    }
+
+    #[tokio::test]
+    async fn clone_after_edits_is_recoverable_and_preserves_the_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![
+                call(
+                    "create",
+                    "create_file",
+                    json!({"path":"note.txt","content":"keep\n"}),
+                ),
+                call(
+                    "clone",
+                    "clone_repository",
+                    json!({"url":"https://example.com/repo","path":"."}),
+                ),
+                call("read", "read_file", json!({"path":"note.txt"})),
+                done(),
+            ],
+            LoopConfig {
+                allow_commands: true,
+                ..Default::default()
+            },
+        );
+        let id = agent
+            .run_task(project, "创建 note.txt".into())
+            .await
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 4);
+        let patches = store::patch::list_patches_by_task(&store.conn(), id).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].file_path, "note.txt");
+        assert!(!root.path().join("note.txt").exists());
+        agent.confirm_task(id).await.unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("note.txt")).unwrap(),
+            b"keep\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn clone_destination_conflict_returns_to_the_model_without_overwriting() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("keep.txt"), "original").unwrap();
+        let (agent, _, project, provider, sink) = setup(
+            root.path(),
+            vec![
+                call(
+                    "clone",
+                    "clone_repository",
+                    json!({"url":"https://example.com/repo","path":"."}),
+                ),
+                call("read", "read_file", json!({"path":"keep.txt"})),
+                done(),
+            ],
+            LoopConfig {
+                allow_commands: true,
+                ..Default::default()
+            },
+        );
+
+        agent
+            .run_task(project, "解释一下克隆目录冲突的原因".into())
+            .await
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        assert_eq!(
+            std::fs::read(root.path().join("keep.txt")).unwrap(),
+            b"original"
+        );
+        assert!(sink.0.lock().unwrap().iter().any(
+            |event| matches!(event, XaimEvent::ToolFinished { result, .. }
+                if result.name == "clone_repository" && !result.success
+                && result.error.as_deref().is_some_and(|message| message.contains("非空")))
+        ));
+    }
+
+    #[tokio::test]
+    async fn reused_tool_call_id_across_rounds_does_not_fail_the_task() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hello").unwrap();
+        let mut answer = done();
+        answer.message.content = Some("读取完成。".into());
+        let (agent, _, project, provider, _) = setup(
+            root.path(),
+            vec![
+                call("call_1", "list_dir", json!({"path":"."})),
+                call("call_1", "read_file", json!({"path":"a.txt"})),
+                answer,
+            ],
+            LoopConfig::default(),
+        );
+        agent
+            .run_task(project, "解释一下项目结构".into())
+            .await
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn oversized_project_file_does_not_fail_the_task_baseline() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("keep.txt"), "hello").unwrap();
+        std::fs::File::create(root.path().join("big.zip"))
+            .unwrap()
+            .set_len(40 * 1024 * 1024)
+            .unwrap();
+        let mut answer = done();
+        answer.message.content = Some("基线可以建立。".into());
+        let (agent, store, project, provider, _) =
+            setup(root.path(), vec![answer], LoopConfig::default());
+        let id = agent
+            .run_task(project, "解释一下项目结构".into())
+            .await
+            .unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        assert!(provider.requests.lock().unwrap()[0].messages[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("big.zip"));
+        let steps = store::task::list_steps(&store.conn(), id).unwrap();
+        assert!(steps.iter().any(|s| s.step_type == "diagnostic"
+            && s.content.contains("workspacePreparation")
+            && s.content.contains("\"skippedFiles\":1")));
+    }
+
+    #[tokio::test]
+    async fn unsupported_command_is_returned_to_the_model_instead_of_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hello").unwrap();
+        let (agent, _, project, provider, sink) = setup(
+            root.path(),
+            vec![
+                call(
+                    "find",
+                    "run_command",
+                    json!({"program":"find","args":["."]}),
+                ),
+                call("read", "read_file", json!({"path":"a.txt"})),
+                done(),
+            ],
+            LoopConfig {
+                allow_commands: true,
+                ..Default::default()
+            },
+        );
+        let outcome = agent
+            .run_task(project, "解释一下这个命令为什么不能运行".into())
+            .await;
+        assert!(
+            outcome.is_ok(),
+            "{}",
+            outcome
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        );
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        let events = sink.0.lock().unwrap();
+        assert!(events.iter().any(
+            |event| matches!(event, XaimEvent::ToolFinished { result, .. }
+            if result.error.as_deref().is_some_and(|message| message.contains("不支持的操作")))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unavailable_environment_is_returned_to_the_model_instead_of_blocking() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hello").unwrap();
+        let (agent, _, project, provider, sink) = setup(
+            root.path(),
+            vec![
+                call(
+                    "missing_script",
+                    "run_command",
+                    json!({"program":"powershell","args":["-File","missing.ps1"]}),
+                ),
+                call("read", "read_file", json!({"path":"a.txt"})),
+                done(),
+            ],
+            LoopConfig {
+                allow_commands: true,
+                ..Default::default()
+            },
+        );
+        let outcome = agent
+            .run_task(project, "解释一下这个脚本为什么无法运行".into())
+            .await;
+        assert!(
+            outcome.is_ok(),
+            "{}",
+            outcome
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        );
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        let events = sink.0.lock().unwrap();
+        assert!(events.iter().any(
+            |event| matches!(event, XaimEvent::ToolFinished { result, .. }
+            if result.error.as_deref().is_some_and(|message| message.contains("环境不可用")))
+        ));
     }
 
     #[tokio::test]
@@ -1631,7 +2185,14 @@ mod tests {
             true
         }
         async fn complete_tools(&self, request: ToolRequest) -> Result<ToolResponse> {
-            self.requests.lock().unwrap().push(request);
+            let attempt = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len()
+            };
+            if let Some(message) = self.failures.lock().unwrap().remove(&attempt) {
+                return Err(XaimError::Model(message));
+            }
             tokio::time::sleep(self.delay).await;
             self.responses
                 .lock()
@@ -1702,6 +2263,7 @@ mod tests {
         let provider = Arc::new(Script {
             responses: Mutex::new(responses.into()),
             requests: Mutex::new(vec![]),
+            failures: Mutex::default(),
             delay: Duration::ZERO,
         });
         let sink = Arc::new(Sink::default());
@@ -2989,6 +3551,7 @@ mod tests {
                     .into(),
                 ),
                 requests: Mutex::new(vec![]),
+                failures: Mutex::default(),
                 delay: Duration::ZERO,
             }),
         );
@@ -3013,6 +3576,7 @@ mod tests {
                 .into(),
             ),
             requests: Mutex::new(vec![]),
+            failures: Mutex::default(),
             delay: Duration::ZERO,
         });
         let next = Orchestrator::with_sink(
@@ -3092,6 +3656,7 @@ mod tests {
                 .into(),
             ),
             requests: Mutex::new(vec![]),
+            failures: Mutex::default(),
             delay: Duration::ZERO,
         });
         let next = Orchestrator::with_sink(

@@ -618,6 +618,7 @@ pub async fn run(
     let mut finishing = false;
     let mut finishing_responses = 0;
     let mut recent_output = 4096_u64;
+    let mut recent_reasoning_tokens = 0_u32;
     let mut input = 0_u64;
     let mut output = 0_u64;
     let mut tool_count = 0;
@@ -778,8 +779,10 @@ pub async fn run(
         } else {
             prediction.cost_per_round
         };
+        // Reasoning shares the output cap. Keep room for the observed thinking
+        // before reserving a short answer, still bounded by all request limits.
         let request_output = (if finishing {
-            output_budget.min(4096)
+            output_budget.min(4096_u32.saturating_add(recent_reasoning_tokens))
         } else {
             output_budget
         } as u64)
@@ -795,6 +798,7 @@ pub async fn run(
                 "totalLimit":config.max_total_tokens,"contextLimit":config.context_tokens,
                 "predictedRounds":prediction.rounds,"costPerRound":prediction.cost_per_round,
                 "reservedTokens":reserve,"phase":snapshot.phase,"messageCount":messages.len() + 1,
+                "recentReasoningTokens":recent_reasoning_tokens,
                 "rejected":request_output < minimum_output,
             }),
         )?;
@@ -939,6 +943,9 @@ pub async fn run(
         input += charged_input;
         output += charged_output;
         recent_output = charged_output;
+        if let Some(tokens) = response.reasoning_tokens {
+            recent_reasoning_tokens = tokens;
+        }
         snapshot.input_used = input;
         snapshot.output_used = output;
         snapshot.remaining_tokens = config.max_total_tokens.saturating_sub(input + output);
@@ -991,17 +998,26 @@ pub async fn run(
             let next_output = request_output.saturating_mul(2).min(config.output_ceiling);
             if !finishing
                 && !truncation_retried
-                && next_output > request_output
+                && next_output >= request_output
                 && config.max_total_tokens.saturating_sub(input + output)
                     >= estimated_input as u64 + next_output as u64
                 && estimated_input + next_output as usize <= config.context_tokens
             {
                 output_budget = next_output;
                 truncation_retried = true;
+                record.diagnostic("modelTruncationRetry", json!({
+                    "round":turn + 1,"previousOutput":request_output,"nextOutput":next_output,
+                    "strategy":if next_output > request_output { "increase_budget" } else { "smaller_chunks" },
+                }))?;
                 messages.push(ToolMessage::text("user", "上一轮响应被截断，任何工具均未执行。请减少单轮内容，先创建小骨架，再分块追加；不要重新输出完整长文件。"));
                 record.event(XaimEvent::Step {
                     task_id: record.task_id,
-                    name: "响应截断，提高输出预算后重试".into(),
+                    name: if next_output > request_output {
+                        "响应截断，提高输出预算后重试"
+                    } else {
+                        "响应截断，保持输出上限并分块重试"
+                    }
+                    .into(),
                     status: "done".into(),
                 })?;
                 continue;
@@ -1712,6 +1728,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finishing_reserves_observed_reasoning_before_answer_tokens() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = call(
+            "write",
+            "create_file",
+            json!({"path":"result.txt","content":"ready"}),
+        );
+        first.usage = Usage::new(10_000, 32_000);
+        first.reasoning_tokens = Some(23_000);
+        let (agent, _, project, provider, _) = setup(
+            root.path(),
+            vec![first, done()],
+            LoopConfig {
+                max_total_tokens: 80_000,
+                ..Default::default()
+            },
+        );
+        let task = agent.run_task(project, "Create file".into()).await.unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].max_tokens, 27_096);
+        assert!(!requests[1]
+            .tools
+            .iter()
+            .any(|t| t["function"]["name"] == "create_file"));
+        drop(requests);
+        agent.confirm_task(task).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("result.txt")).unwrap(),
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn finishing_reasoning_reservation_respects_remaining_task_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = call(
+            "write",
+            "create_file",
+            json!({"path":"result.txt","content":"ready"}),
+        );
+        first.usage = Usage::new(10_000, 32_000);
+        first.reasoning_tokens = Some(23_000);
+        let (agent, _, project, provider, _) = setup(
+            root.path(),
+            vec![first, done()],
+            LoopConfig {
+                max_total_tokens: 60_000,
+                ..Default::default()
+            },
+        );
+        agent.run_task(project, "Create file".into()).await.unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert!(requests[1].max_tokens > 4096);
+        assert!(requests[1].max_tokens < 18_000);
+    }
+
+    #[tokio::test]
     async fn finishing_stream_failures_preserve_the_completion_allowance() {
         let root = tempfile::tempdir().unwrap();
         let mut first = call(
@@ -1734,7 +1808,10 @@ mod tests {
             .collect();
 
         let task = agent.run_task(project, "Create file".into()).await.unwrap();
-        assert_eq!(provider.requests.lock().unwrap().len(), 4);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[1].max_tokens, 4096);
+        drop(requests);
         assert_eq!(
             store::task::get_task(&store.conn(), task)
                 .unwrap()
@@ -3114,6 +3191,90 @@ mod tests {
                 .len(),
             9000
         );
+    }
+
+    #[tokio::test]
+    async fn truncation_at_output_ceiling_retries_smaller_chunks_without_partial_tools() {
+        let root = tempfile::tempdir().unwrap();
+        let mut truncated = call(
+            "partial",
+            "create_file",
+            json!({"path":"partial.txt","content":"must not execute"}),
+        );
+        truncated.finish_reason = "length".into();
+        let (agent, _, project, provider, _) = setup(
+            root.path(),
+            vec![
+                truncated,
+                call(
+                    "valid",
+                    "create_file",
+                    json!({"path":"valid.txt","content":"ok"}),
+                ),
+                done(),
+            ],
+            LoopConfig {
+                output_tokens: 8192,
+                output_ceiling: 8192,
+                ..Default::default()
+            },
+        );
+        let task = agent.run_task(project, "Create file".into()).await.unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].max_tokens, 8192);
+        assert_eq!(requests[1].max_tokens, 8192);
+        assert!(requests[1].messages.iter().any(|m| m
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("分块")));
+        assert!(requests[1].messages.iter().all(|m| m.tool_calls.is_empty()));
+        drop(requests);
+        agent.confirm_task(task).await.unwrap();
+        assert!(!root.path().join("partial.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("valid.txt")).unwrap(),
+            "ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_truncation_at_output_ceiling_stops_after_one_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let mut truncated = call(
+            "partial",
+            "create_file",
+            json!({"path":"partial.txt","content":"must not execute"}),
+        );
+        truncated.finish_reason = "length".into();
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![
+                call(
+                    "saved",
+                    "create_file",
+                    json!({"path":"saved.txt","content":"keep"}),
+                ),
+                truncated.clone(),
+                truncated,
+            ],
+            LoopConfig {
+                output_tokens: 8192,
+                output_ceiling: 8192,
+                ..Default::default()
+            },
+        );
+        assert!(agent.run_task(project, "Create file".into()).await.is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        let task = store::task::list_tasks(&store.conn(), project, 1)
+            .unwrap()
+            .remove(0);
+        let patches = store::patch::list_patches_by_task(&store.conn(), task.id).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].file_path, "saved.txt");
+        assert!(!root.path().join("saved.txt").exists());
+        assert!(!root.path().join("partial.txt").exists());
     }
 
     #[tokio::test]

@@ -32,6 +32,8 @@ tasks/<id>/
 
 安装上述工具后，在项目根目录运行 `node tests/eval/run.mjs reference`。非标准安装路径可通过 `EVAL_GO`、`EVAL_PYTHON` 指定。验收摘要见 [VALIDATION.md](VALIDATION.md)。
 
+参考模式会在隔离候选中初始化独立 Git 仓库并关闭本次补丁应用的自动换行转换，防止候选位于主仓库子目录时补丁被静默跳过。可运行 `node --test tests/eval/reference.test.mjs` 验证嵌套候选、父仓库保护和补丁失败处理。
+
 ## 单任务
 
 保留评测目录的 `repo/` 作为基线，将它复制到独立工作目录。将该工作目录作为 XAim 项目，只提交 `task.md` 内容。不要把参考补丁、验收器或其他任务交给 XAim。

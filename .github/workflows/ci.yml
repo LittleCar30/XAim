@@ -70,8 +70,8 @@ jobs:
       - name: Rust lint
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --lib --bin xaim-eval
 
-      - name: Review scorer tests
-        run: node --test tests/eval/review-validation.test.mjs
+      - name: Evaluation validator tests
+        run: node --test tests/eval/review-validation.test.mjs tests/eval/reference.test.mjs
 
       - name: React to Rust integration
         if: runner.os == 'Windows'

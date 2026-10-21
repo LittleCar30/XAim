@@ -18,6 +18,9 @@
 | 协议错误被当作连接故障 | 仅重试明确的传输中断，避免重复请求无效角色、索引或 JSON 响应 | `transient_stream_errors_are_retryable_but_protocol_errors_are_not` |
 | 连续服务故障、用户取消 | 重试次数有上限；取消应打断退避等待，不再发送请求 | `consecutive_model_failures_stop_after_bounded_retries`、`cancellation_interrupts_model_retry_backoff` |
 | 收尾期间断流被误计为有效收尾 | 只有成功响应才消耗两次收尾机会；失败仍受独立重试次数、任务时限和总执行轮数限制 | `finishing_stream_failures_preserve_the_completion_allowance`、`finishing_stream_failures_still_stop_after_bounded_retries` |
+| 收尾固定 4096 token 导致思考耗尽输出额度 | 收尾为最近明确报告的 reasoning token 额外预留额度，保留 4096 token 正文空间；仍受配置上限、剩余总预算及上下文限制 | `finishing_reserves_observed_reasoning_before_answer_tokens`、`finishing_reasoning_reservation_respects_remaining_task_budget` |
+| 执行阶段已到输出上限，跳过了单次截断恢复 | 无法再提高额度时，保持原上限要求分块生成，仍最多重试一次，不执行任何截断调用 | `truncation_at_output_ceiling_retries_smaller_chunks_without_partial_tools`、`repeated_truncation_at_output_ceiling_stops_after_one_retry` |
+| 参考工作目录继承主仓库，补丁被跳过却返回成功 | 参考候选先建立独立 Git 工作树；不匹配的补丁必须报错，原项目不变 | `tests/eval/reference.test.mjs` |
 | “不要安装依赖”被关键词误判为必做操作 | 识别操作短语前明确的中英文否定约束；后续肯定要求仍需实际证据，工具授权不变 | `explicitly_negated_operations_are_constraints_instead_of_requirements`、`negative_operation_constraint_does_not_block_file_work` |
 | 网关重复或遗漏 tool call ID | 在执行前规范化 ID，并同步请求历史中的工具配对 | `duplicate_call_ids_are_rewritten_instead_of_failing_the_round`、`reused_tool_call_id_across_rounds_does_not_fail_the_task` |
 | SSE 中遗漏 tool call ID 被解析器过早拒绝 | 在完整响应校验时保留函数名和参数校验，允许运行时生成安全且唯一的 ID | `complete_stream_without_call_id_reaches_runtime_normalization` |
@@ -39,7 +42,9 @@
 
 原始私人任务的重放在提高 SSE 接收预算后仍曾多次断流。细碎 reasoning 分片使事件封装开销达到约 262 KB，暴露了旧预算按输出 token 的 64 倍估算过紧；预算现提高到 512 倍但仍受硬上限约束。另一个完整但缺少工具调用 ID 的 SSE 响应此前在解析层被拒绝，尽管 Agent 已有安全 ID 规范化逻辑；现在该响应能到达运行时规范化，缺少名称或无效参数仍会拒绝。两项修复均已添加针对性回归。原始私人任务尚未在这些修复后完成重放，因此不记录为已解决的端到端任务。
 
-随后再次以独立日志重放原始任务：前两轮模型响应完成并调用工具，第三轮在 34.8 秒后以 `length` 结束。运行时丢弃这轮未完成的工具调用；此前的一次有界提高输出预算重试已经用尽，最后保存候选和阶段进展，但未应用变更。全程约 224 秒，故原始任务仍未通过端到端验收。此失败与 SSE 接收上限、缺失调用 ID 属于不同问题；重复加大线上重试会带来额外耗时和 token 成本，目前保留上下文与总预算检查下的单次截断恢复策略。
+随后再次以独立日志重放原始任务：前两轮模型响应完成并调用工具，第三轮在 34.8 秒后以 `length` 结束。运行时丢弃这轮未完成的工具调用，保存候选和阶段进展，未应用变更。全程约 224 秒，未通过端到端验收。
+
+更正此前的失败归因：结构化诊断显示第二轮使用了 23309 个 reasoning token，第三轮因剩余时间进入收尾后，输出额度从 32768 强制降为 4096，且全部 4096 被思考消耗。当时未进行截断重试，并非“已用尽一次截断重试”。两项回归先复现固定上限问题，再修正为最近明确报告的 reasoning token 加 4096 正文空间（仍受原配置上限、总预算、上下文和任务时限约束）；没有报告 reasoning 用量时继续使用原 4096 收尾额度。此修改不执行截断工具，也不增加模型重试次数。
 
 ## 检查入口
 
@@ -51,9 +56,11 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
 cargo test --manifest-path src-tauri/Cargo.toml --locked --bin xaim-eval
 cargo clippy --manifest-path src-tauri/Cargo.toml --locked --lib --bin xaim-eval
-node --test tests/eval/review-validation.test.mjs
+node --test tests/eval/review-validation.test.mjs tests/eval/reference.test.mjs
 pnpm test:e2e
 ```
+
+Windows 上应顺序运行 E2E 与显式 live 测试：两者共用 Rust 测试 EXE，正在运行的 live 进程会锁住文件；并行重新链接可能触发 LNK1104。这是构建产物竞争，不能据此归因为产品业务失败。
 
 本地回归使用模拟模型和临时项目，不消耗线上模型额度。真实模型测试单独运行并保留独立日志，测试中的单任务时限为 300 秒，日志数据库必须与桌面数据库分开。不能把本地回归数量等同于线上任务成功率；也不能仅凭 HTML/SVG 结构检查宣称视觉效果已验收。
 
@@ -65,15 +72,19 @@ pnpm test:e2e
 
 | 检查 | 结果 |
 | --- | --- |
-| Rust 库测试 | 695 通过，3 个显式外部/集成测试默认忽略；涵盖本轮恢复性回归 |
+| Rust 库测试 | 699 通过，3 个显式外部/集成测试默认忽略；新增收尾推理预算、同上限截断恢复及次数限制回归 |
 | 前端单测 | 154 通过 |
 | 评测运行器 | 14 通过，覆盖中断后保留候选与正文、禁止执行未完成工具 |
-| 审查验证器 | 2 通过 |
+| 评测验证器 | 4 通过，覆盖审查定位、嵌套候选补丁应用及失败可见性 |
+| 30 项评测链路 | 参考解 30/30、初始基线 0/30；仅用于验收任务与评分链路，不代表 Agent 在线准确率 |
 | React → Rust 完整流程 | 1 通过，覆盖临时项目、索引、任务、Diff、应用及结果核验 |
 | 真实 GitHub 克隆 | 显式运行通过，确认 Git 元数据和仓库文件交付 |
 | 真实模型公开 HTML 流程 | 约 16 秒、4 次模型请求，通过生成、读取、提交审阅、应用和回滚；使用独立日志 |
-| 原始私人任务重放（最终修复后） | 约 224 秒；两轮工具调用后再次达到模型输出长度上限，候选保留、未应用；未通过端到端验收 |
+| 原始私人任务历史重放 | 约 224 秒；收尾固定 4096 导致思考耗尽，候选保留、未应用；另一次在默认 8192 上限处停止，均未通过端到端验收 |
+| 原始私人任务最终重放 | 约 221 秒、18 轮请求，第 2 轮截断后按同上限分块恢复；生成一个 HTML 候选，审阅状态、应用、HTML/SVG 基本结构及回滚检查通过。只代表本次运行，不代表视觉质量或长期成功率 |
 | 公开 HTML 浏览器交互 | 页面显示蓝色 SVG 圆形；实际点击按钮后标题改变。只代表此最小样例，不代表原始任务视觉验收 |
 | lint / 生产构建 / Rust 格式 / 桌面入口编译 / Clippy | 通过；保留既有 watcher `while_let_loop` 和构建体积提示 |
+| Windows release EXE / MSI / NSIS | 使用锁定依赖构建成功；检查 MSI 包含主程序且大小与 release EXE 相同，产物 SHA-256 另存本地 |
+| release 启动冒烟 | 使用独立临时数据目录，进程存活且响应、原生窗口已创建、数据库已初始化；检查后关闭测试实例 |
 
-原生桌面窗口与安装包本轮未验收。真实模型重放的结果单独记载，不计入上述模拟模型回归数量。
+原生窗口的完整交互、安装和卸载流程仍未验收。真实模型重放的结果单独记载，不计入上述模拟模型回归数量。

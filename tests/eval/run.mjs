@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { copyRepo, run, verify } from './verify.mjs';
+import { copyRepo, verify } from './verify.mjs';
+import { applyReferencePatch } from './reference.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -32,8 +33,7 @@ for (const id of taskDirs) {
     if (mode !== 'candidate') copyRepo(path.join(taskDir, 'repo'), repo);
     if (!existsSync(repo)) throw new Error(`Missing candidate repo: ${repo}`);
     if (mode === 'reference') {
-      const patch = run(['git', 'apply', '--whitespace=error', path.join(taskDir, 'expected.diff')], repo);
-      if (patch.status !== 0) throw new Error(patch.output);
+      applyReferencePatch(repo, path.join(taskDir, 'expected.diff'));
     }
     const checked = await verify(taskDir, repo);
     result = { id, category: spec.category, language: spec.language, passed: true, changed: checked.changed, log: checked.log };

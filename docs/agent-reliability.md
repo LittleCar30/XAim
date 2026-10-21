@@ -24,6 +24,7 @@
 | 参考工作目录继承主仓库，补丁被跳过却返回成功 | 参考候选先建立独立 Git 工作树；不匹配的补丁必须报错，原项目不变 | `tests/eval/reference.test.mjs` |
 | “不要安装依赖”被关键词误判为必做操作 | 识别操作短语前明确的中英文否定约束；后续肯定要求仍需实际证据，工具授权不变 | `explicitly_negated_operations_are_constraints_instead_of_requirements`、`negative_operation_constraint_does_not_block_file_work` |
 | 网关重复或遗漏 tool call ID | 在执行前规范化 ID，并同步请求历史中的工具配对 | `duplicate_call_ids_are_rewritten_instead_of_failing_the_round`、`reused_tool_call_id_across_rounds_does_not_fail_the_task` |
+| 选择 Anthropic provider 后运行时才失败 | 使用原生 Messages API 的 `x-api-key` / `anthropic-version` 请求，转换 `tool_use` 与 `tool_result`，错误响应不泄露密钥 | `model::anthropic::tests::native_messages_request_maps_roles_headers_and_tool_schema`、`tool_result_round_trip_uses_anthropic_tool_result_block`、`anthropic_errors_are_visible_without_exposing_key` |
 | SSE 中遗漏 tool call ID 被解析器过早拒绝 | 在完整响应校验时保留函数名和参数校验，允许运行时生成安全且唯一的 ID | `complete_stream_without_call_id_reaches_runtime_normalization` |
 | 大量细碎 SSE 分片触发接收上限 | 按输出预算放宽软接收上限，同时保留硬上限；区分网络中断、协议错误和超限 | `sse_framing_overhead_does_not_truncate_a_valid_reasoning_response`、`oversized_event_without_delimiter_is_bounded` |
 | 原项目有大文件 | 建立快照时跳过并向用户和模型说明缺口，保留原文件 | `oversized_files_are_skipped_with_a_report_instead_of_failing`、`oversized_project_file_does_not_fail_the_task_baseline` |

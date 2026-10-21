@@ -19,7 +19,8 @@
 | 连续服务故障、用户取消 | 重试次数有上限；取消应打断退避等待，不再发送请求 | `consecutive_model_failures_stop_after_bounded_retries`、`cancellation_interrupts_model_retry_backoff` |
 | 收尾期间断流被误计为有效收尾 | 只有成功响应才消耗两次收尾机会；失败仍受独立重试次数、任务时限和总执行轮数限制 | `finishing_stream_failures_preserve_the_completion_allowance`、`finishing_stream_failures_still_stop_after_bounded_retries` |
 | 收尾固定 4096 token 导致思考耗尽输出额度 | 收尾为最近明确报告的 reasoning token 额外预留额度，保留 4096 token 正文空间；仍受配置上限、剩余总预算及上下文限制 | `finishing_reserves_observed_reasoning_before_answer_tokens`、`finishing_reasoning_reservation_respects_remaining_task_budget` |
-| 执行阶段已到输出上限，跳过了单次截断恢复 | 无法再提高额度时，保持原上限要求分块生成，仍最多重试一次，不执行任何截断调用 | `truncation_at_output_ceiling_retries_smaller_chunks_without_partial_tools`、`repeated_truncation_at_output_ceiling_stops_after_one_retry` |
+| 执行阶段已到输出上限，连续截断后没有新的恢复机会 | 无法再提高额度时，要求只执行一个最小具体操作；推理占满额度时明确禁止重做整份方案。每段截断最多恢复 2 次，整项任务最多 3 次，不执行任何截断调用 | `truncation_at_output_ceiling_retries_smaller_chunks_without_partial_tools`、`repeated_truncation_at_output_ceiling_uses_bounded_escalated_retries` |
+| 成功完成多轮工具后仍被前一次截断标记终止 | 真实工具成功后恢复连续截断额度；失败工具、进度声明不重置，整项任务最多恢复 3 次 | `successful_tools_restore_truncation_recovery_for_later_rounds`、`alternating_success_and_truncation_still_has_a_task_retry_limit`、`failed_tools_do_not_restore_truncation_recovery`、`progress_reports_do_not_restore_truncation_recovery` |
 | 参考工作目录继承主仓库，补丁被跳过却返回成功 | 参考候选先建立独立 Git 工作树；不匹配的补丁必须报错，原项目不变 | `tests/eval/reference.test.mjs` |
 | “不要安装依赖”被关键词误判为必做操作 | 识别操作短语前明确的中英文否定约束；后续肯定要求仍需实际证据，工具授权不变 | `explicitly_negated_operations_are_constraints_instead_of_requirements`、`negative_operation_constraint_does_not_block_file_work` |
 | 网关重复或遗漏 tool call ID | 在执行前规范化 ID，并同步请求历史中的工具配对 | `duplicate_call_ids_are_rewritten_instead_of_failing_the_round`、`reused_tool_call_id_across_rounds_does_not_fail_the_task` |
@@ -48,6 +49,10 @@
 
 ## 检查入口
 
+19:37 发起的本机任务 #69 在约 529 秒后失败。只读诊断显示第 2 轮截断后恢复，第 3 轮成功创建候选，第 5、7 轮成功编辑，第 6 轮编辑失败但随后恢复；第 8 轮再次截断时仍余约 435857 token，尚处执行阶段。根因是截断重试标记覆盖整项任务且未随成功工具重置，而不是总预算不足。新增回归先复现，再改为连续截断限制并增加整项任务 3 次恢复上限；截断调用仍整轮丢弃。原任务候选和数据库只读保留，不自动应用。
+
+修复后用隔离日志重放公开鹈鹕 SVG 任务，约 122 秒后仍失败：第 2、4、5 轮的 8192 输出额度被 8192、8192、7568 个 reasoning token 使用，最后一轮的部分编辑工具被安全丢弃。该证据表明连续截断恢复过早停止，且旧提示没有针对推理耗尽收敛到单一操作。随后将每段重试上限提高至两次，整项任务恢复上限保持三次；推理占用达到额度 75% 时提示立即执行一个最小工具操作，并记录恢复原因。第二次公开任务重放通过生成、审阅、应用、结构检查和回滚。
+
 ```bash
 pnpm test
 pnpm lint
@@ -72,7 +77,7 @@ Windows 上应顺序运行 E2E 与显式 live 测试：两者共用 Rust 测试 
 
 | 检查 | 结果 |
 | --- | --- |
-| Rust 库测试 | 699 通过，3 个显式外部/集成测试默认忽略；新增收尾推理预算、同上限截断恢复及次数限制回归 |
+| Rust 库测试 | 703 通过，3 个显式外部/集成测试默认忽略；新增成功操作恢复额度、连续失败与整项任务上限回归 |
 | 前端单测 | 154 通过 |
 | 评测运行器 | 14 通过，覆盖中断后保留候选与正文、禁止执行未完成工具 |
 | 评测验证器 | 4 通过，覆盖审查定位、嵌套候选补丁应用及失败可见性 |
@@ -80,6 +85,7 @@ Windows 上应顺序运行 E2E 与显式 live 测试：两者共用 Rust 测试 
 | React → Rust 完整流程 | 1 通过，覆盖临时项目、索引、任务、Diff、应用及结果核验 |
 | 真实 GitHub 克隆 | 显式运行通过，确认 Git 元数据和仓库文件交付 |
 | 真实模型公开 HTML 流程 | 约 16 秒、4 次模型请求，通过生成、读取、提交审阅、应用和回滚；使用独立日志 |
+| 鹈鹕骑车 SVG 动画重放 | 首次在 122 秒后因 8192 输出额度被推理耗尽而失败；针对性恢复改进后，第二次用 22 轮、约 247 秒生成 9206 字节 HTML，审阅、应用、HTML/SVG 基本结构和回滚测试通过。代码包含固定髋点、独立固定前伸翅膀、后置远侧腿和逐帧动画；这是单次结构验收，不代表浏览器视觉或运动质量完整验收 |
 | 原始私人任务历史重放 | 约 224 秒；收尾固定 4096 导致思考耗尽，候选保留、未应用；另一次在默认 8192 上限处停止，均未通过端到端验收 |
 | 原始私人任务最终重放 | 约 221 秒、18 轮请求，第 2 轮截断后按同上限分块恢复；生成一个 HTML 候选，审阅状态、应用、HTML/SVG 基本结构及回滚检查通过。只代表本次运行，不代表视觉质量或长期成功率 |
 | 公开 HTML 浏览器交互 | 页面显示蓝色 SVG 圆形；实际点击按钮后标题改变。只代表此最小样例，不代表原始任务视觉验收 |

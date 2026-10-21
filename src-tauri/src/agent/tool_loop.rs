@@ -47,6 +47,8 @@ clone_repository 在本轮授权下将完整公开仓库交付到原项目，. �
 /// A provider call that dies mid-stream or mid-connection is retried a few
 /// times before the task is marked failed, matching mainstream agents.
 const MAX_MODEL_RETRIES: u32 = 3;
+const MAX_TASK_TRUNCATION_RETRIES: u32 = 3;
+const MAX_CONSECUTIVE_TRUNCATION_RETRIES: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
@@ -631,7 +633,8 @@ pub async fn run(
     let mut last_failed_revision = None;
     let mut unsupported_completion_warned = false;
     let mut recent_request_ms = 10_000_u64;
-    let mut truncation_retried = false;
+    let mut consecutive_truncation_retries = 0_u32;
+    let mut task_truncation_retries = 0_u32;
     let mut model_retries = 0u32;
     let mut measured_prompt: Option<(usize, usize)> = None;
     for turn in 0..config.max_turns {
@@ -992,24 +995,39 @@ pub async fn run(
                     "reasoningTokens":response.reasoning_tokens,
                     "usageReported":response.usage_reported,
                     "discardedToolCalls":response.message.tool_calls.len(),
+                    "consecutiveRetriesUsed":consecutive_truncation_retries,
+                    "taskRetriesUsed":task_truncation_retries,
                 }),
             )?;
             // Discard the whole response before executing any partial tool calls.
             let next_output = request_output.saturating_mul(2).min(config.output_ceiling);
             if !finishing
-                && !truncation_retried
+                && consecutive_truncation_retries < MAX_CONSECUTIVE_TRUNCATION_RETRIES
+                && task_truncation_retries < MAX_TASK_TRUNCATION_RETRIES
                 && next_output >= request_output
                 && config.max_total_tokens.saturating_sub(input + output)
                     >= estimated_input as u64 + next_output as u64
                 && estimated_input + next_output as usize <= config.context_tokens
             {
                 output_budget = next_output;
-                truncation_retried = true;
+                consecutive_truncation_retries += 1;
+                task_truncation_retries += 1;
+                let reasoning_exhausted = response
+                    .reasoning_tokens
+                    .is_some_and(|tokens| tokens >= request_output.saturating_mul(3) / 4);
                 record.diagnostic("modelTruncationRetry", json!({
                     "round":turn + 1,"previousOutput":request_output,"nextOutput":next_output,
+                    "taskAttempt":task_truncation_retries,"taskLimit":MAX_TASK_TRUNCATION_RETRIES,
+                    "consecutiveAttempt":consecutive_truncation_retries,"consecutiveLimit":MAX_CONSECUTIVE_TRUNCATION_RETRIES,
+                    "reasoningExhausted":reasoning_exhausted,
                     "strategy":if next_output > request_output { "increase_budget" } else { "smaller_chunks" },
                 }))?;
-                messages.push(ToolMessage::text("user", "上一轮响应被截断，任何工具均未执行。请减少单轮内容，先创建小骨架，再分块追加；不要重新输出完整长文件。"));
+                let recovery = if reasoning_exhausted {
+                    "上一轮输出额度主要被推理消耗，未完成任何工具，部分工具调用已丢弃。不要重新生成或解释整个方案；立即执行一个最小、具体的工具操作，只返回完成该操作所需的短参数。若需写长文件，先创建很短的骨架，再用多次小范围追加。"
+                } else {
+                    "上一轮响应被截断，任何工具均未执行。请减少单轮内容，只执行一个最小具体操作；长文件先创建小骨架，再分块追加，不要重新输出完整长文件。"
+                };
+                messages.push(ToolMessage::text("user", recovery));
                 record.event(XaimEvent::Step {
                     task_id: record.task_id,
                     name: if next_output > request_output {
@@ -1318,6 +1336,12 @@ pub async fn run(
                     &call.id,
                     serde_json::to_string(&result)?,
                 ));
+                // Only completed tool work restores the consecutive allowance.
+                // Model-authored progress reports cannot manufacture recovery;
+                // the per-task cap, token budget and deadline remain unchanged.
+                if result.success && call.function.name != "update_task_state" {
+                    consecutive_truncation_retries = 0;
+                }
             }
             repeated_exploration_rounds = if repeated_exploration {
                 repeated_exploration_rounds + 1
@@ -3194,6 +3218,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_tools_restore_truncation_recovery_for_later_rounds() {
+        let root = tempfile::tempdir().unwrap();
+        let mut truncated = call(
+            "partial",
+            "create_file",
+            json!({"path":"partial.txt","content":"must not execute"}),
+        );
+        truncated.finish_reason = "length".into();
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            vec![
+                truncated.clone(),
+                call(
+                    "saved",
+                    "create_file",
+                    json!({"path":"saved.txt","content":"keep"}),
+                ),
+                truncated,
+                call(
+                    "valid",
+                    "create_file",
+                    json!({"path":"valid.txt","content":"ok"}),
+                ),
+                done(),
+            ],
+            LoopConfig {
+                output_tokens: 8192,
+                output_ceiling: 8192,
+                ..Default::default()
+            },
+        );
+        let task = agent
+            .run_task(project, "Create files".into())
+            .await
+            .unwrap();
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests.iter().all(|r| r.max_tokens <= 8192));
+        // Truncated calls never enter executable history.
+        assert!(requests
+            .iter()
+            .flat_map(|r| &r.messages)
+            .flat_map(|m| &m.tool_calls)
+            .all(|c| c.id != "partial"));
+        drop(requests);
+        let attempts: Vec<_> = store::task::list_steps(&store.conn(), task)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.step_type == "diagnostic")
+            .filter_map(|s| serde_json::from_str::<Value>(&s.content).ok())
+            .filter(|v| v["kind"] == "modelTruncationRetry")
+            .map(|v| v["data"]["taskAttempt"].as_u64().unwrap())
+            .collect();
+        assert_eq!(attempts, vec![1, 2]);
+        agent.confirm_task(task).await.unwrap();
+        assert!(!root.path().join("partial.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("saved.txt")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("valid.txt")).unwrap(),
+            "ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn alternating_success_and_truncation_still_has_a_task_retry_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut truncated = call(
+            "partial",
+            "create_file",
+            json!({"path":"partial.txt","content":"must not execute"}),
+        );
+        truncated.finish_reason = "length".into();
+        let mut responses = vec![call(
+            "saved",
+            "create_file",
+            json!({"path":"saved.txt","content":"keep"}),
+        )];
+        for i in 0..4 {
+            responses.push(truncated.clone());
+            responses.push(call(
+                &format!("read-{i}"),
+                "read_file",
+                json!({"path":"saved.txt","offset":0}),
+            ));
+        }
+        let (agent, store, project, provider, _) = setup(
+            root.path(),
+            responses,
+            LoopConfig {
+                output_tokens: 8192,
+                output_ceiling: 8192,
+                ..Default::default()
+            },
+        );
+        assert!(agent.run_task(project, "Create file".into()).await.is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 8);
+        let task = store::task::list_tasks(&store.conn(), project, 1)
+            .unwrap()
+            .remove(0);
+        let patches = store::patch::list_patches_by_task(&store.conn(), task.id).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].file_path, "saved.txt");
+        assert!(!root.path().join("saved.txt").exists());
+        assert!(!root.path().join("partial.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_tools_do_not_restore_truncation_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut truncated = done();
+        truncated.finish_reason = "length".into();
+        let (agent, _, project, provider, _) = setup(
+            root.path(),
+            vec![
+                truncated.clone(),
+                call(
+                    "missing",
+                    "read_file",
+                    json!({"path":"missing.txt","offset":0}),
+                ),
+                truncated,
+                done(),
+            ],
+            LoopConfig {
+                output_tokens: 8192,
+                output_ceiling: 8192,
+                ..Default::default()
+            },
+        );
+        assert!(agent.run_task(project, "Create file".into()).await.is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn progress_reports_do_not_restore_truncation_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut truncated = done();
+        truncated.finish_reason = "length".into();
+        let (agent, _, project, provider, _) = setup(
+            root.path(),
+            vec![
+                truncated.clone(),
+                call(
+                    "state",
+                    "update_task_state",
+                    json!({"pending":["create file"],"completed":[],"ready_for_review":false}),
+                ),
+                truncated,
+                done(),
+            ],
+            LoopConfig {
+                output_tokens: 8192,
+                output_ceiling: 8192,
+                ..Default::default()
+            },
+        );
+        assert!(agent.run_task(project, "Create file".into()).await.is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
     async fn truncation_at_output_ceiling_retries_smaller_chunks_without_partial_tools() {
         let root = tempfile::tempdir().unwrap();
         let mut truncated = call(
@@ -3240,7 +3428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_truncation_at_output_ceiling_stops_after_one_retry() {
+    async fn repeated_truncation_at_output_ceiling_uses_bounded_escalated_retries() {
         let root = tempfile::tempdir().unwrap();
         let mut truncated = call(
             "partial",
@@ -3248,6 +3436,7 @@ mod tests {
             json!({"path":"partial.txt","content":"must not execute"}),
         );
         truncated.finish_reason = "length".into();
+        truncated.reasoning_tokens = Some(8192);
         let (agent, store, project, provider, _) = setup(
             root.path(),
             vec![
@@ -3258,6 +3447,7 @@ mod tests {
                 ),
                 truncated.clone(),
                 truncated,
+                call("last", "read_file", json!({"path":"saved.txt","offset":0})),
             ],
             LoopConfig {
                 output_tokens: 8192,
@@ -3266,7 +3456,14 @@ mod tests {
             },
         );
         assert!(agent.run_task(project, "Create file".into()).await.is_err());
-        assert_eq!(provider.requests.lock().unwrap().len(), 3);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[2].messages.iter().any(|m| m
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("上一轮输出额度主要被推理消耗")));
+        drop(requests);
         let task = store::task::list_tasks(&store.conn(), project, 1)
             .unwrap()
             .remove(0);
@@ -3275,6 +3472,15 @@ mod tests {
         assert_eq!(patches[0].file_path, "saved.txt");
         assert!(!root.path().join("saved.txt").exists());
         assert!(!root.path().join("partial.txt").exists());
+        let attempts: Vec<_> = store::task::list_steps(&store.conn(), task.id)
+            .unwrap()
+            .into_iter()
+            .filter(|step| step.step_type == "diagnostic")
+            .filter_map(|step| serde_json::from_str::<Value>(&step.content).ok())
+            .filter(|value| value["kind"] == "modelTruncationRetry")
+            .map(|value| value["data"]["consecutiveAttempt"].as_u64().unwrap())
+            .collect();
+        assert_eq!(attempts, vec![1, 2]);
     }
 
     #[tokio::test]

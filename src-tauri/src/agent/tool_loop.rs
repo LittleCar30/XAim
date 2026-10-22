@@ -50,6 +50,10 @@ clone_repository 在本轮授权下将完整公开仓库交付到原项目，. �
 const MAX_MODEL_RETRIES: u32 = 3;
 const MAX_TASK_TRUNCATION_RETRIES: u32 = 3;
 const MAX_CONSECUTIVE_TRUNCATION_RETRIES: u32 = 2;
+// Enter the constrained finishing phase with room for the core deliverable,
+// verification, and a terminal status submission. Three predicted rounds was
+// too late when the forecast undercounted a high-output response.
+const FINISHING_ROUND_THRESHOLD: u64 = 6;
 
 #[derive(Debug, Clone)]
 pub struct LoopConfig {
@@ -711,6 +715,8 @@ pub async fn run(
         if !finishing
             && turn > 0
             && (prediction.rounds <= 3
+                || (prediction.rounds <= FINISHING_ROUND_THRESHOLD
+                    && snapshot.core_delivery_pending())
                 || config.max_turns.saturating_sub(turn) <= 3
                 || remaining_ms.is_some_and(|ms| ms < recent_request_ms.saturating_mul(2) + 10_000))
         {
@@ -718,9 +724,15 @@ pub async fn run(
             snapshot.phase = "finishing".into();
             record.event(XaimEvent::Step {
                 task_id: record.task_id,
-                name: "预算收尾：仅检查和必要修复".into(),
+                name: "预算收尾：优先完成核心交付并检查".into(),
                 status: "done".into(),
             })?;
+            record.diagnostic(
+                "budgetPhaseTransition",
+                json!({"round":turn + 1,"predictedRounds":prediction.rounds,
+                    "threshold":FINISHING_ROUND_THRESHOLD,"remainingTokens":remaining,
+                    "coreDeliveryPending":snapshot.core_delivery_pending()}),
+            )?;
             let changes = snapshot.save(workspace, &record)?;
             if !changes.files.is_empty() {
                 verify_current(&mut snapshot, workspace, ctx, config, &cancel, &record).await?;
@@ -1567,7 +1579,7 @@ pub async fn run(
                         }),
                     )?;
                     return stop_locally(
-                        "终提交已确认任务仍有待办，已保存阶段性成果",
+                        "预算收尾已提交未完成状态，仍有待办；已保存阶段性成果",
                         &mut snapshot,
                         workspace,
                         ctx,

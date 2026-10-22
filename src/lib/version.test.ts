@@ -6,7 +6,7 @@ import { version as nativeVersion } from '../../src-tauri/tauri.conf.json'
 
 describe('fullVersion', () => {
   it('formats name and version', () => {
-    expect(fullVersion()).toBe('XAim v0.1.2')
+    expect(fullVersion()).toBe('XAim v0.1.3')
   })
 
   it('keeps app metadata in sync', () => {

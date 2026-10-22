@@ -820,7 +820,9 @@ impl Orchestrator {
                 let _ = (Recorder { task_id, store: &self.store, sink: self.sink.as_ref() })
                     .diagnostic("taskStop", serde_json::json!({"reason":match &error {
                         XaimError::Timeout(_) => "task_deadline", XaimError::Cancelled => "cancel_requested",
-                        XaimError::Verify(_) => "verification", _ => "execution_error",
+                        XaimError::Verify(_) => "verification",
+                        XaimError::BudgetExhausted(_) => "budget_exhausted",
+                        _ => "execution_error",
                     }}));
                 if let Err(save_error) = self.preserve_partial_changes(task_id, &workspace) {
                     tracing::error!(task_id, error = %save_error, "阶段性变更保存失败");

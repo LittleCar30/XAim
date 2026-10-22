@@ -1,6 +1,6 @@
 [package]
 name = "xaim"
-version = "0.1.2"
+version = "0.1.3"
 description = "XAim — a desktop coding agent"
 edition = "2021"
 license = "MIT"

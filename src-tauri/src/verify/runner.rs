@@ -96,6 +96,30 @@ pub(crate) fn resolve_program(program: &str) -> PathBuf {
 
 #[cfg(not(windows))]
 pub(crate) fn resolve_program(program: &str) -> PathBuf {
+    if program.contains('/') || Path::new(program).is_absolute() {
+        return PathBuf::from(program);
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join(program);
+            if !candidate.is_file() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if candidate
+                    .metadata()
+                    .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+                {
+                    return candidate;
+                }
+            }
+            #[cfg(not(unix))]
+            return candidate;
+        }
+    }
     PathBuf::from(program)
 }
 

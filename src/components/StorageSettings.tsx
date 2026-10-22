@@ -62,7 +62,7 @@ export default function StorageSettings() {
         </select>
         <button type="button" className={buttonCls} disabled={busy} onClick={() => void run(async () => { const count = await ipc.cleanupWorkspaces(); setMessage(`已清理 ${count} 个过期工作区`) })}>清理过期工作区</button>
       </label>
-      <p>启动时自动清理过期工作区；保留对话、补丁和待确认任务。</p>
+      <p>任务副本用于隔离执行和审阅，不等于原项目目录。启动时自动清理超过保留期限的已结束副本；待确认、运行中和历史记录会保留。</p>
       <p>备份包含配置、对话和变更记录。API Key 保存在系统凭据库，跨设备恢复时需重新填写。</p>
       {info.pendingHome ? <div className="space-y-2">
         <p className="break-all text-amber-400">下次启动迁移到：{info.pendingHome}。当前设置和任务仍保存到原目录。</p>

@@ -1138,15 +1138,37 @@ pub async fn run(
                         let args_evidence: Value = serde_json::from_str(&operations::redact(&args.to_string()))?;
                         let project = config.verification_source.as_deref().unwrap_or(ctx.project_root.as_path());
                         let started = Instant::now();
+                        let mut approved_scope = None;
                         let authorization = if let Some(session) = &config.permissions {
                             if matches!(call.function.name.as_str(), "run_command" | "start_process" | "clone_repository") {
                                 let root = if call.function.name == "clone_repository" || args["program"] == "git" { project } else { workspace.root() };
                                 match super::permissions::scope(&call.function.name, &args, root, &session.git_network) {
-                                    Ok(scope) => session.authorize(scope, if call.function.name == "clone_repository" { "需要下载仓库以完成当前任务" } else { "需要执行开发操作以继续当前任务" }, &cancel, config.deadline, &record).await,
+                                    Ok(scope) => {
+                                        approved_scope = Some(scope.clone());
+                                        session.authorize(scope, if call.function.name == "clone_repository" { "需要下载仓库以完成当前任务" } else { "需要执行开发操作以继续当前任务" }, &cancel, config.deadline, &record).await
+                                    },
                                     Err(e) => Err(e),
                                 }
                             } else { Ok(()) }
                         } else { Ok(()) };
+                        // The user may have been reviewing the prompt while a
+                        // watcher or another process changed the command's
+                        // scripts/manifests. Recompute the exact scope at the
+                        // launch boundary so approval cannot cross that race.
+                        let authorization = if authorization.is_ok() {
+                            if let (Some(session), Some(approved)) = (&config.permissions, &approved_scope) {
+                                let root = if call.function.name == "clone_repository" || args["program"] == "git" { project } else { workspace.root() };
+                                match super::permissions::scope(&call.function.name, &args, root, &session.git_network) {
+                                    Ok(current) if current.id == approved.id => Ok(()),
+                                    Ok(_) => Err(XaimError::Blocked("授权等待期间命令、脚本或环境发生变化，请重新确认".into())),
+                                    Err(error) => Err(error),
+                                }
+                            } else {
+                                Ok(())
+                            }
+                        } else {
+                            authorization
+                        };
                         let authorization_granted = authorization.is_ok();
                         let authorization_ms = started.elapsed().as_millis() as u64;
                         let execution_started = Instant::now();

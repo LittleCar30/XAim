@@ -181,6 +181,7 @@ export function setupPreview(): void {
     setWorkspaceRetention: async () => { throw new Error('请在桌面应用中设置保留期限') },
     cleanupWorkspaces: async () => { throw new Error('请在桌面应用中清理工作区') },
     openTaskWorkspace: async () => { throw new Error('示例任务没有本地工作区') },
+    openTaskProject: async () => { throw new Error('浏览器预览无法打开本地项目') },
     exportTaskRecord: async () => { throw new Error('请在桌面应用中导出对话') },
     getPreferences: async () => ({}),
     setPreference: async () => {},

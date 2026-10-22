@@ -72,7 +72,7 @@ fn default_cwd() -> String {
 
 pub fn redact(text: &str) -> String {
     static SECRET: OnceLock<regex::Regex> = OnceLock::new();
-    SECRET.get_or_init(|| regex::Regex::new(r"(?i)(bearer\s+\S+|sk-[a-z0-9_-]{12,}|(?:api[_-]?key|access[_-]?token|password)\s*[:=]\s*[^\s,;]+|https?://[^/@\s]+:[^/@\s]+@)").unwrap())
+    SECRET.get_or_init(|| regex::Regex::new(r"(?ix)(bearer\s+\S+|sk-[a-z0-9_-]{12,}|(?:api[_-]?key|access[_-]?token|password|passwd|secret|token|auth(?:orization)?)\s*[:=]\s*[^\s,;]+|--?(?:api[_-]?key|access[_-]?token|password|passwd|secret|token|auth(?:orization)?)(?:=|\s+)\S+|\b[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*=\S+|https?://[^/@\s]+:[^/@\s]+@)").unwrap())
         .replace_all(text, "[REDACTED]").into_owned()
 }
 
@@ -528,6 +528,59 @@ pub(crate) fn validate_clone_url(address: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_embedded_remote(address: &str, source: &str) -> Result<()> {
+    let url = reqwest::Url::parse(address.trim())
+        .map_err(|_| XaimError::Security(format!("{source} 中包含无效仓库地址")))?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(XaimError::Security(format!(
+            "{source} 只能使用不含凭据的 HTTPS 地址"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_embedded_remotes(root: &Path, filename: &str) -> Result<()> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                if entry.file_name() != ".git" {
+                    pending.push(entry.path());
+                }
+                continue;
+            }
+            if entry.file_name() != filename {
+                continue;
+            }
+            let text = std::fs::read_to_string(entry.path())?;
+            for line in text.lines().map(str::trim) {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                if key.trim().ends_with("url") {
+                    let value = value.trim();
+                    if value.starts_with('.') || value.starts_with('/') {
+                        return Err(XaimError::Security(format!(
+                            "{} 不允许相对路径或本地路径",
+                            entry.path().display()
+                        )));
+                    }
+                    validate_embedded_remote(value, &entry.path().display().to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn clone_repository_with_network(
     args: CloneArgs,
     project: &Path,
@@ -673,14 +726,63 @@ async fn clone_to_project(
     let (project, target, in_place, stage) =
         clone_finish("检查目标目录", started, preflight, observer)?;
     let repo_dir = stage.path().join("repository");
-    let mut clone = vec!["clone".into(), "--no-local".into()];
-    if args.recursive {
-        clone.push("--recurse-submodules".into());
-    }
+    // Disable automatic LFS smudge. The repository's embedded LFS endpoint is
+    // validated below before any content is downloaded.
+    let mut clone = vec![
+        "-c".into(),
+        "filter.lfs.smudge=".into(),
+        "-c".into(),
+        "filter.lfs.process=".into(),
+        "-c".into(),
+        "filter.lfs.required=false".into(),
+        "clone".into(),
+        "--no-local".into(),
+    ];
     clone.extend(["--".into(), args.url.clone(), git_path(&repo_dir)]);
     let started = clone_begin("下载仓库", observer)?;
     let download = git(&clone, &project, cancel, deadline, network).await;
     clone_finish("下载仓库", started, download, observer)?;
+    validate_embedded_remotes(&repo_dir, ".gitmodules")?;
+    if args.recursive {
+        let started = clone_begin("下载顶层子模块", observer)?;
+        let top_level = git(
+            &[
+                "-c".into(),
+                "protocol.file.allow=never".into(),
+                "submodule".into(),
+                "update".into(),
+                "--init".into(),
+            ],
+            &repo_dir,
+            cancel,
+            deadline,
+            network,
+        )
+        .await;
+        clone_finish("下载顶层子模块", started, top_level, observer)?;
+        // Populate only the first level before inspecting nested .gitmodules;
+        // this prevents an untrusted nested manifest from silently widening
+        // the network scope of the original approval.
+        validate_embedded_remotes(&repo_dir, ".gitmodules")?;
+        let started = clone_begin("下载递归子模块", observer)?;
+        let recursive = git(
+            &[
+                "-c".into(),
+                "protocol.file.allow=never".into(),
+                "submodule".into(),
+                "update".into(),
+                "--init".into(),
+                "--recursive".into(),
+            ],
+            &repo_dir,
+            cancel,
+            deadline,
+            network,
+        )
+        .await;
+        clone_finish("下载递归子模块", started, recursive, observer)?;
+    }
+    validate_embedded_remotes(&repo_dir, ".lfsconfig")?;
     let started = clone_begin("检查 LFS 文件", observer)?;
     let mut pointers = clone_finish("检查 LFS 文件", started, lfs_pointers(&repo_dir), observer)?;
     if pointers > 0 {
@@ -1575,10 +1677,12 @@ mod tests {
     #[test]
     fn diagnostics_redact_obvious_credentials() {
         let output = redact(
-            "Bearer secret-token password=secret https://user:pass@host sk-abcdefghijklmnop",
+            "Bearer secret-token password=secret --token abc123 API_TOKEN=xyz https://user:pass@host sk-abcdefghijklmnop",
         );
         assert!(!output.contains("secret"));
         assert!(!output.contains("pass@"));
         assert!(!output.contains("sk-"));
+        assert!(!output.contains("abc123"));
+        assert!(!output.contains("API_TOKEN=xyz"));
     }
 }

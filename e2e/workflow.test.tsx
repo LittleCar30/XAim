@@ -163,7 +163,7 @@ it('opens a temporary project, indexes it, submits a task, displays diff, applie
     await waitFor(() => expect(screen.getByRole('dialog', { name: '执行授权' })).toBeInTheDocument(), { timeout: 60_000 })
     expect(useTaskStore.getState().pendingPermission?.scope.tool).toBe('verify')
     const requestId = useTaskStore.getState().pendingPermission?.id
-    fireEvent.click(screen.getByRole('button', { name: '按项目记住' }))
+    fireEvent.click(screen.getByRole('button', { name: '以后允许相同操作' }))
     await waitFor(() => expect(useTaskStore.getState().pendingPermission?.id).not.toBe(requestId), { timeout: 10_000 })
   }
   await waitFor(() => expect(useTaskStore.getState().currentTask?.status).toBe('waitingConfirm'), { timeout: 60_000 })

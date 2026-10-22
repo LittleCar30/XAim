@@ -403,7 +403,7 @@ export default function Settings({ onBack }: SettingsProps) {
           <div hidden={category !== 'execution'} className="settings-group">
             <RuntimeSettings />
             <Section title="项目检查说明">
-              <p className="settings-help">对话输入框的“项目执行权限”统一管理项目检查与开发命令。默认按需询问，实际执行前展示具体操作；也可选择不执行程序，或按项目记住明确批准的范围。</p>
+              <p className="settings-help">执行权限统一管理测试、构建、依赖安装和开发服务。推荐选择“确认后执行”；只分析模式不会运行程序，自动执行模式只放行已批准过的相同操作。</p>
               <p className="settings-help">关闭执行权限仍能生成代码，检查会标记为无法验证。检查失败时会尝试修复，最多三轮；纯分析任务无需代码检查。已保存的授权可查看和撤销，应用代码仍需单独确认。</p>
               <p className="settings-help">项目脚本以当前用户权限运行，可以访问本机和网络；请在信任项目时启用。</p>
             </Section>

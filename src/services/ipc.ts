@@ -53,6 +53,7 @@ export const ipc = {
   setWorkspaceRetention: (days: number) => invoke<void>('set_workspace_retention', { days }),
   cleanupWorkspaces: () => invoke<number>('cleanup_workspaces'),
   openTaskWorkspace: (taskId: number) => invoke<void>('open_task_workspace', { taskId }),
+  openTaskProject: (taskId: number) => invoke<void>('open_task_project', { taskId }),
   exportTaskRecord: (taskId: number) => invoke<string | null>('export_task_record', { taskId }),
   getPreferences: () => invoke<Record<string, string>>('get_preferences'),
   setPreference: (key: string, value: string) => invoke<void>('set_preference', { key, value }),

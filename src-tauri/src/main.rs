@@ -67,6 +67,7 @@ fn main() {
             commands::data::set_workspace_retention,
             commands::data::cleanup_workspaces,
             commands::data::open_task_workspace,
+            commands::data::open_task_project,
             commands::data::export_task_record,
             commands::data::get_preferences,
             commands::data::set_preference,

@@ -194,6 +194,12 @@ pub fn scope(
 ) -> Result<ExecutionScope> {
     let canonical_root = root.canonicalize()?;
     let root = canonical_root.as_path();
+    let executable = if tool == "verify" || tool == "clone_repository" {
+        None
+    } else {
+        let command: crate::tools::operations::CommandArgs = serde_json::from_value(args.clone())?;
+        Some(crate::tools::operations::validate(&command, root)?.0)
+    };
     let args = if tool == "verify" {
         json!({"command":args["command"]})
     } else if tool == "clone_repository" {
@@ -234,6 +240,20 @@ pub fn scope(
     } else {
         super::workspace::safe_path(root, cwd)?
     };
+    // Bind remembered approvals to the executable that will actually run. A
+    // logical name such as `npm` is not sufficient because PATH can change
+    // between tasks.
+    if tool == "verify" {
+        if let Ok(tokens) =
+            crate::tools::exec::split_command(args["command"].as_str().unwrap_or_default())
+        {
+            if let Some(name) = tokens.first() {
+                update_path_digest(&mut digest, &crate::verify::runner::resolve_program(name))?;
+            }
+        }
+    } else if let Some(program) = executable.as_deref() {
+        update_path_digest(&mut digest, program)?;
+    }
     // Changes to package scripts, dependency locks or a directly executed script require reapproval.
     if tool != "clone_repository" {
         let mut inputs = vec![
@@ -263,16 +283,11 @@ pub fn scope(
                     .map(str::to_owned),
             );
         }
+        if tool == "run_command" {
+            inputs.extend(package_script_inputs(&base, &args["args"]));
+        }
         for input in inputs {
-            if let Ok(path) = super::workspace::safe_path(&base, input.trim_start_matches("./")) {
-                if path.is_file() {
-                    digest.update(&(input.len() as u64).to_le_bytes());
-                    digest.update(input.as_bytes());
-                    let mut content = blake3::Hasher::new();
-                    content.update_reader(std::fs::File::open(path)?)?;
-                    digest.update(content.finalize().as_bytes());
-                }
-            }
+            update_input_digest(&mut digest, &base, &input)?;
         }
     }
     let command = if tool == "clone_repository" {
@@ -344,6 +359,77 @@ pub fn scope(
         }
         .into(),
     })
+}
+
+fn update_path_digest(digest: &mut blake3::Hasher, path: &Path) -> Result<()> {
+    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    digest.update(normalized.to_string_lossy().as_bytes());
+    if normalized.is_file() {
+        let mut content = blake3::Hasher::new();
+        content.update_reader(std::fs::File::open(&normalized)?)?;
+        digest.update(content.finalize().as_bytes());
+    }
+    Ok(())
+}
+
+fn update_input_digest(digest: &mut blake3::Hasher, base: &Path, input: &str) -> Result<()> {
+    if let Ok(path) = super::workspace::safe_path(base, input.trim_start_matches("./")) {
+        if path.is_file() {
+            digest.update(&(input.len() as u64).to_le_bytes());
+            digest.update(input.as_bytes());
+            let mut content = blake3::Hasher::new();
+            content.update_reader(std::fs::File::open(path)?)?;
+            digest.update(content.finalize().as_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// Include files named by a package-manager script in the approval digest.
+/// This closes the common `npm test` -> `node tests/run.js` gap without
+/// invalidating approvals for every source edit in the project.
+fn package_script_inputs(base: &Path, args: &Value) -> Vec<String> {
+    let Some(items) = args.as_array() else {
+        return Vec::new();
+    };
+    let script_name = match items
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["run" | "run-script", name, ..] => Some(*name),
+        [name, ..]
+            if !matches!(*name, "install" | "ci" | "add" | "exec" | "dlx")
+                && !name.starts_with('-') =>
+        {
+            Some(*name)
+        }
+        _ => None,
+    };
+    let Some(script_name) = script_name else {
+        return Vec::new();
+    };
+    let package = base.join("package.json");
+    let Ok(text) = std::fs::read_to_string(package) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(script) = value["scripts"][script_name].as_str() else {
+        return Vec::new();
+    };
+    script
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| "'\"(){};,".contains(c)))
+        .filter(|token| !token.is_empty())
+        .filter(|token| {
+            super::workspace::safe_path(base, token.trim_start_matches("./"))
+                .is_ok_and(|path| path.is_file())
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 #[cfg(test)]
@@ -463,6 +549,35 @@ mod tests {
             answer(&next, Decision::Deny)
         );
         assert!(matches!(denied, Err(XaimError::Cancelled)));
+    }
+
+    #[test]
+    fn package_script_entrypoint_changes_invalidate_remembered_scope() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"test":"node tests/run.js"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join("tests")).unwrap();
+        std::fs::write(root.path().join("tests/run.js"), "console.log('ok')").unwrap();
+        let network = GitNetwork::default();
+        let before = scope(
+            "run_command",
+            &json!({"program":"npm","args":["test"]}),
+            root.path(),
+            &network,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("tests/run.js"), "require('child_process')").unwrap();
+        let after = scope(
+            "run_command",
+            &json!({"program":"npm","args":["test"]}),
+            root.path(),
+            &network,
+        )
+        .unwrap();
+        assert_ne!(before.id, after.id);
     }
     #[tokio::test]
     async fn once_does_not_persist_and_cancelled_or_dropped_requests_cannot_be_approved() {

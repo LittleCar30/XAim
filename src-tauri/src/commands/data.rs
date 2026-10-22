@@ -155,6 +155,28 @@ pub async fn open_task_workspace(
 }
 
 #[tauri::command]
+pub async fn open_task_project(
+    task_id: i64,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let project_path = {
+        let conn = state.store.conn();
+        let task = store::task::get_task(&conn, task_id)
+            .map_err(String::from)?
+            .ok_or_else(|| "任务不存在".to_string())?;
+        store::project::get_project(&conn, task.project_id)
+            .map_err(String::from)?
+            .ok_or_else(|| "任务所属项目不存在".to_string())?
+            .path
+    };
+    #[allow(deprecated)]
+    app.shell()
+        .open(&project_path, None)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn export_task_record(
     task_id: i64,
     app: AppHandle,

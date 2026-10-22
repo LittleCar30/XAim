@@ -14,8 +14,9 @@ const PROXY_VARS: &[&str] = &[
 pub fn configure(command: &mut Command, network: &GitNetwork) {
     match network.mode {
         ProxyMode::System => {
-            // Git's explicit http.proxy configuration takes precedence over these
-            // environment defaults; respect proxy/no_proxy already supplied by the user.
+            // The execution runner clears the global Git config to avoid
+            // inherited helpers. Re-import only the user's read-only proxy
+            // setting so system mode still works in corporate environments.
             if !PROXY_VARS
                 .iter()
                 .any(|name| std::env::var_os(name).is_some())
@@ -26,6 +27,8 @@ pub fn configure(command: &mut Command, network: &GitNetwork) {
                         .env("https_proxy", &proxy)
                         .env("HTTP_PROXY", &proxy)
                         .env("http_proxy", proxy);
+                } else if let Some(proxy) = user_git_proxy() {
+                    command.args(["-c", &format!("http.proxy={proxy}")]);
                 }
             }
         }
@@ -56,9 +59,33 @@ pub fn configure_remote(command: &mut Command, network: &GitNetwork, args: &[Str
             } else {
                 &network.url
             };
-            command.args(["-c", &format!("http.{url}.proxy={proxy}")]);
+            let url = url.trim_end_matches('/');
+            command.args(["-c", &format!("http.{url}/.proxy={proxy}")]);
         }
     }
+}
+
+fn user_git_proxy() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["config", "--global", "--get", "http.proxy"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let proxy = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    let url = reqwest::Url::parse(&proxy).ok()?;
+    if !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || (url.path() != "/" && !url.path().is_empty())
+    {
+        return None;
+    }
+    Some(proxy)
 }
 
 fn address(value: &str) -> Option<String> {

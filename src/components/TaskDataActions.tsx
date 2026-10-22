@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Download, FolderOpen } from 'lucide-react'
+import { Download, Folder, FolderOpen } from 'lucide-react'
 import { ipc } from '@/services/ipc'
 import { toMessage } from '@/lib/task-format'
 import { useConversationStore } from '@/stores/conversation'
@@ -35,7 +35,8 @@ export default function TaskDataActions({ task, patches, historical }: { task: T
         const path = await ipc.exportTaskRecord(taskId)
         if (path) setNotice(`任务记录已导出：${path}`)
       })}><Download size={13} />导出对话</button>
-      <button type="button" disabled={busy} className="inline-flex items-center gap-1 hover:text-slate-200 disabled:opacity-50" onClick={() => void run(() => ipc.openTaskWorkspace(taskId))}><FolderOpen size={13} />打开任务工作区</button>
+      <button type="button" disabled={busy} className="inline-flex items-center gap-1 hover:text-slate-200 disabled:opacity-50" onClick={() => void run(() => ipc.openTaskWorkspace(taskId))}><FolderOpen size={13} />打开任务副本</button>
+      <button type="button" disabled={busy} className="inline-flex items-center gap-1 hover:text-slate-200 disabled:opacity-50" onClick={() => void run(() => ipc.openTaskProject(taskId))}><Folder size={13} />打开原项目</button>
     </div>
     {notice && <p role={error ? 'alert' : 'status'} className={`mt-2 break-all ${error ? 'text-rose-400' : ''}`}>{notice}</p>}
   </div>

@@ -1,6 +1,6 @@
 [package]
 name = "xaim"
-version = "0.1.0"
+version = "0.1.2"
 description = "XAim — a desktop coding agent"
 edition = "2021"
 license = "MIT"
@@ -16,6 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+bytes = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"

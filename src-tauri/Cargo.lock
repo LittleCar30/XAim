@@ -6479,11 +6479,12 @@ dependencies = [
 
 [[package]]
 name = "xaim"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
  "blake3",
+ "bytes",
  "chrono",
  "diffy",
  "directories",

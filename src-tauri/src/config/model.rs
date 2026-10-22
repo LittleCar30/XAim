@@ -19,6 +19,7 @@ pub const CONFIG_KEY: &str = "app:config";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelConfig {
+    pub protocol: crate::types::ApiProtocol,
     /// 提供方标识：官方 provider、Ollama，以及通用 OpenAI-compatible 网关 `newapi`。
     pub provider: String,
     /// API key；Ollama 等本地服务可留空。
@@ -37,6 +38,7 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             // TODO: 与 router 的默认模型保持一致，接入配置界面后由用户填写。
+            protocol: crate::types::ApiProtocol::default(),
             provider: "deepseek".to_string(),
             api_key: String::new(),
             base_url: None,
@@ -53,6 +55,7 @@ impl From<crate::types::ModelConfig> for ModelConfig {
     /// 从 IPC 模型配置提取连接、采样和输出上限；模型名由请求携带。
     fn from(config: crate::types::ModelConfig) -> Self {
         Self {
+            protocol: config.protocol,
             provider: config.provider,
             api_key: config.api_key.unwrap_or_default(),
             base_url: config.base_url,
@@ -124,6 +127,7 @@ pub fn migrate_credentials(store: &Store) -> Result<()> {
 
 /// 校验配置：模型提供方必须受支持。
 pub fn validate(config: &Config) -> Result<()> {
+    crate::model::validate_protocol(&config.model.provider, config.model.protocol)?;
     validate_sampling(&config.model)?;
     crate::model::capabilities::validate_output(
         &config.model.provider,
@@ -150,6 +154,7 @@ pub fn validate(config: &Config) -> Result<()> {
     }
     let mut ids = std::collections::HashSet::new();
     for profile in &config.model_profiles {
+        crate::model::validate_protocol(&profile.config.provider, profile.config.protocol)?;
         validate_sampling(&profile.config)?;
         crate::model::capabilities::validate_output(
             &profile.config.provider,
@@ -300,6 +305,7 @@ mod tests {
     #[test]
     fn model_config_roundtrips_through_json() {
         let config = ModelConfig {
+            protocol: crate::types::ApiProtocol::default(),
             provider: "qwen".to_string(),
             api_key: "sk-xxx".to_string(),
             base_url: Some("http://127.0.0.1:9000/v1".to_string()),
@@ -330,6 +336,7 @@ mod tests {
     #[test]
     fn connection_config_extracts_from_ipc_contract() {
         let ipc = crate::types::ModelConfig {
+            protocol: crate::types::ApiProtocol::Responses,
             provider: "openai".to_string(),
             name: "gpt-4o".to_string(),
             api_key: Some("sk-test".to_string()),
@@ -338,6 +345,7 @@ mod tests {
             max_tokens: Some(1024),
         };
         let connection = ModelConfig::from(ipc);
+        assert_eq!(connection.protocol, crate::types::ApiProtocol::Responses);
         assert_eq!(connection.max_tokens, Some(1024));
         assert_eq!(connection.temperature, Some(0.3));
         assert_eq!(connection.provider, "openai");
@@ -357,6 +365,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let config = Config {
             model: crate::types::ModelConfig {
+                protocol: crate::types::ApiProtocol::default(),
                 provider: "openai".to_string(),
                 name: "gpt-4o".to_string(),
                 api_key: Some("sk-test".to_string()),

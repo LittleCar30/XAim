@@ -179,6 +179,7 @@ impl Harness {
         });
         let config = Config {
             model: ModelConfig {
+                protocol: crate::types::ApiProtocol::default(),
                 provider: "openai".into(),
                 name: "mock-model".into(),
                 api_key: Some("e2e-only".into()),

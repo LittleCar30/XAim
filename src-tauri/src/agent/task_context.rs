@@ -43,6 +43,14 @@ pub struct TaskSnapshot {
     pub required_operation: Option<String>,
     #[serde(default)]
     pub required_operations: Vec<String>,
+    /// Final state submission is a two-phase protocol: sent is durable, but
+    /// only a valid successful tool result confirms the state.
+    #[serde(default)]
+    pub terminal_submission_sent: bool,
+    #[serde(default)]
+    pub terminal_submission_confirmed: bool,
+    #[serde(default)]
+    pub terminal_submission_attempts: u8,
 }
 
 /// Recognize explicit prohibitions immediately before an operation phrase.
@@ -339,6 +347,81 @@ impl TaskSnapshot {
                 .is_some_and(|v| v["success"] == true)
     }
 
+    /// Core work still needs a write or generated artifact. This keeps the
+    /// finishing phase useful for unfinished deliverables while preventing
+    /// cosmetic edits after the model has moved on to verification.
+    pub fn core_delivery_pending(&self) -> bool {
+        self.reported_pending
+            && self.pending.iter().any(|item| {
+                let item = item.to_lowercase();
+                [
+                    "实现",
+                    "完成",
+                    "写入",
+                    "生成",
+                    "构建",
+                    "产物",
+                    "页面",
+                    "文件",
+                    "implement",
+                    "create",
+                    "generate",
+                    "build",
+                    "artifact",
+                    "file",
+                ]
+                .iter()
+                .any(|term| item.contains(term))
+            })
+    }
+
+    /// Evidence required by the task can be checked without trusting the
+    /// model's prose. Runtime-oriented goals require an observed running
+    /// process; ordinary coding tasks still accept unavailable local checks as
+    /// reviewable, but changed files must exist and contain data.
+    pub fn completion_evidence_satisfied(&self) -> bool {
+        if !self.operation_satisfied() {
+            return false;
+        }
+        if self
+            .files
+            .iter()
+            .any(|file| file["deleted"] == true || file["bytes"].as_u64().unwrap_or(0) == 0)
+        {
+            return false;
+        }
+        if !self.goal_requires_runtime_evidence() {
+            return true;
+        }
+        self.operations.iter().any(|operation| {
+            operation["tool"] == "read_process"
+                && operation["success"] == true
+                && operation["result"]["status"]["state"] == "running"
+        })
+    }
+
+    fn goal_requires_runtime_evidence(&self) -> bool {
+        let goal = self.goal.to_lowercase();
+        [
+            "交互",
+            "可交互",
+            "浏览器",
+            "运行时",
+            "视角",
+            "旋转",
+            "缩放",
+            "平移",
+            "interactive",
+            "browser",
+            "runtime",
+            "rotate",
+            "zoom",
+            "pan",
+        ]
+        .iter()
+        .any(|term| goal.contains(term))
+    }
+
     pub fn needs_command_permission(&self, allow_verification: bool) -> bool {
         self.required_operations
             .iter()
@@ -375,6 +458,9 @@ impl TaskSnapshot {
             operations: vec![],
             required_operation: operation_goals(goal).first().cloned(),
             required_operations: operation_goals(goal),
+            terminal_submission_sent: false,
+            terminal_submission_confirmed: false,
+            terminal_submission_attempts: 0,
         }
     }
 
@@ -393,6 +479,9 @@ impl TaskSnapshot {
                 self.revision += 1;
                 self.ready_for_review = false;
                 self.verified_revision = None;
+                self.terminal_submission_sent = false;
+                self.terminal_submission_confirmed = false;
+                self.terminal_submission_attempts = 0;
             }
         } else {
             self.ready_for_review = false;
@@ -431,7 +520,8 @@ impl TaskSnapshot {
             || (report.ready_for_review
                 && (!report.pending.is_empty()
                     || report.completed.is_empty()
-                    || report.summary.trim().is_empty()))
+                    || report.summary.trim().is_empty()
+                    || !self.completion_evidence_satisfied()))
         {
             return Err(XaimError::Config(
                 "任务状态过长，或仍有待办却声明完成".into(),
@@ -526,7 +616,7 @@ impl TaskSnapshot {
             "diff":changes.diff(),"verificationStatus":verification_status,
             "verification":self.verification,"pending":self.pending,
             "operations":self.operations,
-            "completionConfirmed":self.ready_for_review && self.operation_satisfied()});
+            "completionConfirmed":self.ready_for_review && self.completion_evidence_satisfied()});
         store::cache::set_cache(
             &record.store.conn(),
             &format!("task:{}:report", record.task_id),
@@ -642,9 +732,7 @@ pub fn forecast(
     recent_output: u64,
     normal_output: u32,
 ) -> BudgetForecast {
-    let reasonable_output = recent_output
-        .max(1024)
-        .min(normal_output.clamp(1, 8192) as u64);
+    let reasonable_output = recent_output.max(1024).min(normal_output.max(1) as u64);
     let cost_per_round = (input as u64).saturating_add(reasonable_output).max(1);
     BudgetForecast {
         cost_per_round,
@@ -654,6 +742,13 @@ pub fn forecast(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forecast_uses_the_configured_output_limit_above_8192() {
+        let forecast = super::forecast(50_000, 2_000, 20_000, 32_768);
+        assert_eq!(forecast.cost_per_round, 22_000);
+        assert_eq!(forecast.rounds, 2);
+    }
+
     #[test]
     fn operation_requirements_need_matching_latest_evidence() {
         let mut snapshot = TaskSnapshot::new("克隆仓库，安装依赖并运行测试，然后启动服务");

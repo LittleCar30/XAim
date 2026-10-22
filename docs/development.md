@@ -31,8 +31,8 @@ Tauri 2 · Rust（edition 2021，stable，由 `rust-toolchain.toml` 选择；未
 在 Windows 上执行上表的 Windows x64 打包命令。直接调用 Tauri CLI 可保留传给 Cargo 的 `-- --locked`，避免 pnpm 12 转发参数时丢失分隔符。
 安装包输出到 `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/`：
 
-- `msi/XAim_0.1.0_x64_en-US.msi`
-- `nsis/XAim_0.1.0_x64-setup.exe`
+- `msi/XAim_<version>_x64_en-US.msi`
+- `nsis/XAim_<version>_x64-setup.exe`
 
 Rust release 使用 thin LTO、单个 codegen unit，并移除调试信息。
 NSIS 默认按当前用户安装；MSI 默认按整机安装。

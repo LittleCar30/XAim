@@ -123,6 +123,21 @@ it('replays persisted deltas without mixing tasks or earlier rounds', () => {
   expect(screen.queryByText('earlier round')).not.toBeInTheDocument()
 })
 
+it('collapses oversized interrupted model output and renders it only when expanded', async () => {
+  const content = `未完成的代码输出\n\n${'const value = 1;\n'.repeat(300)}`
+  useTaskStore.setState({ currentTask: { ...task, status: 'failed' }, events: [
+    { type: 'modelText', taskId: task.id, round: 2, delta: content, status: 'interrupted' },
+  ] })
+  render(<TaskPanel />)
+  const summary = screen.getByText(/查看较长的模型输出/)
+  const details = summary.closest('details')!
+  expect(details).not.toHaveAttribute('open')
+  expect(screen.queryByText(/未完成的代码输出/)).not.toBeInTheDocument()
+  expect(screen.getByText('回复已中断，内容尚未完成。')).toBeInTheDocument()
+  fireEvent.click(summary)
+  await waitFor(() => expect(screen.getByText(/未完成的代码输出/)).toBeInTheDocument())
+})
+
 it('renders empty state then responds to task events', () => {
   render(<TaskPanel />)
   expect(screen.getByText('新对话')).toBeInTheDocument()

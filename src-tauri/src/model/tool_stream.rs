@@ -123,6 +123,7 @@ impl ToolStream {
             .and_then(|u| u.reasoning_tokens);
         Ok(ToolResponse {
             message: ToolMessage {
+                responses_output: vec![],
                 role: "assistant".into(),
                 content: (!self.content.is_empty()).then_some(self.content),
                 tool_calls: calls,

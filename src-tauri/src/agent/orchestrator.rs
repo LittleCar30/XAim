@@ -1102,7 +1102,7 @@ impl Orchestrator {
         let cancelled = matches!(error, XaimError::Cancelled);
         let terminal = if cancelled {
             TaskStatus::Cancelled
-        } else if matches!(error, XaimError::Blocked(_)) {
+        } else if matches!(error, XaimError::Blocked(_) | XaimError::BudgetExhausted(_)) {
             TaskStatus::Blocked
         } else {
             TaskStatus::Failed

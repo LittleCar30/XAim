@@ -7,7 +7,7 @@ import { useConfigStore } from '@/stores/config'
 import { useThemeStore } from '@/stores/theme'
 import { activeProfile, DEFAULT_MODEL_CONFIG, updateModelProfile } from '@/lib/model-profiles'
 import type { ModelOptions } from '@/lib/model-profiles'
-import type { ModelConfig, ModelProfile } from '@/types'
+import type { ApiProtocol, ModelConfig, ModelProfile } from '@/types'
 import ModelManager from '@/components/ModelManager'
 import ModelParameters from '@/components/ModelParameters'
 import StorageSettings from '@/components/StorageSettings'
@@ -36,6 +36,7 @@ export interface SettingsProps {
 
 interface SettingsForm {
   model: {
+    protocol?: ApiProtocol
     provider: string
     name: string
     apiKey: string
@@ -133,6 +134,7 @@ function validate(form: SettingsForm): Record<string, string> {
 
 function toModelConfig(form: SettingsForm): ModelConfig {
   return {
+    ...(form.model.protocol ? { protocol: ['openai', 'newapi', 'deepseek'].includes(form.model.provider) ? form.model.protocol : 'chat_completions' as const } : {}),
     provider: form.model.provider,
     name: form.model.name.trim(),
     apiKey: form.model.apiKey.trim() === '' ? null : form.model.apiKey,
@@ -144,6 +146,7 @@ function toModelConfig(form: SettingsForm): ModelConfig {
 
 function fromModelConfig(m: ModelConfig | undefined): SettingsForm['model'] {
   return {
+    protocol: m?.protocol,
     provider: m?.provider ?? DEFAULT_FORM.model.provider,
     name: m?.name ?? DEFAULT_FORM.model.name,
     apiKey: m?.apiKey ?? '',
@@ -463,7 +466,7 @@ export default function Settings({ onBack }: SettingsProps) {
                   className={textCls(mErr('model.baseUrl'))}
                 />
               </Field>
-              <ModelParameters profile={modelDraft} temperature={m.temperature} maxTokens={m.maxTokens}
+              <ModelParameters onProtocol={(protocol) => set('model', { protocol })} profile={modelDraft} temperature={m.temperature} maxTokens={m.maxTokens}
                 onTemperature={(value) => set('model', { temperature: value })} onMaxTokens={(value) => set('model', { maxTokens: value })}
                 onOptions={(patch) => setModelOptionsDraft((prev) => ({ ...prev, ...patch }))} />
               {mErr('model.temperature') && <p role="alert">{mErr('model.temperature')}</p>}

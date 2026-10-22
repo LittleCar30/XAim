@@ -8,6 +8,7 @@ export type ModelOptions = Pick<ModelProfile, 'supportsReasoning' | 'reasoningEf
 
 /** Shared by both editors; preserve compatible options and clear unsupported ones. */
 export function updateModelProfile(profile: ModelProfile, config: ModelConfig): ModelProfile {
+  if (config.protocol === 'responses' && !['openai', 'newapi', 'deepseek'].includes(config.provider)) config = { ...config, protocol: 'chat_completions' }
   const next = { ...profile, config }
   if (!['openai', 'newapi'].includes(config.provider)) next.supportsReasoning = false
   if (!supportsThinkingToggle(config.provider, config.name)) next.thinking = null
@@ -16,6 +17,7 @@ export function updateModelProfile(profile: ModelProfile, config: ModelConfig): 
 }
 
 export function tokenParameter(profile: ModelProfile): string {
+  if (profile.config.protocol === 'responses') return 'max_output_tokens'
   return ['openai', 'newapi'].includes(profile.config.provider) && profile.supportsReasoning
     ? 'max_completion_tokens' : 'max_tokens'
 }

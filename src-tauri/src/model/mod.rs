@@ -47,7 +47,33 @@ pub fn create_provider(config: &ModelConfig) -> Result<Box<dyn ModelProvider>> {
             "模型凭据尚未从系统凭据库加载，请通过配置加载入口读取，或重新填写 API Key".into(),
         ));
     }
-    let base_url = resolve_base_url(config)?;
+    validate_protocol(&config.provider, config.protocol)?;
+    let base_url = if config.provider == "deepseek"
+        && config.protocol == crate::types::ApiProtocol::Responses
+        && config.base_url.is_none()
+    {
+        "https://api.deepseek.com".into()
+    } else {
+        resolve_base_url(config)?
+    };
+    if config.protocol == crate::types::ApiProtocol::Responses {
+        let name = match config.provider.as_str() {
+            "openai" => "openai",
+            "deepseek" => "deepseek",
+            "newapi" => "newapi",
+            _ => unreachable!(),
+        };
+        return Ok(Box::new(
+            OpenAiProvider::new(base_url, require_api_key(config)?)
+                .with_provider_name(name)
+                .with_protocol(config.protocol)
+                .with_reasoning_effort(config.reasoning_effort.clone())
+                .with_reasoning_model(config.reasoning_model)
+                .with_thinking(config.thinking)
+                .with_output_limit(config.max_tokens)
+                .with_temperature(config.temperature),
+        ));
+    }
     match config.provider.as_str() {
         "openai" => Ok(Box::new(
             OpenAiProvider::new(base_url, require_api_key(config)?)
@@ -92,6 +118,17 @@ pub fn create_provider(config: &ModelConfig) -> Result<Box<dyn ModelProvider>> {
         ))),
         other => Err(unknown_provider_error(other)),
     }
+}
+
+pub fn validate_protocol(provider: &str, protocol: crate::types::ApiProtocol) -> Result<()> {
+    if protocol == crate::types::ApiProtocol::Responses
+        && !matches!(provider, "openai" | "newapi" | "deepseek")
+    {
+        return Err(XaimError::Config(
+            "此提供方尚未适配 Responses，请使用 Chat Completions（Anthropic 使用 Messages）".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// 解析实际使用的 API 地址：配置的 `base_url` 优先，否则取该 provider 的默认地址。
@@ -156,6 +193,7 @@ mod tests {
 
     fn model_config(provider: &str, api_key: &str) -> ModelConfig {
         ModelConfig {
+            protocol: crate::types::ApiProtocol::default(),
             provider: provider.to_string(),
             api_key: api_key.to_string(),
             base_url: None,
@@ -164,6 +202,34 @@ mod tests {
             thinking: None,
             max_tokens: None,
             temperature: None,
+        }
+    }
+
+    #[test]
+    fn responses_factory_selects_endpoint_and_rejects_unsupported_providers() {
+        for name in ["openai", "newapi", "deepseek"] {
+            let mut config = model_config(name, "test-only");
+            config.protocol = crate::types::ApiProtocol::Responses;
+            if name == "newapi" {
+                config.base_url = Some("https://example.test/v1".into());
+            }
+            let provider = create_provider(&config).unwrap();
+            let metadata = provider.interaction_request_metadata(&provider::ToolRequest {
+                model: "custom".into(),
+                messages: vec![],
+                tools: vec![],
+                max_tokens: 1024,
+            });
+            assert_eq!(metadata["protocol"], "responses");
+            assert_eq!(metadata["maxOutputTokens"], 1024);
+            if name == "deepseek" {
+                assert_eq!(metadata["endpoint"], "https://api.deepseek.com/responses");
+            }
+        }
+        for name in ["anthropic", "ollama", "qwen"] {
+            let mut config = model_config(name, "test-only");
+            config.protocol = crate::types::ApiProtocol::Responses;
+            assert!(create_provider(&config).is_err());
         }
     }
 

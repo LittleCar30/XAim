@@ -29,6 +29,19 @@ pub enum XaimError {
     /// 模型提供方返回错误或响应不合法。
     #[error("模型调用错误: {0}")]
     Model(String),
+    /// 本地任务预算或上下文保护已阻止继续请求；不代表供应商调用失败。
+    #[error("任务预算不足: {0}")]
+    BudgetExhausted(String),
+    /// A completed HTTP exchange can still contain a failed model generation.
+    #[error("模型服务端失败 [{code}]: {message}；未执行本轮工具")]
+    ProviderFailure {
+        code: &'static str,
+        message: &'static str,
+        retryable: bool,
+        retry_after_ms: Option<u64>,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    },
     /// 构建/测试/静态检查执行失败或未通过。
     #[error("验证错误: {0}")]
     Verify(String),
@@ -66,6 +79,47 @@ pub enum XaimError {
 
 /// 命令层的统一 Result 别名。
 pub type Result<T> = std::result::Result<T, XaimError>;
+
+/// Response-body transport failures can be classified as Decode by reqwest.
+/// JSON schema/parse errors are deterministic and must not be replayed.
+pub(crate) fn retryable_transport_error(error: &reqwest::Error) -> bool {
+    use std::error::Error as _;
+
+    if error.is_connect() || error.is_timeout() || error.is_body() {
+        return true;
+    }
+    if !error.is_decode() {
+        return false;
+    }
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if cause.is::<serde_json::Error>() {
+            return false;
+        }
+        source = cause.source();
+    }
+    true
+}
+
+/// Safe diagnostic fields; never include response content, URLs or credentials.
+pub(crate) fn transport_error_metadata(error: &reqwest::Error) -> serde_json::Value {
+    use std::error::Error as _;
+
+    let mut source = error.source();
+    let mut io_kind = None;
+    while let Some(cause) = source {
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            io_kind = Some(format!("{:?}", error.kind()));
+        }
+        source = cause.source();
+    }
+    serde_json::json!({
+        "connect":error.is_connect(),"timeout":error.is_timeout(),
+        "body":error.is_body(),"decode":error.is_decode(),
+        "request":error.is_request(),"ioKind":io_kind,
+        "retryable":retryable_transport_error(error),
+    })
+}
 
 /// IPC 返回约定：错误以字符串形式传给前端，命令层用
 /// `Result<T, XaimError>` 配合 `.map_err(String::from)`（或直接 `?` + Into）返回。
@@ -145,6 +199,26 @@ mod tests {
         // 非法 URL 让 reqwest 在 send() 处直接返回解析错误，无需真实网络。
         let err = reqwest::get("::::not-a-url").await.unwrap_err();
         assert!(matches!(XaimError::from(err), XaimError::Http(_)));
+    }
+
+    #[tokio::test]
+    async fn json_decode_errors_are_not_retryable_transport_failures() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/")
+            .with_body("{invalid json}")
+            .expect(1)
+            .create_async()
+            .await;
+        let error = reqwest::get(server.url())
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_err();
+        assert!(error.is_decode());
+        assert!(!retryable_transport_error(&error));
+        mock.assert_async().await;
     }
 
     #[test]

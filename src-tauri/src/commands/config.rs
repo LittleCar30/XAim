@@ -53,6 +53,7 @@ mod tests {
         let state = test_state();
         let config = Config {
             model: ModelConfig {
+                protocol: crate::types::ApiProtocol::default(),
                 provider: "ollama".to_string(),
                 name: "qwen2.5-coder".to_string(),
                 api_key: None,

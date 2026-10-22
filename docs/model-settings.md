@@ -24,7 +24,7 @@
 
 连接测试使用同一 provider 和参数构建器，保持推理支持、思考模式、强度、Temperature 与输出上限规则；探测请求只申请较小输出额度，不代表验证工具调用、上下文容量或任务完成能力。
 
-Anthropic 原生适配器当前尚未实现。配置界面明确提示这一限制；通过网关使用 Claude 时，需选择对应 OpenAI 兼容提供方并遵循网关支持的参数。
+Anthropic 使用原生 Messages 适配器；通过网关使用 Claude 时，需选择对应兼容协议并遵循网关支持的参数。
 
 ## 参考
 
@@ -35,3 +35,17 @@ Anthropic 原生适配器当前尚未实现。配置界面明确提示这一限�
 - [Claude Code 模型配置](https://code.claude.com/docs/en/model-config)：模型与 effort 分别配置，显式选择优先于已保存设置和模型默认。未把 Claude 原生参数映射为 OpenAI 参数。
 
 跨入口同步使用组件集成测试验证；参数发送使用本地模拟 HTTP 服务验证，无需真实模型 API 或密钥。
+
+## Responses（2026-10-22）
+
+在设置或管理模型的“请求协议”选择 Responses。OpenAI、NewAPI、DeepSeek 提供此选项；旧配置默认 Chat Completions，不自动迁移。Qwen/Ollama 暂保留 Chat，Anthropic 使用 Messages。NewAPI 的版本、渠道和模型都需要支持所选端点。
+
+Responses 发往 `{baseUrl}/responses`，使用 `input`、扁平 `function` 工具、`function_call_output` 和 `max_output_tokens`。采用 `store:false`，客户端每轮重放历史与原始 reasoning/function_call 项；OpenAI/网关请求加密 reasoning，私有状态不会进入公开日志或 Chat 请求。流必须收到 completed/incomplete/failed 结束事件；没有结束事件不执行工具，传输中断沿用有限重试。仅 max_output_tokens 截断进入现有截断恢复，失败、拒绝或无效参数均不能执行工具。此版本实现文本及函数工具，不提供内置搜索、图片或服务端 conversation。
+
+DeepSeek 官方 Responses 默认地址是 `https://api.deepseek.com`（不加 `/v1`），文档支持模型为 `deepseek-flash` 和 `deepseek-v4-pro`。原生 Responses 将思考关闭映射为 `reasoning.effort:none`，其余强度仅显式发送；网关模型名由运营方确定，不能假定相同。自定义 Base URL 保持用户指定路径。
+
+预算收尾自动复用当前文件版本的检查结果，隐藏重复验证工具，保留最后一次仅提交状态的请求；有待办仍保存 partial，不能伪装完成。没有清单的项目仅对根目录最多 64 个 JS/CJS/MJS 文件执行 `node --check`，不执行 build.js 等未知脚本；这只证明语法检查结果，不代表构建、页面效果或功能测试通过。缺少 Node 或检查命令仍报告 unavailable。
+
+- [OpenAI Responses 参考](https://developers.openai.com/api/reference/resources/responses/methods/create)
+- [DeepSeek Responses 兼容范围](https://api-docs.deepseek.com/guides/responses_api)
+- [DeepSeek Responses 参数](https://api-docs.deepseek.com/api/create-response)

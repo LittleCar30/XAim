@@ -10,7 +10,7 @@ import { useProjectStore } from '@/stores/project'
 import { useTaskStore } from '@/stores/task'
 import { useUiStore } from '@/stores/ui'
 import type { ConversationRecord } from '@/stores/conversation'
-import { useLayoutEffect, useRef } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import MarkdownMessage from '@/components/MarkdownMessage'
 
 export default function TaskPanel() {
@@ -106,7 +106,7 @@ function TaskTurn({ previous }: { previous?: ConversationRecord }) {
       <p className="agent-summary">{summary}</p>
       {message?.type === 'message' && <MarkdownMessage content={message.content} />}
       {showResponseText && <div aria-label="模型回复">
-        <MarkdownMessage content={responseText} />
+        <ModelReply content={responseText} />
         {interruptedText && <p className="historical-note">回复已中断，内容尚未完成。</p>}
       </div>}
       {errorEvent?.type === 'error' && <p className="message-error">{errorEvent.message}</p>}
@@ -126,4 +126,13 @@ function TaskTurn({ previous }: { previous?: ConversationRecord }) {
         timeLabel={running || task.status === 'idle' ? '开始于' : task.finishedAt != null ? '完成于' : '更新于'} durationMs={duration} />
     </article>
   </div>
+}
+
+function ModelReply({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false)
+  if (content.length <= 4000) return <MarkdownMessage content={content} />
+  return <details className="execution-details" onToggle={(event) => setExpanded(event.currentTarget.open)}>
+    <summary>查看较长的模型输出（{content.length.toLocaleString()} 字符）<ChevronDown size={15} /></summary>
+    {expanded && <MarkdownMessage content={content} />}
+  </details>
 }

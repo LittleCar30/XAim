@@ -80,7 +80,7 @@ export default function ModelManager({ onClose }: { onClose: () => void }) {
           <label>模型名称<input list="managed-model-options" value={draft.config.name} onChange={(e) => update({ name: e.target.value })} required /><datalist id="managed-model-options">{options.map((name) => <option key={name} value={name} />)}</datalist></label></div>
           <label>API Key<input type="password" autoComplete="off" value={draft.config.apiKey ?? ''} onChange={(e) => update({ apiKey: e.target.value || null })} placeholder="填写裸 token，不要加 Bearer" /></label>
           <label>Base URL<input type="url" value={draft.config.baseUrl ?? ''} onChange={(e) => update({ baseUrl: e.target.value || null })} placeholder={draft.config.provider === 'newapi' ? '例如：https://你的域名/v1' : '使用提供方默认地址'} /></label>
-          <ModelParameters profile={draft} temperature={String(draft.config.temperature)} maxTokens={draft.config.maxTokens == null ? '' : String(draft.config.maxTokens)}
+          <ModelParameters onProtocol={(protocol) => update({ protocol })} profile={draft} temperature={String(draft.config.temperature)} maxTokens={draft.config.maxTokens == null ? '' : String(draft.config.maxTokens)}
             onTemperature={(value) => update({ temperature: Number(value) })} onMaxTokens={(value) => update({ maxTokens: value ? Number(value) : null })}
             onOptions={(patch) => { setDraft((d) => ({ ...d, ...patch })); setResult(null); setError(null) }} />
         </fieldset>

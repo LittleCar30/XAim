@@ -114,7 +114,10 @@ export interface VerifyResult {
 }
 
 /** 模型接入配置，对应 Rust ModelConfig。 */
+export type ApiProtocol = 'chat_completions' | 'responses'
+
 export interface ModelConfig {
+  protocol?: ApiProtocol
   provider: string
   name: string
   apiKey: string | null

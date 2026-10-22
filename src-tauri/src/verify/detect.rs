@@ -51,6 +51,57 @@ pub fn detect_verify_config(root: &Path) -> VerifyConfig {
     config
 }
 
+/// Manifestless JS projects can still receive a syntax check. Never run scripts.
+/// Limit discovery to regular root files; full builds/tests require project config.
+pub fn standalone_js_checks(root: &Path) -> Vec<String> {
+    if [
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "pom.xml",
+        "pyproject.toml",
+        "requirements.txt",
+    ]
+    .iter()
+    .any(|p| root.join(p).is_file())
+    {
+        return vec![];
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return vec![];
+    };
+    let mut names: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| {
+            let path = e.path();
+            if !matches!(
+                path.extension().and_then(|s| s.to_str()),
+                Some("js" | "cjs" | "mjs")
+            ) {
+                return None;
+            }
+            let name = e.file_name().into_string().ok()?;
+            // The runner rejects shell metacharacters; skip such names instead of
+            // proposing commands it cannot run. Prefix ./ prevents option parsing.
+            if name.contains(['"', '\'', '\n', '\r'])
+                || name
+                    .chars()
+                    .any(|c| crate::tools::exec::SHELL_METACHARS.contains(&c))
+            {
+                return None;
+            }
+            Some(name)
+        })
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .take(64)
+        .map(|name| format!("node --check \"./{name}\""))
+        .collect()
+}
+
 /// ESLint 配置文件名（覆盖旧版 .eslintrc 与新版 flat config）。
 const ESLINT_CONFIG_FILES: &[&str] = &[
     ".eslintrc",
@@ -271,6 +322,28 @@ fn detect_python(root: &Path) -> VerifyConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn standalone_checks_quote_paths_and_do_not_guess_script_entrypoints() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("build.js"),
+            "throw Error('do not execute')",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("space file.mjs"), "export default 1;").unwrap();
+        std::fs::create_dir(root.path().join("sub")).unwrap();
+        std::fs::write(root.path().join("sub/ignored.js"), "bad syntax").unwrap();
+        assert_eq!(
+            standalone_js_checks(root.path()),
+            vec![
+                "node --check \"./build.js\"",
+                "node --check \"./space file.mjs\""
+            ]
+        );
+        std::fs::write(root.path().join("package.json"), "{}").unwrap();
+        assert!(standalone_js_checks(root.path()).is_empty());
+    }
+
     use super::*;
     use std::fs;
 

@@ -5,6 +5,9 @@
 //! DeepSeek（`https://api.deepseek.com/v1`）、
 //! Ollama 本地模型（`http://localhost:11434/v1`）等。
 
+#[path = "responses.rs"]
+mod responses;
+
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -34,6 +37,7 @@ const DONE_SENTINEL: &str = "[DONE]";
 
 /// OpenAI 兼容提供方。
 pub struct OpenAiProvider {
+    protocol: crate::types::ApiProtocol,
     provider_name: &'static str,
     base_url: String,
     api_key: String,
@@ -64,6 +68,7 @@ impl OpenAiProvider {
             .build()
             .expect("构建工具请求 Client 失败");
         Self {
+            protocol: crate::types::ApiProtocol::default(),
             provider_name: "openai",
             base_url: normalize_base_url(&base_url),
             api_key: normalize_api_key(&api_key),
@@ -79,6 +84,11 @@ impl OpenAiProvider {
             streaming_disabled: AtomicBool::new(false),
             stream_usage_disabled: AtomicBool::new(false),
         }
+    }
+
+    pub fn with_protocol(mut self, protocol: crate::types::ApiProtocol) -> Self {
+        self.protocol = protocol;
+        self
     }
 
     pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
@@ -231,7 +241,7 @@ impl OpenAiProvider {
         deadline: Option<Instant>,
         observer: Option<&RequestObserver<'_>>,
     ) -> Result<reqwest::Response> {
-        let url = format!("{}/chat/completions", self.base_url);
+        let url = self.endpoint();
         let mut attempt = 0u32;
         loop {
             let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
@@ -290,10 +300,13 @@ impl OpenAiProvider {
                     return Err(XaimError::Model(format!("HTTP {status}: {body}")));
                 }
                 Err(err) => {
-                    observation.finish(serde_json::json!({"stage":"transportError","attempt":attempt+1,
+                    observation.finish(
+                        serde_json::json!({"stage":"transportError","attempt":attempt+1,
                         "durationMs":observation.elapsed_ms(),"connect":err.is_connect(),
-                        "timeout":err.is_timeout(),"body":err.is_body(),"request":err.is_request()}));
-                    let retryable = err.is_connect() || err.is_body() || err.is_timeout();
+                        "timeout":err.is_timeout(),"body":err.is_body(),"request":err.is_request(),
+                        "transport":crate::errors::transport_error_metadata(&err)}),
+                    );
+                    let retryable = crate::errors::retryable_transport_error(&err);
                     if attempt < MAX_RETRIES && retryable {
                         attempt += 1;
                         tracing::warn!(attempt, error = %err, "网络错误，稍后重试");
@@ -393,10 +406,14 @@ impl OpenAiProvider {
             Err(XaimError::Model(_)) => Some("protocol"),
             Err(_) => Some("internal"),
         };
+        let transport = match &outcome {
+            Err(XaimError::Http(error)) => Some(crate::errors::transport_error_metadata(error)),
+            _ => None,
+        };
         observation.finish(
             serde_json::json!({"stage":if outcome.is_ok() {"streamEnd"} else {"streamError"},
             "durationMs":observation.elapsed_ms(),"bytes":size.load(Ordering::Relaxed),
-            "receiveLimitBytes":limit,"errorKind":error_kind,"success":outcome.is_ok()}),
+            "receiveLimitBytes":limit,"errorKind":error_kind,"transport":transport,"success":outcome.is_ok()}),
         );
         outcome
     }
@@ -459,7 +476,7 @@ fn unsupported_stream_parameter(error: &XaimError, parameter: &str) -> bool {
 /// Gateway prefixes such as `/newapi/v1` are preserved.
 fn normalize_base_url(value: &str) -> String {
     let mut url = value.trim().trim_end_matches('/').to_string();
-    for suffix in ["/chat/completions", "/completions"] {
+    for suffix in ["/chat/completions", "/completions", "/responses"] {
         if url.ends_with(suffix) {
             url.truncate(url.len() - suffix.len());
             break;
@@ -624,6 +641,9 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn tool_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
+        if self.is_responses() {
+            return self.responses_metadata(req, false);
+        }
         match self.tool_payload(req) {
             Ok(payload) => serde_json::json!({
                 "provider":self.name(),"protocol":"chat_completions","model":payload["model"],
@@ -647,6 +667,9 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn interaction_request_metadata(&self, req: &ToolRequest) -> serde_json::Value {
+        if self.is_responses() {
+            return self.responses_metadata(req, true);
+        }
         let mut metadata = self.tool_request_metadata(req);
         let streaming = !self.streaming_disabled.load(Ordering::Relaxed);
         metadata["stream"] = serde_json::json!(streaming);
@@ -667,6 +690,11 @@ impl ModelProvider for OpenAiProvider {
         observer: &RequestObserver<'_>,
         text: &TextObserver<'_>,
     ) -> Result<ToolResponse> {
+        if self.is_responses() {
+            return self
+                .responses_request(req, true, deadline, observer, text)
+                .await;
+        }
         if self.streaming_disabled.load(Ordering::Relaxed) {
             let response = self
                 .complete_tools_observed(req, deadline, observer)
@@ -724,6 +752,11 @@ impl ModelProvider for OpenAiProvider {
         deadline: Option<Instant>,
         observer: &RequestObserver<'_>,
     ) -> Result<ToolResponse> {
+        if self.is_responses() {
+            return self
+                .responses_request(req, false, deadline, observer, &|_| Ok(()))
+                .await;
+        }
         let mut total = RequestObservation::new(Some(observer), "request", 0);
         let outcome = async {
         let payload = self.tool_payload(&req)?;
@@ -755,6 +788,9 @@ impl ModelProvider for OpenAiProvider {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse> {
+        if self.is_responses() {
+            return self.responses_complete(req).await;
+        }
         let payload = self.payload(&req, false);
         let resp = self
             .send_with_retries(&payload, Some(REQUEST_TIMEOUT), None, None)
@@ -802,6 +838,9 @@ impl ModelProvider for OpenAiProvider {
         &self,
         req: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        if self.is_responses() {
+            return self.responses_stream(req).await;
+        }
         let payload = self.payload(&req, true);
         let resp = self.send_with_retries(&payload, None, None, None).await?;
 

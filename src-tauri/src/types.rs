@@ -110,10 +110,21 @@ pub struct VerifyResult {
     pub duration_ms: i64,
 }
 
+/// Wire protocol; missing legacy values retain Chat Completions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiProtocol {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
 /// 模型接入配置，对应 config 存储中的单个模型条目。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfig {
+    #[serde(default)]
+    pub protocol: ApiProtocol,
     pub provider: String,
     pub name: String,
     pub api_key: Option<String>,
@@ -125,6 +136,7 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            protocol: ApiProtocol::default(),
             provider: "deepseek".to_string(),
             name: "deepseek-chat".to_string(),
             api_key: None,
@@ -437,6 +449,7 @@ mod tests {
         assert_eq!(vr_back, vr);
 
         let cfg = ModelConfig {
+            protocol: crate::types::ApiProtocol::default(),
             provider: "anthropic".to_string(),
             name: "claude-sonnet".to_string(),
             api_key: None,

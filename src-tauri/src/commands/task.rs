@@ -385,6 +385,7 @@ mod tests {
     #[test]
     fn selected_profile_parameters_reach_the_actual_tool_payload() {
         let model = crate::types::ModelConfig {
+            protocol: crate::types::ApiProtocol::default(),
             provider: "newapi".into(),
             name: "custom-model".into(),
             api_key: Some("test-only".into()),
@@ -426,6 +427,27 @@ mod tests {
                 assert!(metadata["maxCompletionTokens"].is_null());
             }
         }
+    }
+
+    #[test]
+    fn responses_selection_survives_runtime_configuration() {
+        let mut app = crate::types::Config::default();
+        app.model.protocol = crate::types::ApiProtocol::Responses;
+        app.model.provider = "newapi".into();
+        app.model.name = "custom-model".into();
+        app.model.api_key = Some("test-key".into());
+        app.model.base_url = Some("https://example.test/v1".into());
+        let runtime = orchestrator_config_from(app).unwrap();
+        let metadata = crate::model::create_provider(&runtime.model)
+            .unwrap()
+            .interaction_request_metadata(&crate::model::provider::ToolRequest {
+                model: "custom-model".into(),
+                messages: vec![],
+                tools: vec![],
+                max_tokens: 512,
+            });
+        assert_eq!(metadata["protocol"], "responses");
+        assert_eq!(metadata["endpoint"], "https://example.test/v1/responses");
     }
 
     #[test]

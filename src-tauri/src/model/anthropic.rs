@@ -238,6 +238,7 @@ fn parse_tool_response(body: Value) -> Result<ToolResponse> {
     let usage = body.get("usage").cloned().unwrap_or_else(|| json!({}));
     Ok(ToolResponse {
         message: ToolMessage {
+            responses_output: vec![],
             role: "assistant".into(),
             content: (!text.is_empty()).then_some(text),
             tool_calls: calls,
@@ -374,6 +375,7 @@ mod tests {
         let mut req = request();
         req.messages = vec![
             ToolMessage {
+                responses_output: vec![],
                 role: "assistant".into(),
                 content: None,
                 tool_calls: vec![ToolCall {

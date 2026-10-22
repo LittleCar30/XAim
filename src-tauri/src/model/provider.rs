@@ -112,6 +112,9 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolMessage {
+    /// Private protocol state for stateless Responses replay; never in Chat/log JSON.
+    #[serde(skip)]
+    pub responses_output: Vec<serde_json::Value>,
     pub role: String,
     pub content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -125,6 +128,7 @@ pub struct ToolMessage {
 impl ToolMessage {
     pub fn text(role: &str, content: impl Into<String>) -> Self {
         Self {
+            responses_output: vec![],
             role: role.into(),
             content: Some(content.into()),
             tool_calls: vec![],

@@ -178,7 +178,12 @@ async fn test_connection_with_options(
 fn catalog(provider: &str) -> Option<Vec<String>> {
     let models: &[&str] = match provider {
         "openai" => &["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3-mini"],
-        "deepseek" => &["deepseek-chat", "deepseek-reasoner"],
+        "deepseek" => &[
+            "deepseek-flash",
+            "deepseek-v4-pro",
+            "deepseek-chat",
+            "deepseek-reasoner",
+        ],
         "qwen" => &["qwen-max", "qwen-plus", "qwen-turbo"],
         "ollama" => &["qwen2.5-coder", "deepseek-r1", "llama3.1", "codellama"],
         "anthropic" => &["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
@@ -202,6 +207,7 @@ mod tests {
     /// 构造指向 mock 服务的 OpenAI 兼容模型配置。
     fn mock_config(url: &str, api_key: &str) -> ModelConfig {
         ModelConfig {
+            protocol: crate::types::ApiProtocol::default(),
             provider: "deepseek".to_string(),
             name: "deepseek-chat".to_string(),
             api_key: Some(api_key.to_string()),
@@ -209,6 +215,25 @@ mod tests {
             temperature: 0.7,
             max_tokens: None,
         }
+    }
+
+    #[tokio::test]
+    async fn connection_probe_uses_selected_responses_protocol() {
+        let mut server = mockito::Server::new_async().await;
+        let mock=server.mock("POST","/responses")
+            .match_body(mockito::Matcher::PartialJson(json!({"model":"deepseek-flash","stream":false,"max_output_tokens":1024,"reasoning":{"effort":"none"}})))
+            .with_header("content-type","application/json")
+            .with_body(json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pong"}]}]}).to_string())
+            .create_async().await;
+        let mut config = mock_config(&server.url(), "test-key");
+        config.protocol = crate::types::ApiProtocol::Responses;
+        config.name = "deepseek-flash".into();
+        assert!(
+            test_connection_with_options(config, None, Some(false), false)
+                .await
+                .unwrap()
+        );
+        mock.assert_async().await;
     }
 
     #[tokio::test]

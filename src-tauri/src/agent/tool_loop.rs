@@ -25,6 +25,7 @@ const SYSTEM: &str = r#"你是 XAim 编程 Agent。根据用户任务使用工�
 文件工具只操作隔离副本，最终差异由程序计算。不要输出 unified diff。
 按需要先 list_dir / search，再 read_file；仅在支持的源码语言中定位声明时使用 search_symbols / read_symbol，HTML/SVG 直接读取文件。edit_file 必须使用最新 hash 和唯一的非空 old_text。
 长文件必须分块生成：先 create_file 创建小骨架，再 append_file 追加或 edit_file 编辑。
+用户要求修改文件时，代码必须通过文件工具写入，不能把待写代码、工具参数或内部推理作为回复正文输出。除非用户明确要求展示源码，正文只说明当前操作和最终结果。
 已知多个相关文件路径时，优先用 read_files 一次读取，避免逐文件模型往返。读取结果不完整时按 next_offset 继续 read_file。
 单次写入建议不超过 4000 字符，使用写入工具返回的新 hash，不要反复读取整个文件。
 根据剩余 token 预算及时收尾，避免无必要的搜索、重复读取和装饰性大输出。
@@ -322,6 +323,11 @@ fn verification_commands(root: &std::path::Path) -> Vec<(VerifyKind, String)> {
     ]
     .into_iter()
     .flatten()
+    .chain(
+        crate::verify::detect::standalone_js_checks(root)
+            .into_iter()
+            .map(|c| (VerifyKind::TypeCheck, c)),
+    )
     .collect()
 }
 
@@ -494,6 +500,14 @@ fn estimate_prompt(
         .iter()
         .skip(measured.map_or(0, |(_, count)| count))
         .map(|m| {
+            if !m.responses_output.is_empty() {
+                return m
+                    .responses_output
+                    .iter()
+                    .map(|item| estimated_text(&item.to_string()))
+                    .sum::<usize>()
+                    + 32;
+            }
             m.content.as_deref().map_or(0, estimated_text)
                 + m.reasoning_content.as_deref().map_or(0, estimated_text)
                 + m.tool_calls
@@ -529,14 +543,19 @@ async fn stop_locally(
     }
     let changes = snapshot.save(workspace, record)?;
     if !changes.files.is_empty() {
-        verify_current(snapshot, workspace, ctx, config, cancel, record).await?;
+        if let Err(error) = verify_current(snapshot, workspace, ctx, config, cancel, record).await {
+            record.diagnostic(
+                "partialVerificationError",
+                json!({"error":operations::redact(&error.to_string())}),
+            )?;
+        }
     }
     let report = snapshot.save_report(workspace, record, reason)?;
     record.event(XaimEvent::Message {
         task_id: record.task_id,
         content: report,
     })?;
-    Err(XaimError::Model(format!(
+    Err(XaimError::BudgetExhausted(format!(
         "{reason}；已由程序保存阶段性成果，完成情况尚未确认，未应用变更"
     )))
 }
@@ -692,7 +711,7 @@ pub async fn run(
         if !finishing
             && turn > 0
             && (prediction.rounds <= 3
-                || config.max_turns.saturating_sub(turn) <= 2
+                || config.max_turns.saturating_sub(turn) <= 3
                 || remaining_ms.is_some_and(|ms| ms < recent_request_ms.saturating_mul(2) + 10_000))
         {
             finishing = true;
@@ -718,9 +737,24 @@ pub async fn run(
         snapshot.remaining_tokens = remaining;
         snapshot.predicted_rounds = prediction.rounds;
         snapshot.save_metadata(&record)?;
-        if finishing && finishing_responses >= 2 {
+        if finishing && finishing_responses >= 3 {
             return stop_locally(
                 "预算收尾已结束，停止额外模型请求",
+                &mut snapshot,
+                workspace,
+                ctx,
+                config,
+                &cancel,
+                &record,
+            )
+            .await;
+        }
+        if snapshot.terminal_submission_sent
+            && !snapshot.terminal_submission_confirmed
+            && snapshot.terminal_submission_attempts >= 3
+        {
+            return stop_locally(
+                "终提交未获得确认，有限重试次数已用尽",
                 &mut snapshot,
                 workspace,
                 ctx,
@@ -735,10 +769,36 @@ pub async fn run(
                 .verification
                 .iter()
                 .any(|r| r["status"] == "failed");
+        // Preserve input and output for one explicit final state submission.
+        let submission_reserve = estimated_input as u64
+            + 512
+            + normal_output.min(4096_u32.saturating_add(recent_reasoning_tokens)) as u64;
+        let final_submission = finishing
+            && !snapshot.core_delivery_pending()
+            && (finishing_responses >= 2
+                || config.max_turns.saturating_sub(turn) <= 1
+                || remaining < submission_reserve.saturating_mul(2));
         let request_tools: Vec<Value> = tools
             .iter()
             .filter(|tool| {
+                if final_submission {
+                    return matches!(
+                        tool["function"]["name"].as_str(),
+                        Some("update_task_state" | "report_blocked")
+                    );
+                }
+                if finishing
+                    && tool["function"]["name"] == "run_verify"
+                    && snapshot.verified_revision == Some(snapshot.revision)
+                {
+                    return false;
+                }
                 !finishing
+                    || snapshot.core_delivery_pending()
+                        && matches!(
+                            tool["function"]["name"].as_str(),
+                            Some("create_file" | "append_file" | "edit_file")
+                        )
                     || matches!(
                         tool["function"]["name"].as_str(),
                         Some(
@@ -761,7 +821,8 @@ pub async fn run(
             "程序预算状态：剩余 {remaining} token（包括后续输入），预计可执行 {} 轮，第 {} / {} 轮。剩余时间 {:?} 毫秒。{} 当前验证：{}",
             prediction.rounds, turn + 1, config.max_turns,
             remaining_ms,
-            if finishing { "已进入收尾，只允许必要检查；真实检查失败时才能修复，禁止美化。最多两次有效响应，传输失败仅有限重试，然后由程序保存成果。" }
+            if final_submission { "这是最后的状态提交请求，只允许 update_task_state 或 report_blocked。根据已有成果如实填写 completed、pending、ready_for_review 和 summary；unavailable 不代表测试通过，不要再次请求验证或读取文件。" }
+            else if finishing { "已进入收尾：程序已检查当前版本，结果见下方；unavailable 表示缺少可运行检查，不代表代码失败，禁止重复 run_verify。真实检查失败时才能修复。最多两轮检查/修复，最后一轮必须用 update_task_state 提交 completed、pending、ready_for_review 和 summary；未完成则如实记录待办或 report_blocked。传输失败仅有限重试。" }
             else { "优先完成原始目标；用 update_task_state 记录待办，完成后直接提交状态。" },
             serde_json::to_string(&snapshot.verification.iter().map(|r| {
                 let mut check = json!({"kind":r["kind"],"status":r["status"]});
@@ -777,8 +838,12 @@ pub async fn run(
         let available_context = config.context_tokens.saturating_sub(estimated_input) as u64;
         // Reserve another reasonable input+output round while doing ordinary work.
         // Finishing may use the reserve, but never exceeds the remaining cap.
-        let reserve = if finishing {
+        let reserve = if final_submission {
             0
+        } else if finishing && snapshot.core_delivery_pending() {
+            0
+        } else if finishing {
+            submission_reserve
         } else {
             prediction.cost_per_round
         };
@@ -830,6 +895,19 @@ pub async fn run(
             tools: request_tools.clone(),
             max_tokens: request_output,
         };
+        if final_submission {
+            snapshot.terminal_submission_sent = true;
+            snapshot.terminal_submission_attempts =
+                snapshot.terminal_submission_attempts.saturating_add(1);
+            snapshot.save_metadata(&record)?;
+            record.diagnostic(
+                "terminalSubmission",
+                json!({
+                    "sent":true,"confirmed":snapshot.terminal_submission_confirmed,
+                    "attempt":snapshot.terminal_submission_attempts,"maxAttempts":3,
+                }),
+            )?;
+        }
         record.diagnostic(
             "modelParameters",
             json!({"round":turn + 1,"parameters":provider.interaction_request_metadata(&request)}),
@@ -876,20 +954,63 @@ pub async fn run(
             }
             Err(error) => {
                 streamed_text.finish("interrupted")?;
+                if let XaimError::ProviderFailure {
+                    input_tokens,
+                    output_tokens,
+                    code,
+                    ..
+                } = &error
+                {
+                    let charged_input = input_tokens.unwrap_or(estimated_input as u64);
+                    let charged_output = output_tokens.unwrap_or(request_output as u64);
+                    input = input.saturating_add(charged_input);
+                    output = output.saturating_add(charged_output);
+                    snapshot.input_used = input;
+                    snapshot.output_used = output;
+                    snapshot.remaining_tokens = config
+                        .max_total_tokens
+                        .saturating_sub(input.saturating_add(output));
+                    snapshot.save_metadata(&record)?;
+                    record.usage(input, output)?;
+                    record.event(XaimEvent::Token {
+                        task_id: record.task_id,
+                        input: charged_input as i64,
+                        output: charged_output as i64,
+                    })?;
+                    record.diagnostic("failedModelUsage", json!({"round":turn+1,"errorCode":code,
+                        "chargedInput":charged_input,"chargedOutput":charged_output,
+                        "inputEstimated":input_tokens.is_none(),"outputEstimated":output_tokens.is_none(),
+                        "remainingTokens":snapshot.remaining_tokens}))?;
+                }
                 record.diagnostic(
                     "modelRequestFailed",
                     json!({
                         "round":turn + 1,"durationMs":started.elapsed().as_millis() as u64,
-                        "errorKind":match &error { XaimError::Http(_) => "transport", XaimError::Cancelled => "cancelled", XaimError::Timeout(_) => "deadline", _ => "provider_or_protocol" },
+                        "errorKind":match &error { XaimError::Http(_) => "transport", XaimError::ProviderFailure { .. } => "upstream_generation", XaimError::Cancelled => "cancelled", XaimError::Timeout(_) => "deadline", _ => "provider_or_protocol" },
                         "retryable":retryable_model_error(&error),
+                        "transport":match &error { XaimError::Http(error) => Some(crate::errors::transport_error_metadata(error)), _ => None },
                         "phase":snapshot.phase,"finishingResponses":finishing_responses,
                     }),
                 )?;
+                let retry_limit = if matches!(
+                    &error,
+                    XaimError::ProviderFailure {
+                        code: "missing" | "other",
+                        ..
+                    }
+                ) {
+                    1
+                } else {
+                    MAX_MODEL_RETRIES
+                };
+                let delay = retry_delay_for_error(&error, model_retries + 1);
                 if retryable_model_error(&error)
-                    && model_retries < MAX_MODEL_RETRIES
+                    && model_retries < retry_limit
+                    && input.saturating_add(output) < config.max_total_tokens
+                    && delay <= Duration::from_secs(600)
                     && !cancel.load(Ordering::SeqCst)
                     && config.deadline.is_none_or(|d| {
-                        d.saturating_duration_since(Instant::now()) > Duration::from_secs(5)
+                        d.saturating_duration_since(Instant::now()) > delay + Duration::from_secs(5)
                     })
                 {
                     model_retries += 1;
@@ -899,14 +1020,17 @@ pub async fn run(
                         .collect();
                     record.diagnostic(
                         "modelRetry",
-                        json!({"round":turn + 1,"attempt":model_retries,"reason":reason}),
+                        json!({"round":turn + 1,"attempt":model_retries,"reason":reason,
+                            "limit":retry_limit,"delayMs":delay.as_millis() as u64}),
                     )?;
                     record.event(XaimEvent::Step {
                         task_id: record.task_id,
                         name: format!("模型响应中断，第 {} 次重试", model_retries),
                         status: "done".into(),
                     })?;
-                    let delay = model_retry_delay(model_retries);
+                    if matches!(error, XaimError::ProviderFailure { .. }) && model_retries == 1 {
+                        messages.push(ToolMessage::text("user", "上一轮上游生成失败，本轮没有执行任何工具。保留已经成功的工具结果，不重复读取；立即执行一个最小操作，单次写入最多 4000 字符，不输出整段源码或重新解释方案。"));
+                    }
                     cancellable_until(
                         &cancel,
                         config
@@ -1071,6 +1195,25 @@ pub async fn run(
             let mut calls = calls;
             ensure_unique_call_ids(&mut calls, &mut ids, turn + 1)?;
             let mut message = response.message.clone();
+            // Responses replays original output items. Keep call_id paired with
+            // tool results when a compatible gateway reuses identifiers.
+            for item in &mut message.responses_output {
+                if item["type"] == "function_call" {
+                    if let Some(index) = response
+                        .message
+                        .tool_calls
+                        .iter()
+                        .position(|old| item["call_id"] == old.id)
+                    {
+                        if item["call_id"] != calls[index].id {
+                            item["call_id"] = json!(calls[index].id);
+                            if let Some(object) = item.as_object_mut() {
+                                object.remove("id");
+                            }
+                        }
+                    }
+                }
+            }
             message.tool_calls = calls.clone();
             messages.push(message);
             let mut repeated_exploration = true;
@@ -1101,6 +1244,11 @@ pub async fn run(
                     .iter()
                     .any(|tool| tool["function"]["name"] == call.function.name)
                     && (!finishing
+                        || snapshot.core_delivery_pending()
+                            && matches!(
+                                call.function.name.as_str(),
+                                "create_file" | "append_file" | "edit_file"
+                            )
                         || call.function.name != "edit_file"
                         || snapshot.verified_revision == Some(snapshot.revision)
                             && snapshot
@@ -1119,9 +1267,24 @@ pub async fn run(
                         error:Some("未授权工具：当前程序状态不允许此工具；收尾时禁止额外搜索、美化和未经检查失败触发的编辑".into()),duration_ms:Some(0),
                     },
                     Ok(args) if call.function.name == "update_task_state" => {
+                        if args["ready_for_review"] == true
+                            && !snapshot.completion_evidence_satisfied()
+                        {
+                            return stop_blocked(
+                                "完成声明缺少程序可核验的产物或操作证据",
+                                &mut snapshot,
+                                workspace,
+                                &record,
+                            );
+                        }
                         match snapshot.update_reported_state(args) {
-                            Ok(()) => crate::types::ToolResult { name:call.function.name.clone(),success:true,
-                                output:json!({"saved":true,"ready_for_review":snapshot.ready_for_review}).to_string(),error:None,duration_ms:Some(0) },
+                            Ok(()) => {
+                                if final_submission {
+                                    snapshot.terminal_submission_confirmed = true;
+                                }
+                                crate::types::ToolResult { name:call.function.name.clone(),success:true,
+                                output:json!({"saved":true,"ready_for_review":snapshot.ready_for_review}).to_string(),error:None,duration_ms:Some(0) }
+                            }
                             Err(error) => crate::types::ToolResult { name:call.function.name.clone(),success:false,
                                 output:String::new(),error:Some(error.to_string()),duration_ms:Some(0) },
                         }
@@ -1392,6 +1555,28 @@ pub async fn run(
                 .await;
             }
             if !snapshot.ready_for_review {
+                if final_submission && snapshot.terminal_submission_confirmed {
+                    snapshot.terminal_submission_confirmed = true;
+                    snapshot.save_metadata(&record)?;
+                    record.diagnostic(
+                        "terminalSubmission",
+                        json!({
+                            "sent":true,"confirmed":true,
+                            "attempt":snapshot.terminal_submission_attempts,
+                            "readyForReview":false,"pending":snapshot.pending,
+                        }),
+                    )?;
+                    return stop_locally(
+                        "终提交已确认任务仍有待办，已保存阶段性成果",
+                        &mut snapshot,
+                        workspace,
+                        ctx,
+                        config,
+                        &cancel,
+                        &record,
+                    )
+                    .await;
+                }
                 continue;
             }
         }
@@ -1420,9 +1605,21 @@ pub async fn run(
                 messages.push(ToolMessage::text("user", "任务状态仍有待办，请继续完成待办；若已全部完成，请用 update_task_state 清空待办并提交完整结果。"));
                 continue;
             }
+            if !snapshot.completion_evidence_satisfied() {
+                return stop_blocked(
+                    "模型正文声明完成，但缺少程序可核验的产物或操作证据",
+                    &mut snapshot,
+                    workspace,
+                    &record,
+                );
+            }
             snapshot.ready_for_review = true;
             snapshot.pending.clear();
             snapshot.model_summary = summary.clone();
+            if final_submission {
+                snapshot.terminal_submission_confirmed = true;
+                snapshot.save_metadata(&record)?;
+            }
         }
         let changes = workspace.changes()?;
         // Starting a launcher alone is insufficient. Inspect it again at completion,
@@ -1611,13 +1808,27 @@ fn ensure_unique_call_ids(
 /// errors that prove the model acted incorrectly are not.
 fn retryable_model_error(error: &XaimError) -> bool {
     match error {
-        XaimError::Http(error) => error.is_connect() || error.is_timeout() || error.is_body(),
+        XaimError::ProviderFailure { retryable, .. } => *retryable,
+        XaimError::Http(error) => crate::errors::retryable_transport_error(error),
         XaimError::Model(message) => {
-            message.starts_with("工具 SSE 读取失败")
+            message.starts_with("Responses SSE 连接在结束事件前关闭")
+                || message.starts_with("工具 SSE 读取失败")
                 || message.starts_with("工具 SSE 响应无效：连接在结束标记前关闭")
         }
         _ => false,
     }
+}
+
+fn retry_delay_for_error(error: &XaimError, attempt: u32) -> Duration {
+    let fallback = model_retry_delay(attempt);
+    if let XaimError::ProviderFailure {
+        retry_after_ms: Some(delay),
+        ..
+    } = error
+    {
+        return fallback.max(Duration::from_millis(*delay));
+    }
+    fallback
 }
 
 fn model_retry_delay(attempt: u32) -> Duration {
@@ -1726,6 +1937,302 @@ mod tests {
         assert!(!retryable_model_error(&XaimError::Model(
             "工具 SSE 响应无效：UTF-8 无效，未执行本轮工具".into()
         )));
+    }
+
+    #[tokio::test]
+    async fn responses_server_failure_retries_and_charges_usage_without_running_failed_tools() {
+        let mut server = mockito::Server::new_async().await;
+        let requests = Arc::new(Mutex::new(vec![]));
+        let received = requests.clone();
+        let mock = server.mock("POST", "/responses")
+            .with_header("content-type", "text/event-stream")
+            .with_body_from_request(move |request| {
+                let mut requests = received.lock().unwrap();
+                requests.push(serde_json::from_slice::<Value>(request.body().unwrap()).unwrap());
+                let round = requests.len();
+                let response = if round <= 2 {
+                    json!({"status":if round == 1 {"failed"} else {"completed"},
+                        "error":if round == 1 {json!({"code":"server_error","message":"private secret reasoning"})} else {Value::Null},
+                        "usage":{"input_tokens":12,"output_tokens":19},
+                        "output":[{"type":"function_call","status":"completed","call_id":format!("c{round}"),
+                            "name":"create_file","arguments":json!({"path":if round == 1 {"partial.txt"} else {"valid.txt"},"content":"ready"}).to_string()}]})
+                } else {
+                    json!({"status":"completed","usage":{"input_tokens":10,"output_tokens":5},
+                        "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Completed"}]}]})
+                };
+                format!("data: {}\n\n", json!({"type":format!("response.{}",response["status"].as_str().unwrap()),"response":response})).into_bytes()
+            }).expect(3).create_async().await;
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let project =
+            store::project::insert_project(&store.conn(), root.path().to_str().unwrap(), "test")
+                .unwrap();
+        let agent = Orchestrator::with_sink(
+            store.clone(),
+            OrchestratorConfig::default(),
+            Arc::new(Sink::default()),
+            Arc::new(
+                crate::model::openai::OpenAiProvider::new(server.url(), "local-test-key".into())
+                    .with_protocol(crate::types::ApiProtocol::Responses),
+            ),
+        );
+        let task = agent.run_task(project, "Create file".into()).await.unwrap();
+        mock.assert_async().await;
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(!requests[1].to_string().contains("partial.txt"));
+        assert!(requests[1].to_string().contains("单次写入最多 4000 字符"));
+        drop(requests);
+        let diagnostics: Vec<Value> = store::task::list_steps(&store.conn(), task)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.step_type == "diagnostic")
+            .map(|s| serde_json::from_str(&s.content).unwrap())
+            .collect();
+        let usage = diagnostics
+            .iter()
+            .find(|v| v["kind"] == "failedModelUsage")
+            .unwrap();
+        assert_eq!(usage["data"]["chargedInput"], 12);
+        assert_eq!(usage["data"]["chargedOutput"], 19);
+        assert_eq!(usage["data"]["outputEstimated"], false);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|v| v["kind"] == "modelRetry")
+                .count(),
+            1
+        );
+        assert!(!serde_json::to_string(&diagnostics)
+            .unwrap()
+            .contains("private secret reasoning"));
+        agent.confirm_task(task).await.unwrap();
+        assert!(!root.path().join("partial.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("valid.txt")).unwrap(),
+            "ready"
+        );
+    }
+
+    #[test]
+    fn provider_retry_advice_never_retries_permanent_failures_or_shortens_server_delay() {
+        let error = XaimError::ProviderFailure {
+            code: "rate_limit_exceeded",
+            message: "limit",
+            retryable: true,
+            retry_after_ms: Some(11000),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        assert!(retryable_model_error(&error));
+        assert_eq!(retry_delay_for_error(&error, 1), Duration::from_secs(11));
+        let error = XaimError::ProviderFailure {
+            code: "insufficient_quota",
+            message: "quota",
+            retryable: false,
+            retry_after_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+        };
+        assert!(!retryable_model_error(&error));
+    }
+
+    #[tokio::test]
+    async fn responses_unknown_failures_retry_once_but_quota_and_policy_stop_immediately() {
+        for (code, expected) in [
+            (None, 2),
+            (Some("insufficient_quota"), 1),
+            (Some("content_policy_violation"), 1),
+        ] {
+            let mut server = mockito::Server::new_async().await;
+            let body = format!(
+                "data: {}\n\n",
+                json!({"type":"response.failed",
+                "response":{"status":"failed","error":{"code":code,"message":"private error body"}}})
+            );
+            let mock = server
+                .mock("POST", "/responses")
+                .with_header("content-type", "text/event-stream")
+                .with_body(body)
+                .expect(expected)
+                .create_async()
+                .await;
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_in_memory().unwrap());
+            let project = store::project::insert_project(
+                &store.conn(),
+                root.path().to_str().unwrap(),
+                "test",
+            )
+            .unwrap();
+            let agent = Orchestrator::with_sink(
+                store.clone(),
+                OrchestratorConfig::default(),
+                Arc::new(Sink::default()),
+                Arc::new(
+                    crate::model::openai::OpenAiProvider::new(
+                        server.url(),
+                        "local-test-key".into(),
+                    )
+                    .with_protocol(crate::types::ApiProtocol::Responses),
+                ),
+            );
+            assert!(agent.run_task(project, "Create file".into()).await.is_err());
+            mock.assert_async().await;
+            let conn = store.conn();
+            let task = conn
+                .query_row("SELECT max(id) FROM tasks", [], |r| r.get::<_, i64>(0))
+                .unwrap();
+            let diagnostics: Vec<Value> = store::task::list_steps(&conn, task)
+                .unwrap()
+                .into_iter()
+                .filter(|s| s.step_type == "diagnostic")
+                .map(|s| serde_json::from_str(&s.content).unwrap())
+                .collect();
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .filter(|v| v["kind"] == "modelRetry")
+                    .count(),
+                expected - 1
+            );
+            let failures: Vec<_> = diagnostics
+                .iter()
+                .filter(|v| v["kind"] == "failedModelUsage")
+                .collect();
+            assert_eq!(failures.len(), expected);
+            assert!(failures.iter().all(|v| v["data"]["outputEstimated"] == true
+                && v["data"]["chargedOutput"].as_u64().unwrap() > 0));
+            assert!(!serde_json::to_string(&diagnostics)
+                .unwrap()
+                .contains("private error body"));
+        }
+    }
+
+    #[tokio::test]
+    async fn decoded_body_disconnect_retries_without_executing_partial_tools() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let packet = |delta: Value, finish: &str| {
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                json!({"choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+            )
+        };
+        let tool_delta = |id: &str, path: &str| {
+            json!({
+                "content":"working",
+                "tool_calls":[{"index":0,"id":id,"type":"function",
+                    "function":{"name":"create_file","arguments":json!({"path":path,"content":"ready"}).to_string()}}]
+            })
+        };
+        // The first response contains a whole tool delta, but its HTTP body
+        // is cut short. A retry must discard that delta, even with finish_reason.
+        let broken = packet(tool_delta("partial", "partial.txt"), "tool_calls")
+            .replace("data: [DONE]\n\n", "");
+        let bodies = [
+            broken,
+            packet(tool_delta("valid", "valid.txt"), "tool_calls"),
+            packet(json!({"content":"Completed"}), "stop"),
+        ];
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (index, body) in bodies.into_iter().enumerate() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut received = Vec::new();
+                let (header_end, length) = loop {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0 && received.len() < 1_048_576);
+                    received.extend_from_slice(&chunk[..count]);
+                    if let Some(end) = received.windows(4).position(|v| v == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&received[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (key, value) = line.split_once(':')?;
+                                key.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        break (end + 4, length);
+                    }
+                };
+                while received.len() < header_end + length {
+                    let mut chunk = [0; 4096];
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    assert!(count > 0);
+                    received.extend_from_slice(&chunk[..count]);
+                }
+                requests.push(
+                    serde_json::from_slice::<Value>(&received[header_end..header_end + length])
+                        .unwrap(),
+                );
+                let declared_length = body.len() + if index == 0 { 100 } else { 0 };
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n{body}"
+                ).as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            requests
+        });
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let project =
+            store::project::insert_project(&store.conn(), root.path().to_str().unwrap(), "test")
+                .unwrap();
+        let agent = Orchestrator::with_sink(
+            store.clone(),
+            OrchestratorConfig::default(),
+            Arc::new(Sink::default()),
+            Arc::new(crate::model::openai::OpenAiProvider::new(
+                format!("http://{address}"),
+                "local-test-key".into(),
+            )),
+        );
+        let task = tokio::time::timeout(
+            Duration::from_secs(15),
+            agent.run_task(project, "Create file".into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["model"], requests[1]["model"]);
+        assert_eq!(requests[0]["stream"], requests[1]["stream"]);
+        assert!(requests.iter().all(|r| r["stream"] == true));
+        let diagnostics: Vec<Value> = store::task::list_steps(&store.conn(), task)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.step_type == "diagnostic")
+            .map(|s| serde_json::from_str(&s.content).unwrap())
+            .collect();
+        let failure = diagnostics
+            .iter()
+            .find(|d| d["kind"] == "modelRequestFailed")
+            .unwrap();
+        assert_eq!(failure["data"]["transport"]["decode"], true);
+        assert_eq!(failure["data"]["transport"]["body"], false);
+        assert_eq!(failure["data"]["retryable"], true);
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d["kind"] == "modelRetry")
+                .count(),
+            1
+        );
+        assert!(!serde_json::to_string(&diagnostics)
+            .unwrap()
+            .contains("local-test-key"));
+        agent.confirm_task(task).await.unwrap();
+        assert!(!root.path().join("partial.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("valid.txt")).unwrap(),
+            "ready"
+        );
     }
 
     #[tokio::test]
@@ -1898,8 +2405,8 @@ mod tests {
             .run_task(project, "Create file".into())
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("SSE"));
-        assert_eq!(provider.requests.lock().unwrap().len(), 5);
+        assert!(matches!(error, XaimError::BudgetExhausted(_)));
+        assert_eq!(provider.requests.lock().unwrap().len(), 4);
         let task = store::task::list_tasks(&store.conn(), project, 1)
             .unwrap()
             .remove(0);
@@ -2079,6 +2586,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(provider.requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn reused_responses_ids_remain_paired_with_tool_results() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "hello").unwrap();
+        let mut rounds = vec![
+            call("call_1", "list_dir", json!({"path":"."})),
+            call("call_1", "read_file", json!({"path":"a.txt"})),
+        ];
+        for round in &mut rounds {
+            let c = &round.message.tool_calls[0];
+            round.message.responses_output = vec![
+                json!({"type":"function_call","id":"fc_reused","call_id":c.id,"name":c.function.name,"arguments":c.function.arguments}),
+            ];
+        }
+        rounds.push(done());
+        let (agent, _, id, provider, _) = setup(root.path(), rounds, LoopConfig::default());
+        agent.run_task(id, "Explain project".into()).await.unwrap();
+        let reqs = provider.requests.lock().unwrap();
+        let last = &reqs[2].messages;
+        let calls: Vec<_> = last.iter().filter(|m| !m.tool_calls.is_empty()).collect();
+        assert_ne!(calls[0].tool_calls[0].id, calls[1].tool_calls[0].id);
+        for message in calls {
+            let id = &message.tool_calls[0].id;
+            assert_eq!(message.responses_output[0]["call_id"], *id);
+            assert!(last
+                .iter()
+                .any(|m| m.role == "tool" && m.tool_call_id.as_ref() == Some(id)));
+        }
     }
 
     #[tokio::test]
@@ -4294,6 +4831,156 @@ mod tests {
         assert_eq!(report["verificationStatus"], "unavailable");
         assert_eq!(report["verification"][0]["status"], "unavailable");
         assert_eq!(report["phase"], "partial");
+    }
+
+    #[tokio::test]
+    async fn finishing_reserves_state_submission_after_repeated_check_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, store, id, provider, sink) = setup(
+            root.path(),
+            vec![
+                call(
+                    "write",
+                    "create_file",
+                    json!({"path":"page.html","content":"<title>Done</title>"}),
+                ),
+                call("read", "read_file", json!({"path":"page.html"})),
+                call("check-again", "run_verify", json!({})),
+                call(
+                    "finish",
+                    "update_task_state",
+                    json!({"completed":["Created page"],"pending":[],"ready_for_review":true,"summary":"Created; checks unavailable"}),
+                ),
+            ],
+            LoopConfig {
+                max_turns: 4,
+                ..Default::default()
+            },
+        );
+        let task = agent.run_task(id, "Create page".into()).await.unwrap();
+        let reqs = provider.requests.lock().unwrap();
+        assert_eq!(reqs.len(), 4);
+        assert!(reqs[1]
+            .tools
+            .iter()
+            .all(|t| t["function"]["name"] != "run_verify"));
+        assert!(reqs[3].tools.iter().all(|t| matches!(
+            t["function"]["name"].as_str(),
+            Some("update_task_state" | "report_blocked")
+        )));
+        assert_eq!(
+            sink.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, XaimEvent::Verify { .. }))
+                .count(),
+            1
+        );
+        let report: Value = serde_json::from_str(
+            &store::cache::get_cache(&store.conn(), &format!("task:{task}:report"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["completionConfirmed"], true);
+        assert_eq!(report["verificationStatus"], "unavailable");
+        assert!(!root.path().join("page.html").exists());
+    }
+
+    #[tokio::test]
+    async fn last_submission_with_pending_work_stays_partial() {
+        let root = tempfile::tempdir().unwrap();
+        let (agent, store, id, provider, _) = setup(
+            root.path(),
+            vec![
+                call(
+                    "write",
+                    "create_file",
+                    json!({"path":"page.html","content":"<title>Partial</title>"}),
+                ),
+                call(
+                    "state",
+                    "update_task_state",
+                    json!({"completed":["Created skeleton"],"pending":["Implement behavior"],"ready_for_review":false,"summary":"Still incomplete"}),
+                ),
+            ],
+            LoopConfig {
+                max_turns: 2,
+                ..Default::default()
+            },
+        );
+        assert!(agent
+            .run_task(id, "Create working page".into())
+            .await
+            .is_err());
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        let conn = store.conn();
+        let task: i64 = conn
+            .query_row("SELECT max(id) FROM tasks", [], |r| r.get(0))
+            .unwrap();
+        let report: Value = serde_json::from_str(
+            &store::cache::get_cache(&conn, &format!("task:{task}:report"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["completionConfirmed"], false);
+        assert_eq!(report["phase"], "partial");
+        let snapshot: Value = serde_json::from_str(
+            &store::cache::get_cache(&conn, &format!("task:{task}:snapshot"))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(snapshot["terminalSubmissionSent"], true);
+        assert_eq!(snapshot["terminalSubmissionConfirmed"], true);
+        assert_eq!(snapshot["terminalSubmissionAttempts"], 1);
+        assert!(!root.path().join("page.html").exists());
+    }
+
+    #[tokio::test]
+    async fn standalone_javascript_is_syntax_checked_without_executing_it() {
+        for (source, expected) in [
+            (
+                "require('fs').writeFileSync('SHOULD_NOT_EXIST', 'oops');",
+                "passed",
+            ),
+            ("const broken = ;", "failed"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (agent, store, id, _, sink) = setup(
+                root.path(),
+                vec![
+                    call(
+                        "write",
+                        "create_file",
+                        json!({"path":"build.js","content":source}),
+                    ),
+                    done(),
+                ],
+                LoopConfig {
+                    allow_verification: true,
+                    ..Default::default()
+                },
+            );
+            let _ = agent.run_task(id, "Create script".into()).await;
+            assert!(sink.0.lock().unwrap().iter().any(
+                |e| matches!(e,XaimEvent::Verify {status:Some(status),..} if status==expected)
+            ));
+            assert!(!root.path().join("SHOULD_NOT_EXIST").exists());
+            let conn = store.conn();
+            let task: i64 = conn
+                .query_row("SELECT max(id) FROM tasks", [], |r| r.get(0))
+                .unwrap();
+            let report: Value = serde_json::from_str(
+                &store::cache::get_cache(&conn, &format!("task:{task}:report"))
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(report["verification"][0]["status"], expected);
+        }
     }
 
     #[tokio::test]
